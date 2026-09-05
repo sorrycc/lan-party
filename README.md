@@ -30,7 +30,12 @@ Open one of these on every machine:
 
 **PLAY SOLO** runs the selected game without a room, if the game allows a single player; the game's options appear under the game list as **SOLO OPTIONS** and apply to every solo restart.
 
-Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock and the Kart wire format).
+**Phones and tablets.** The lobby shows the join link as a QR code: scan it with the phone's camera and the start screen opens with the room
+code filled in. Frostline Kart and Crossy Farm Car have touch controls. For the best experience on an iPhone or iPad, open the LAN address in
+Safari once and use Share → **Add to Home Screen**: launched from there the game runs full screen in landscape with no browser bar and no
+back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) The phone's ring/silent switch mutes the game's sound, as it does all web audio.
+
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart wire format and the QR encoder). `npm run icons` redraws the home-screen icons.
 `FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
@@ -44,9 +49,11 @@ client/
   index.html      the shell: menu, lobby, and an empty #stage the game mounts into
   app.js          shell logic: picks the game, runs the lobby, drives the game lifecycle
   style.css       shell styles (games may rely on the body font and .btn)
+  manifest.webmanifest, icons/   home-screen install (icons are drawn by scripts/make-icons.js)
   core/           shared by shell and games
     net.js        WebSocket client          audio.js   WebAudio synth (unlocked once by the shell)
-    input.js      keyboard state            loop.js    rAF loop + fixed-step helper
+    input.js      keyboard state            touch.js   multi-touch pad and hold buttons (Pointer Events)
+    qr.js         QR encoder for the lobby's join link    loop.js    rAF loop + fixed-step helper
     interp.js     snapshot buffers + the per-sender clock (sender timestamps, jitter, adaptive delay)
     ticker.js     a worker-driven timer that keeps ticking in a hidden tab    math.js    clamp / lerp / seeded rng
     ui.js         toasts, escaping, stylesheet loading   prefs.js  name / colour / last game
@@ -60,7 +67,8 @@ client/
                   motion.js (walking and driving, shared by host and prediction), sim.js (the host's simulation),
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
     crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
-test/             node --test: the snapshot clock and the Kart wire format
+test/             node --test: the snapshot clock, the Kart wire format and the QR encoder
+scripts/          make-icons.js draws client/icons/*.png with no dependencies
 ```
 
 The server never simulates a game. It keeps the lobby roster and relays in-game messages between the players in a room.
@@ -127,7 +135,15 @@ Rules of the road:
 Arrows / WASD to drive, M to toggle sound, R for the next race (host), Esc to leave. Hold the throttle as the countdown hits GO for a rocket start.
 F3 (or I) opens a stats panel: frame time breakdown, message rates, every sender's snapshot spacing and jitter, and how many corrections the remote karts
 needed; the top of the screen always shows FPS and, on a client, how old the host's data is, the jitter and the host's frame rate. L cycles the detail
-level (auto, high, medium, low); auto lowers the pixel ratio by itself when the frame rate stays under 40.
+level (auto, high, medium, low): each step lowers the pixel ratio, medium thins the pines and the snow, low also turns the point lights off; auto
+lowers the level by itself when the frame rate stays under 40. Phones and tablets start on medium, without antialiasing and without the HUD blur.
+
+On a touch screen (iPad, iPhone, any tablet) the kart accelerates by itself and the left part of the screen is a steering pad: touch anywhere
+there and drag left or right; steering is proportional to how far the finger moved from where it landed, and centres when it lifts. **BRAKE**
+and **ITEM** sit under the right thumb. ITEM works like the key: touch to deploy, lift to throw; drag it downward (or hold BRAKE) before lifting
+to throw the other way, and the arrow on the button shows which way the throw will go. A finger resting on the pad as the countdown hits GO is
+the rocket start. The ☰ button at the top opens a card with sound, detail level and, for the host, restart and leave. A phone held upright is
+asked to rotate; the HUD is laid out for landscape and everything is a size smaller on a phone-height screen.
 
 Space (or Enter / E) works the item slot. Shells, bananas and bob-ombs are carried: press to deploy one so it trails behind the kart
 (a triple orbits it) where it blocks incoming shells, release to throw it. Hold the brake (↓ / S) while releasing to throw the other way:

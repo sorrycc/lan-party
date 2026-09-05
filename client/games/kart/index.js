@@ -17,11 +17,15 @@
    steady worker timer and status at 5 Hz or on change, each stamped with the sender's clock. Everyone else's karts and
    the host's hazards are dead-reckoned to the present from those snapshots with the same kinematics (kartMotion), and
    the correction a fresh snapshot brings is hidden in a decaying visual offset. A client shows a ghost of its own throw
-   until the host's copy arrives. Hits are decided by the victim's machine. F3 / I shows frame and network stats. */
+   until the host's copy arrives. Hits are decided by the victim's machine. F3 / I shows frame and network stats.
+
+   Touch screens (core/touch.js): the left side is a steering pad, gas is automatic, BRAKE and ITEM sit under the right thumb,
+   ☰ opens a menu card, a phone held upright is asked to rotate, and rendering starts a detail tier lower. */
 import * as THREE from 'three';
 import { clamp, lerp, wrapAngle, ordinal, makeRng } from '../../core/math.js';
 import { createToasts, esc, fmtTime, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
+import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop, fixedStep } from '../../core/loop.js';
 import { nowSec, pushSnap, sampleSnaps, createSnapClock } from '../../core/interp.js';
 import { createTicker } from '../../core/ticker.js';
@@ -47,7 +51,7 @@ const HUD = `
 <div id="rightcol" class="hud"><div id="lapbox" class="panel"><div id="cupline" hidden></div><div id="lap">LAP <b>1</b>/3</div><div id="timer">0:00.00</div></div>
 <div id="coinbox" class="panel"><i></i><b id="coinN">0</b></div></div>
 <div id="pos" class="hud">8<sup>th</sup></div>
-<div id="speedo" class="hud"><canvas id="speedCanvas" width="260" height="150" style="width:260px;height:150px"></canvas></div>
+<div id="speedo" class="hud"><canvas id="speedCanvas" width="260" height="150"></canvas></div>
 <div id="map" class="hud panel"><canvas id="mapCanvas" width="380" height="380"></canvas></div>
 <div id="toasts" class="hud"></div>
 <div id="count" class="hud"></div>
@@ -59,6 +63,12 @@ const HUD = `
 <div id="netwait" class="hud" hidden>WAITING FOR THE HOST…</div>
 <div id="flash"></div>
 <div id="ink"></div>
+<div id="pad" class="ctl"><div class="ring"><div class="knob"></div></div><div class="lbl">◀ DRAG TO STEER ▶</div></div>
+<div id="btnBrake" class="ctl btn-ctl">BRAKE</div>
+<div id="btnItem" class="ctl btn-ctl"><b>ITEM</b><canvas id="btnItemCanvas" width="96" height="96"></canvas><small>▲</small></div>
+<div id="btnMenu" class="ctl">☰</div>
+<div id="pause" class="overlay"><div class="card"><h1>MENU</h1><div id="pauseBtns"></div></div></div>
+<div id="rotate" class="overlay"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>FROSTLINE KART PLAYS IN LANDSCAPE</small></div></div>
 <div id="results"><div class="card"><h1 id="resTitle">FINISH!</h1><h2 id="resSub">FINAL STANDINGS</h2>
   <div class="tables"><div><table id="resTable"></table><div id="resLaps" class="laps"></div></div><div id="cupBox" hidden><h3 id="cupSub">CUP STANDINGS</h3><table id="cupTable"></table></div></div>
   <div class="foot" id="resFoot"></div><div id="resNext" class="next"></div></div></div>`;
@@ -76,10 +86,13 @@ const unloadCss = await loadStylesheet('/games/kart/kart.css');
 mount.innerHTML = HUD;
 const $ = id => mount.querySelector('#' + id);
 const { rnd, rr } = makeRng(1337);
+const touch = isCoarse();                        // phones and tablets: on-screen controls, automatic gas, lighter rendering
+mount.classList.toggle('touch', touch);
+if (touch) $('rightcol').appendChild($('map'));  // the minimap stacks under the lap box, freeing both bottom corners for the thumbs
 
 /* ============================================================ renderer / scene */
 const canvas = $('c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: !touch, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -88,6 +101,25 @@ const FOG_COLOR = new THREE.Color(0x3a4370);
 scene.fog = new THREE.Fog(FOG_COLOR, 160, 820);
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.3, 3200);
 const onResize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }; addEventListener('resize', onResize);
+
+/* detail ladder: pixel ratio, point lights, pine and snow counts. Touch devices start on MEDIUM; auto mode steps down when the
+   frame rate stays low mid-race (see the frame loop); L (or the touch menu) cycles auto -> HIGH -> MEDIUM -> LOW -> auto, remembered per browser. */
+const QUALITY = [{ name: 'HIGH', pr: 2, lights: true, pines: 1, snow: 1 }, { name: 'MEDIUM', pr: 1.25, lights: true, pines: 0.6, snow: 0.6 }, { name: 'LOW', pr: 0.8, lights: false, pines: 0.3, snow: 0.3 }];
+const defaultQuality = touch ? 1 : 0;
+let quality = defaultQuality, autoQuality = true, lowFpsT = 0, fps = 60, pineIm = null, snowRef = null;
+{ let saved = null; try { saved = localStorage.getItem('lan_kart_quality'); } catch {} if (saved !== null && QUALITY[+saved]) { quality = +saved; autoQuality = false; } }
+function applyQuality() {
+  const q = QUALITY[quality]; renderer.setPixelRatio(Math.min(devicePixelRatio || 1, q.pr)); renderer.setSize(innerWidth, innerHeight);
+  scene.traverse(o => { if (o.isPointLight) o.visible = q.lights; });
+  if (pineIm) pineIm.count = Math.max(1, Math.round(pineIm.userData.total * q.pines));
+  if (snowRef) snowRef.geo.setDrawRange(0, Math.round(snowRef.n * q.snow));
+}
+function setQuality(i, manual) { quality = clamp(i | 0, 0, QUALITY.length - 1); if (manual) { autoQuality = false; try { localStorage.setItem('lan_kart_quality', String(quality)); } catch {} } applyQuality(); }
+function cycleQuality() {
+  if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; try { localStorage.removeItem('lan_kart_quality'); } catch {} setQuality(defaultQuality); }
+  toast((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 'blue');
+}
+const qualityLabel = () => 'DETAIL: ' + (autoQuality ? 'AUTO' : QUALITY[quality].name);
 
 scene.add(new THREE.HemisphereLight(0x8ea6ff, 0x4b5482, 1.15));
 scene.add(new THREE.AmbientLight(0x7080b0, 0.35));
@@ -404,7 +436,7 @@ function buildWorld(v) {
     }
     const im = new THREE.InstancedMesh(pineGeo, vcMat(), spots.length);
     spots.forEach(([x, z], i) => { const s = rr(0.7, 1.6); im.setMatrixAt(i, M4(x, terrainH(x, z) - 0.2, z, rnd() * 6.28, s, s * rr(0.9, 1.3), s)); });
-    add(im);
+    pineIm = im; im.userData.total = spots.length; add(im);
   }
   /* ---- snowmen */
   {
@@ -522,8 +554,9 @@ const snow = { n: 2200, geo: new THREE.BufferGeometry(), range: 90 };
 {
   const p = new Float32Array(snow.n * 3); for (let i = 0; i < snow.n; i++) { p[i*3] = rr(-snow.range, snow.range); p[i*3+1] = rr(0, 60); p[i*3+2] = rr(-snow.range, snow.range); }
   snow.geo.setAttribute('position', new THREE.BufferAttribute(p, 3)); snow.pts = new THREE.Points(snow.geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.28, transparent: true, opacity: 0.8 })); snow.pts.frustumCulled = false; scene.add(snow.pts);
-  snow.vel = new Float32Array(snow.n).map(() => rr(3, 7));
+  snow.vel = new Float32Array(snow.n).map(() => rr(3, 7)); snowRef = snow;
 }
+applyQuality();
 
 /* particle pool (cubes) */
 const PMAX = 600;
@@ -1335,7 +1368,7 @@ function resetRace() {
   for (const b of itemBoxes) { b.active = true; b.g.visible = true; b.hideUntil = 0; }
   for (const c of coins) { c.active = true; c.hideUntil = 0; }
   Object.assign(race, { state: 'countdown', t: 0, time: 0, stage: 0, shake: 0, placeCand: active.length, placeCandT: 0, shownPlace: active.length, resultsT: 0, humanScore: 0, zapCd: 0 });
-  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length); input.pressAt = -1; input.up = input.down = input.left = input.right = false;
+  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length); input.pressAt = -1; input.padAt = -1; input.up = input.down = input.left = input.right = false; tc.releaseAll();
   music.stop(); music.setTempo(1);
   karts.forEach(k => { k.startDelay = k.kind === 'ai' ? rr(0.05, 0.45) : 0; });
   camState.pos.copy(trackPoint(L - 40, 0)).add(new THREE.Vector3(0, 8, 0)); camState.init = true;
@@ -1363,6 +1396,7 @@ function drawItemSlot(type, spinning = false, n = 1, ring = 0) {
   if (ring > 0) { c.strokeStyle = '#ffd54a'; c.lineWidth = 7; c.lineCap = 'round'; c.beginPath(); c.arc(84, 84, 78, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ring); c.stroke(); } // time left on a timed item
   if (type && !spinning && n > 1) { c.fillStyle = '#ffd54a'; c.strokeStyle = '#1a1e30'; c.lineWidth = 6; c.font = 'italic 900 44px Trebuchet MS, Arial'; c.textAlign = 'right'; c.textBaseline = 'alphabetic'; c.strokeText('×' + n, 160, 160); c.fillText('×' + n, 160, 160); }
   $('itemLabel').textContent = type && !spinning ? ITEM_DEF[type].label + (n > 1 ? ' ×' + n : '') : (spinning ? '???' : '');
+  if (btnItemCtx) { btnItemCtx.clearRect(0, 0, 96, 96); if (type && !spinning) drawItemIcon(btnItemCtx, type, 48, 48, 32); } // the touch ITEM button shows the same icon
 }
 /* coins: instanced, spinning, hidden while collected */
 const coinM = new THREE.Matrix4(), coinQ = new THREE.Quaternion(), coinV = new THREE.Vector3(), coinS = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
@@ -1407,10 +1441,11 @@ function drawStandings() {
 /* Space / Enter / E: press deploys or uses the item, release throws a deployed one; the brake key flips the throw direction.
    Shift is left free for a future drift key. */
 const canAct = () => race.state === 'race' && me.kind === 'local' && !me.finished;
-const throwDir = k => { const def = k.item === 'banana' ? -1 : 1; return input.down ? -def : def; };
+/* +1 throws forward, -1 backward; bananas default backward. `flip` is the brake key, the BRAKE button, or ITEM dragged down */
+const throwDir = (k, flip) => { const def = k.item === 'banana' ? -1 : 1; return flip ? -def : def; };
 const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'item', Enter: 'item', KeyE: 'item' }, {
   onDown: (name, e, wasHeld) => { audio.init(); if (name === 'up' && !wasHeld) input.pressAt = race.t; if (name === 'item' && !wasHeld && canAct()) itemPress(me); },
-  onUp: name => { if (name === 'up') input.pressAt = -1; if (name === 'item' && canAct()) itemRelease(me, throwDir(me)); },
+  onUp: name => { if (name === 'up') input.pressAt = -1; if (name === 'item' && canAct()) itemRelease(me, throwDir(me, input.down)); },
   onKey: e => {
     audio.init();
     if (e.code === 'KeyR') restartKey();
@@ -1420,7 +1455,32 @@ const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'do
     if (e.code === 'KeyL') cycleQuality();
   },
 });
-const input = kb.held; input.pressAt = -1;
+const input = kb.held; input.pressAt = -1; input.padAt = -1;
+/* touch: the left side of the screen is a steering pad, the kart accelerates by itself, and BRAKE and ITEM sit under the right thumb.
+   ITEM works like the key: touch to deploy, lift to throw; drag it down (or hold BRAKE) before lifting to throw the other way.
+   A finger resting on the pad as the countdown hits GO is the rocket start. */
+const tc = createTouch();
+const ITEM_FLIP_PX = 36;
+const padS = touch ? tc.pad($('pad'), { range: 80, onDown: () => { audio.init(); input.padAt = race.t; }, onUp: () => { input.padAt = -1; } }) : null;
+const brakeS = touch ? tc.button($('btnBrake'), { onDown: () => audio.init() }) : null;
+const itemS = touch ? tc.button($('btnItem'), { onDown: () => { audio.init(); if (canAct()) itemPress(me); }, onUp: s => { if (canAct()) itemRelease(me, throwDir(me, brakeS.held || s.dy > ITEM_FLIP_PX)); } }) : null;
+const itemFlip = () => !!(touch && (brakeS.held || (itemS.held && itemS.dy > ITEM_FLIP_PX)));
+/* what the local kart is told to do this step: keyboard, touch, or both at once */
+function readControls(k) {
+  let th = input.up ? 1 : input.down ? -1 : 0, st = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+  if (touch) { if (brakeS.held) th = -1; else if (!input.down) th = 1; if (!st && padS.held) st = -padS.x; }
+  k.throttle = th; k.steer = clamp(st, -1, 1);
+}
+const rocketHeld = () => (input.up && input.pressAt >= 0 && race.t - input.pressAt < 1.0) || (touch && padS.held && input.padAt >= 0 && race.t - input.padAt < 1.0);
+const btnItemEl = touch ? $('btnItem') : null, btnItemCtx = touch ? $('btnItemCanvas').getContext('2d') : null, btnItemArrow = touch ? btnItemEl.querySelector('small') : null;
+let touchHudKey = '';
+function drawTouchHud() {
+  if (!touch) return;
+  const has = !!me.item, back = itemFlip(), dir = has ? throwDir(me, back) : 0, key = `${has}${has && HOLDABLE(me.item)}${back}${dir}`;
+  if (key === touchHudKey) return; touchHudKey = key;
+  btnItemEl.classList.toggle('has', has); btnItemEl.classList.toggle('arm', has && HOLDABLE(me.item)); btnItemEl.classList.toggle('back', has && back);
+  btnItemArrow.textContent = dir > 0 ? '▲' : '▼';
+}
 
 /* ============================================================ camera */
 const camState = { pos: new THREE.Vector3(0, 10, -30), look: new THREE.Vector3(), fov: 70, init: false }, camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
@@ -1451,20 +1511,9 @@ function updateAmbient(dt) {
   smokeT -= dt; if (smokeT <= 0) { smokeT = 0.12; for (const c of chimneys) spawnP(c.x + rr(-0.3, 0.3), c.y, c.z + rr(-0.3, 0.3), rr(-0.4, 0.4), rr(1.5, 2.5), rr(-0.4, 0.4), rr(1.5, 2.5), 0xb8c0d0, 2.2, -0.5); }
 }
 
-/* ============================================================ stats + detail level */
-const QUALITY = [{ name: 'HIGH', pr: 2 }, { name: 'MEDIUM', pr: 1 }, { name: 'LOW', pr: 0.7 }];
-let quality = 0, autoQuality = true, lowFpsT = 0, showStats = false, fps = 60;
+/* ============================================================ stats (the detail ladder itself sits next to the renderer) */
+let showStats = false;
 const timing = { frame: 16, sim: 0, hud: 0, render: 0 };
-function setQuality(i, manual) {
-  quality = clamp(i | 0, 0, QUALITY.length - 1); if (manual) { autoQuality = false; try { localStorage.setItem('lan_kart_quality', String(quality)); } catch {} }
-  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, QUALITY[quality].pr)); renderer.setSize(innerWidth, innerHeight);
-}
-{ let saved = null; try { saved = localStorage.getItem('lan_kart_quality'); } catch {} if (saved !== null && QUALITY[+saved]) setQuality(+saved, true); }
-/* L: auto -> high -> medium -> low -> auto */
-function cycleQuality() {
-  if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; setQuality(0); try { localStorage.removeItem('lan_kart_quality'); } catch {} }
-  toast((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 'blue');
-}
 const cornerEl = $('corner'), statsEl = $('stats'), waitEl = $('netwait');
 const netStats = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, hostFps: 0, corr: 0, corrM: 0, snaps: 0, frozen: 0, ghosts: 0, lead: 0, lastT: 0 };
 /* the corner line always; the panel (F3 / I) with the frame breakdown, message rates, every sender's clock and the remote-object corrections */
@@ -1538,7 +1587,7 @@ function simStep(dt) {
       countEl.className = 'hud'; void countEl.offsetWidth;
       if (stage < 4) { countEl.textContent = 4 - stage; countEl.className = 'hud show'; sfx.count(); }
       else { countEl.textContent = 'GO!'; countEl.className = 'hud show go'; sfx.go(); race.state = 'race'; race.time = 0; $('kartcard').classList.remove('show'); music.start();
-        if (me.kind === 'local' && input.up && input.pressAt >= 0 && race.t - input.pressAt < 1.0) { me.boost = 1.6; toast('ROCKET START!', 'orange'); sfx.boost(); }
+        if (me.kind === 'local' && rocketHeld()) { me.boost = 1.6; toast('ROCKET START!', 'orange'); sfx.boost(); }
         for (const k of active) if (k.kind === 'ai' && owned(k) && Math.random() < 0.45) k.boost = rr(0.6, 1.1); } }
   }
   if (race.state === 'race' || race.state === 'finished') race.time += dt;
@@ -1558,7 +1607,7 @@ function simStep(dt) {
   for (const k of active) {
     if (owned(k)) {
       if (k.bullet > 0) bulletControl(k);
-      else if (k.kind === 'local' && !k.finished) { k.throttle = input.up ? 1 : input.down ? -1 : 0; k.steer = (input.left ? 1 : 0) - (input.right ? 1 : 0); }
+      else if (k.kind === 'local' && !k.finished) readControls(k);
       else if (moving) aiControl(k, dt);
       if (moving && k.startDelay > 0) k.startDelay -= dt;
       kartStep(k, dt, moving && k.startDelay <= 0);
@@ -1585,7 +1634,7 @@ function present(dt) {
 function hudRefresh() {
   const lapTxt = `LAP <b>${clamp(me.lap, 1, race.laps)}</b>/${race.laps}`; if (lapTxt !== lapShown) { lapShown = lapTxt; lapEl.innerHTML = lapTxt; }
   timerEl.textContent = fmtT(race.time);
-  drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(); drawCoinHud();
+  drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(); drawCoinHud(); drawTouchHud();
   if (me.item && ITEM_DEF[me.item].timed && me.timed > 0) drawItemSlot(me.item, false, 1, me.timed / ITEM_DEF[me.item].timed);
   const ink = me.ink > 0 ? clamp(me.ink / 1.5, 0, 1) : 0; if (ink !== inkShown) { inkShown = ink; inkEl.style.opacity = ink; }
   const wrong = me.wrongWay > 0.8 && race.state === 'race'; if (wrong !== wrongShown) { wrongShown = wrong; wrongEl.style.display = wrong ? 'block' : 'none'; }
@@ -1625,6 +1674,18 @@ function renderFoot() {
   else if (isHost) { btn(again, 'primary', restartKey); btn('BACK TO LOBBY  (ESC)', '', () => hooks.onExit?.()); }
   else f.textContent = series.on && !series.done ? 'THE NEXT RACE STARTS WHEN EVERYONE HAS FINISHED…' : 'WAITING FOR THE HOST TO RESTART OR RETURN TO THE LOBBY…';
 }
+/* touch: the ☰ button opens a card with what R, ESC, M and L do on a keyboard; the race keeps running underneath */
+const pauseEl = $('pause');
+function renderMenu() {
+  const f = $('pauseBtns'); f.innerHTML = '';
+  const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
+  btn('RESUME', 'primary', () => showMenu(false));
+  btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); renderMenu(); });
+  btn(qualityLabel(), '', () => { cycleQuality(); renderMenu(); });
+  if (!online || isHost) { btn(series.on ? (series.done ? 'NEW CUP' : 'NEXT RACE') : 'RESTART', '', () => { showMenu(false); restartKey(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
+}
+function showMenu(on) { pauseEl.classList.toggle('show', on); if (on) renderMenu(); }
+if (touch) { $('btnMenu').addEventListener('click', () => { audio.init(); showMenu(!pauseEl.classList.contains('show')); }); pauseEl.addEventListener('click', e => { if (e.target === pauseEl) showMenu(false); }); }
 let nextShown = '';
 function drawNext() {
   const txt = series.on && !series.done && series.nextT >= 0 && race.state === 'finished' ? `NEXT RACE IN ${Math.ceil(series.nextT)}` : '';
@@ -1639,7 +1700,7 @@ function start(s) {
   else if (cup) Object.assign(series, { on: true, race: 0, points: {}, last: {}, roster, done: false });
   else series.on = false;
   series.pending = null; series.nextT = -1;
-  const v = series.on ? VARIANTS[series.race % VARIANTS.length] : VARIANTS[clamp(Math.round(Number(o.variant)) || 0, 0, VARIANTS.length - 1)]; if (v !== variant) buildWorld(v);
+  const v = series.on ? VARIANTS[series.race % VARIANTS.length] : VARIANTS[clamp(Math.round(Number(o.variant)) || 0, 0, VARIANTS.length - 1)]; if (v !== variant) { buildWorld(v); applyQuality(); }
   const slots = slotsFor(s);
   for (const k of karts) {
     const sl = slots[k.id] || { kind: 'none' };
@@ -1653,14 +1714,15 @@ function start(s) {
   gridOrder = active.filter(k => k.kind === 'ai').map(k => k.id).concat(active.filter(k => k.kind !== 'ai').map(k => k.id));
   for (const k of karts) if (k.kind === 'none') k.place = 99;
   resetRace();
-  hintEl.textContent = 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound · L detail · F3 stats';
+  hintEl.textContent = touch ? 'DRAG THE LEFT SIDE TO STEER · GAS IS AUTOMATIC · ITEM: touch to carry, lift to throw, drag down to throw back'
+    : 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound · L detail · F3 stats';
   const cupline = $('cupline'); cupline.hidden = !series.on; cupline.textContent = series.on ? `RACE ${series.race + 1}/${series.total} · ${v.name}` : '';
   $('kcName').textContent = me.name; $('kcClass').textContent = me.w.label; $('kartcard').querySelectorAll('.bars s').forEach((el, i) => { el.style.width = me.w.bars[i] + '%'; }); $('kartcard').classList.add('show');
   if (series.on) { toast(`RACE ${series.race + 1} OF ${series.total}`, 'gold'); toast(v.name, 'blue'); }
   renderFoot(); drawNext();
   clocks.clear(); hostClock = null; hostSeen = nowSec(); simNow = performance.now(); tickN = 0; lastSentTs = -1; ghostN = 0;
   Object.assign(netStats, { corr: 0, corrM: 0, snaps: 0, frozen: 0, ghosts: 0, lead: 0, hostFps: 0 });
-  audio.init(); kb.attach(); loop.start(); if (online) ticker.start(); else ticker.stop();
+  audio.init(); kb.attach(); if (touch) tc.attach(); loop.start(); if (online) ticker.start(); else ticker.stop();
 }
 function stop() {
   session = null; race.state = 'intro'; clearHazards(); series.on = false; series.pending = null; series.nextT = -1;
@@ -1668,12 +1730,12 @@ function stop() {
   for (const k of karts) { setLabel(k, null); k.vis.g.visible = true; k.vis.bodyMat.color.set(k.color); k.vis.bodyMat.emissive.set(0); k.vis.bodyMat.emissiveIntensity = 0; }
   active = karts; karts.forEach((k, i) => resetKart(k, i)); for (const b of itemBoxes) { b.active = true; b.g.visible = true; } for (const c of coins) c.active = true;
   $('kartcard').classList.remove('show'); music.stop();
-  kb.detach(); loop.stop(); ticker.stop(); sfx.silence(); waitEl.hidden = true;
+  kb.detach(); tc.detach(); showMenu(false); loop.stop(); ticker.stop(); sfx.silence(); waitEl.hidden = true;
 }
 function destroy() {
   stop(); sfx.dispose(); music.dispose(); ticker.dispose(); removeEventListener('resize', onResize); document.removeEventListener('visibilitychange', onVisibility);
   disposeScene(scene); renderer.dispose(); renderer.forceContextLoss?.();
-  mount.innerHTML = ''; unloadCss(); if (window.__kart === debug) delete window.__kart;
+  mount.classList.remove('touch'); mount.innerHTML = ''; unloadCss(); if (window.__kart === debug) delete window.__kart;
 }
 /* a player dropped out mid-race: the host drives that kart from now on */
 function playerLeft(pid) {
@@ -1720,6 +1782,8 @@ function onNetMessage(msg) {
 }
 const debug = { karts, race, series, get net() { return netStats; }, clocks, timing, get fps() { return fps; }, get hostClock() { return hostClock; }, get simNow() { return simNow; }, nextRace, awardCup, hazards, remoteHaz, VARIANTS, ITEM_DEF, giveItem, itemPress, itemRelease, useItem, rollItem, blast, inkFrom, debugSpawn: spawnHazard, spawnStats, get coins() { return coins; }, get itemBoxes() { return itemBoxes; }, get variant() { return variant; }, get S() { return S; }, get L() { return L; }, get N() { return N; }, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; },
   get tune() { return { VMAX, ACC, TURN, cpu: cpuCfg }; },
+  get detail() { return { tier: QUALITY[quality].name, auto: autoQuality, fps: Math.round(fps), pixelRatio: renderer.getPixelRatio() }; }, setQuality, cycleQuality,
+  touch: { on: touch, pad: padS, brake: brakeS, item: itemS, showMenu },
   restartWith(opts) { if (session) start({ ...session, opts: { ...session.opts, ...opts } }); } };
 window.__kart = debug;
 return { start, stop, destroy, onNetMessage, playerLeft, debug };

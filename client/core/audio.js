@@ -4,7 +4,7 @@
 export function createAudio({ volume = 0.5 } = {}) {
   let ctx = null, master = null, muted = false; const ready = new Set();
   const init = () => {
-    if (ctx) { if (ctx.state === 'suspended') ctx.resume().catch(() => {}); return true; }
+    if (ctx) { if (ctx.state !== 'running') ctx.resume().catch(() => {}); return true; } // iOS also reports a non-standard 'interrupted' state after a call or app switch
     try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return false; }
     master = ctx.createGain(); master.gain.value = muted ? 0 : volume; master.connect(ctx.destination);
     for (const fn of ready) fn(ctx, master); return true;

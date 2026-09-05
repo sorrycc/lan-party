@@ -1,18 +1,22 @@
-/* Frostline Kart HUD. Loaded by the game module while it is mounted; the shell supplies the body font and .btn. */
-:root { --hud: rgba(6,10,28,.62); --line: rgba(255,255,255,.18); }
-#c { position: fixed; inset: 0; display: block; }
+/* Frostline Kart HUD. Loaded by the game module while it is mounted; the shell supplies the body font and .btn.
+   Every edge offset adds the device's safe-area inset (notch, home indicator). `#stage.touch` is set by the game on
+   coarse-pointer devices: the on-screen controls appear, the minimap moves under the lap box and the blur goes away. */
+:root { --hud: rgba(6,10,28,.62); --line: rgba(255,255,255,.18);
+  --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px); }
+#c { position: fixed; inset: 0; display: block; touch-action: none; }
 .hud { position: fixed; pointer-events: none; text-shadow: 0 2px 0 rgba(0,0,0,.45); }
 .panel { background: var(--hud); border: 2px solid var(--line); border-radius: 14px; backdrop-filter: blur(4px); }
+.touch .panel { backdrop-filter: none; }
 @keyframes pop { 0% { transform: scale(.85); } 60% { transform: scale(1.1); } 100% { transform: scale(1); } }
 
 /* item slot */
-#item { top: 18px; left: 18px; width: 108px; height: 108px; display: flex; align-items: center; justify-content: center; border-width: 3px; }
+#item { top: calc(18px + var(--sa-t)); left: calc(18px + var(--sa-l)); width: 108px; height: 108px; display: flex; align-items: center; justify-content: center; border-width: 3px; }
 #item.pulse { animation: pop .3s ease-out; border-color: #ffd54a; }
 #item canvas { width: 84px; height: 84px; }
 #itemLabel { position: absolute; bottom: -22px; left: 0; width: 100%; text-align: center; font-size: 13px; letter-spacing: 2px; color: #cfe3ff; font-weight: 700; }
 
 /* standings column */
-#standings { top: 162px; left: 18px; padding: 6px 8px; min-width: 150px; font-size: 13px; letter-spacing: .5px; }
+#standings { top: calc(162px + var(--sa-t)); left: calc(18px + var(--sa-l)); padding: 6px 8px; min-width: 150px; font-size: 13px; letter-spacing: .5px; }
 #standings .row { display: flex; align-items: center; gap: 7px; padding: 2px 5px; border-radius: 6px; line-height: 17px; }
 #standings .row b { width: 16px; text-align: right; font-style: italic; color: #cfe3ff; }
 #standings .row i { width: 11px; height: 11px; border-radius: 3px; border: 1px solid rgba(255,255,255,.55); flex: none; }
@@ -21,7 +25,7 @@
 #standings .row.done span::after { content: ' 🏁'; font-size: 11px; }
 
 /* lap + timer + coins, stacked top right */
-#rightcol { top: 18px; right: 18px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+#rightcol { top: calc(18px + var(--sa-t)); right: calc(18px + var(--sa-r)); display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 #lapbox { padding: 10px 16px; text-align: right; min-width: 170px; }
 #lap { font-size: 26px; font-weight: 900; letter-spacing: 1px; }
 #lap b { color: #ffd54a; }
@@ -34,16 +38,17 @@
 #coinbox.bump { animation: pop .25s ease-out; }
 
 /* position */
-#pos { left: 22px; bottom: 18px; font-size: 96px; font-weight: 900; line-height: .9; font-style: italic; color: #fff; -webkit-text-stroke: 3px rgba(10,14,40,.85); text-shadow: 0 6px 0 rgba(0,0,0,.35); transition: transform .15s; }
+#pos { left: calc(22px + var(--sa-l)); bottom: calc(18px + var(--sa-b)); font-size: 96px; font-weight: 900; line-height: .9; font-style: italic; color: #fff; -webkit-text-stroke: 3px rgba(10,14,40,.85); text-shadow: 0 6px 0 rgba(0,0,0,.35); transition: transform .15s; }
 #pos sup { font-size: 34px; vertical-align: top; margin-left: 2px; }
 #pos.p1 { color: #ffd54a; } #pos.p2 { color: #e6eefc; } #pos.p3 { color: #ffa86a; }
 #pos.bump { transform: scale(1.18); }
 
 /* speedometer */
-#speedo { left: 50%; bottom: 10px; transform: translateX(-50%); }
+#speedo { left: 50%; bottom: calc(10px + var(--sa-b)); transform: translateX(-50%); }
+#speedo canvas { display: block; width: 260px; height: 150px; }
 
 /* minimap */
-#map { right: 18px; bottom: 18px; padding: 8px; }
+#map { right: calc(18px + var(--sa-r)); bottom: calc(18px + var(--sa-b)); padding: 8px; }
 #map canvas { display: block; width: 190px; height: 190px; }
 
 /* toasts */
@@ -63,7 +68,7 @@
 @keyframes countPop { 0% { transform: translate(-50%,-50%) scale(1.6); opacity: 0; } 15% { transform: translate(-50%,-50%) scale(1); opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%,-50%) scale(.9); } }
 
 /* kart card during the countdown */
-#kartcard { left: 50%; bottom: 175px; transform: translateX(-50%); padding: 10px 18px; display: none; align-items: center; gap: 16px; }
+#kartcard { left: 50%; bottom: calc(175px + var(--sa-b)); transform: translateX(-50%); padding: 10px 18px; display: none; align-items: center; gap: 16px; }
 #kartcard.show { display: flex; animation: pop .35s ease-out; }
 #kartcard b { font-size: 22px; font-style: italic; letter-spacing: 1px; }
 #kartcard > span { font-size: 12px; letter-spacing: 3px; color: #ffd54a; border: 1px solid rgba(255,213,74,.5); border-radius: 6px; padding: 2px 8px; }
@@ -81,10 +86,10 @@
     radial-gradient(circle at 45% 72%, rgba(10,12,40,.96) 0 20%, transparent 31%), radial-gradient(circle at 87% 70%, rgba(10,12,40,.96) 0 12%, transparent 21%),
     radial-gradient(circle at 8% 82%, rgba(10,12,40,.96) 0 10%, transparent 19%), radial-gradient(circle at 50% 8%, rgba(10,12,40,.96) 0 9%, transparent 16%); }
 
-/* results */
-#results { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(4,8,24,.55); }
+/* results: the card scrolls inside the viewport when it is taller than a phone, and the two Grand Prix tables wrap */
+#results { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(4,8,24,.55); z-index: 20; overflow: auto; padding: calc(10px + var(--sa-t)) calc(10px + var(--sa-r)) calc(10px + var(--sa-b)) calc(10px + var(--sa-l)); }
 #results.show { display: flex; }
-#results .card { background: rgba(8,12,34,.88); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 28px 36px; min-width: 460px; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: pop .4s ease-out; }
+#results .card { margin: auto; max-width: 100%; background: rgba(8,12,34,.88); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 28px 36px; min-width: min(460px, 100%); box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: pop .4s ease-out; }
 #results h1 { margin: 0 0 6px; font-size: 52px; font-style: italic; letter-spacing: 3px; color: #ffd54a; text-align: center; }
 #results h2 { margin: 0 0 18px; font-size: 16px; font-weight: 400; color: #cfe3ff; text-align: center; letter-spacing: 3px; }
 #results table { width: 100%; border-collapse: collapse; font-size: 20px; }
@@ -94,8 +99,8 @@
 #results .t { text-align: right; font-variant-numeric: tabular-nums; color: #dbe9ff; }
 #results .cpu { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; vertical-align: middle; margin-left: 6px; }
 #results .foot { margin-top: 18px; text-align: center; font-size: 16px; color: #dbe9ff; letter-spacing: 2px; display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
-#results .tables { display: flex; gap: 28px; align-items: flex-start; }
-#results .tables > div { min-width: 300px; }
+#results .tables { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+#results .tables > div { flex: 1 1 300px; min-width: 0; }
 #results h3 { margin: 4px 0 8px; font-size: 13px; font-weight: 700; color: #cfe3ff; letter-spacing: 3px; text-align: center; }
 #results #cupTable { font-size: 17px; }
 #results #cupTable td { padding: 4px 8px; }
@@ -107,11 +112,83 @@
 #cupline { font-size: 12px; letter-spacing: 2px; color: #ffd54a; margin-bottom: 2px; }
 
 /* hint + wrong way */
-#hint { bottom: 12px; right: 232px; font-size: 11px; white-space: nowrap; color: rgba(255,255,255,.55); letter-spacing: 1px; }
+#hint { bottom: calc(12px + var(--sa-b)); right: calc(232px + var(--sa-r)); font-size: 11px; white-space: nowrap; color: rgba(255,255,255,.55); letter-spacing: 1px; }
 #wrong { top: 32%; left: 50%; transform: translateX(-50%); font-size: 40px; font-weight: 900; color: #ff5c6a; display: none; animation: blink .6s infinite; }
 @keyframes blink { 50% { opacity: .35; } }
 
 /* frame + network readout: the corner line always, the panel on F3 / I, the banner when the host's snapshots stop */
-#corner { top: 10px; left: 50%; transform: translateX(-50%); font-size: 11px; letter-spacing: 1px; color: rgba(255,255,255,.6); white-space: nowrap; }
-#stats { top: 30px; left: 50%; transform: translateX(-50%); margin: 0; padding: 8px 12px; font: 11px/1.5 Menlo, Consolas, monospace; color: #dbe9ff; white-space: pre; text-shadow: none; }
+#corner { top: calc(10px + var(--sa-t)); left: 50%; transform: translateX(-50%); font-size: 11px; letter-spacing: 1px; color: rgba(255,255,255,.6); white-space: nowrap; }
+#stats { top: calc(30px + var(--sa-t)); left: 50%; transform: translateX(-50%); margin: 0; padding: 8px 12px; font: 11px/1.5 Menlo, Consolas, monospace; color: #dbe9ff; white-space: pre; text-shadow: none; }
 #netwait { top: 42%; left: 50%; transform: translateX(-50%); font-size: 28px; font-weight: 900; letter-spacing: 3px; color: #ffd54a; animation: blink 1s infinite; }
+
+/* ---------------------------------------------------------------- touch controls (hidden unless #stage has .touch) */
+.ctl { display: none; position: fixed; z-index: 6; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.touch .ctl { display: block; }
+/* steering pad: the left part of the screen; a ring appears where the finger lands and the knob follows it sideways */
+#pad { left: 0; top: calc(60px + var(--sa-t)); bottom: 0; width: 45vw; z-index: 5; --ox: 50%; --oy: 50%; --px: 0px; }
+#pad .ring { position: absolute; left: var(--ox); top: var(--oy); width: 132px; height: 132px; margin: -66px 0 0 -66px; border-radius: 50%; border: 3px solid rgba(255,255,255,.45); background: rgba(6,10,28,.35); opacity: 0; transition: opacity .2s; }
+#pad .ring::before, #pad .ring::after { position: absolute; top: 50%; transform: translateY(-50%); color: rgba(255,255,255,.55); font-size: 16px; }
+#pad .ring::before { content: '◀'; left: 8px; } #pad .ring::after { content: '▶'; right: 8px; }
+#pad.on .ring { opacity: 1; transition: none; }
+#pad .knob { position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px; border-radius: 50%; background: rgba(255,255,255,.92); box-shadow: 0 4px 12px rgba(0,0,0,.45); transform: translateX(var(--px)); }
+#pad .lbl { position: absolute; left: 50%; bottom: calc(22px + var(--sa-b)); transform: translateX(-50%); font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,.35); font-weight: 700; white-space: nowrap; }
+#pad.on .lbl { opacity: 0; }
+/* BRAKE and ITEM under the right thumb */
+.btn-ctl { width: 92px; height: 92px; border-radius: 50%; border: 3px solid rgba(255,255,255,.4); background: rgba(6,10,28,.55); color: #fff; font-weight: 900; font-size: 14px; letter-spacing: 1px; text-shadow: 0 2px 0 rgba(0,0,0,.45); flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+.touch .btn-ctl { display: flex; }
+.btn-ctl.on { background: rgba(255,213,74,.55); border-color: #ffd54a; transform: scale(.94); }
+#btnBrake { right: calc(140px + var(--sa-r)); bottom: calc(22px + var(--sa-b)); }
+#btnItem { right: calc(22px + var(--sa-r)); bottom: calc(22px + var(--sa-b)); width: 104px; height: 104px; }
+#btnItem b { font-size: 13px; letter-spacing: 2px; color: rgba(255,255,255,.7); }
+#btnItem canvas { display: none; width: 52px; height: 52px; }
+#btnItem small { font-size: 16px; line-height: 1; color: #ffd54a; visibility: hidden; }
+#btnItem.has b { display: none; } #btnItem.has canvas { display: block; } #btnItem.has { border-color: rgba(255,213,74,.7); }
+#btnItem.arm small { visibility: visible; }
+#btnItem.back { background: rgba(255,138,92,.5); border-color: #ff8a5c; }
+#btnItem.back small { color: #ff8a5c; }
+/* ☰: sound, detail, restart, leave */
+#btnMenu { top: calc(6px + var(--sa-t)); left: 50%; transform: translateX(-50%); width: 46px; height: 32px; border-radius: 10px; border: 2px solid rgba(255,255,255,.35); background: rgba(6,10,28,.55); color: #fff; font-size: 16px; text-align: center; line-height: 28px; z-index: 7; }
+.touch #corner { left: calc(50% + 34px); transform: none; top: calc(14px + var(--sa-t)); }
+.touch #hint { top: calc(44px + var(--sa-t)); left: 50%; right: auto; bottom: auto; transform: translateX(-50%); font-size: 10px; }
+.touch #map { position: static; }
+.touch #map canvas { width: 120px; height: 120px; }
+.touch #speedo { transform: translateX(-50%) scale(.8); transform-origin: bottom center; }
+.touch #pos { left: calc(50% - 200px); }
+.touch #kartcard { bottom: calc(150px + var(--sa-b)); }
+
+/* overlays: the touch menu card and the rotate prompt */
+.overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(4,8,24,.6); padding: 12px; }
+.overlay.show { display: flex; }
+.overlay .card { background: rgba(8,12,34,.94); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 18px 22px 22px; min-width: 240px; max-width: 100%; text-align: center; animation: pop .3s ease-out; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.overlay .card h1 { margin: 0 0 12px; font-size: 24px; font-style: italic; letter-spacing: 4px; color: #ffd54a; }
+.overlay .card div { display: flex; flex-direction: column; gap: 8px; }
+.overlay .card .btn { font-size: 15px; padding: 10px 18px; touch-action: manipulation; }
+#pause { z-index: 25; }
+#rotate { z-index: 30; background: #0a0e24; text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 3px; color: #fff; }
+#rotate .phone { font-size: 64px; margin-bottom: 14px; animation: rot 1.6s ease-in-out infinite alternate; }
+#rotate small { display: block; font-size: 11px; color: #9fb4dc; letter-spacing: 2px; margin-top: 10px; font-weight: 700; }
+@keyframes rot { from { transform: rotate(0); } to { transform: rotate(-90deg); } }
+@media (orientation: portrait) and (max-width: 760px) { .touch #rotate { display: flex; } } /* phones only; a tablet held upright still fits */
+
+/* short viewports (phones in landscape): everything a size down */
+@media (max-height: 560px) {
+  #item { width: 72px; height: 72px; border-width: 2px; } #item canvas { width: 56px; height: 56px; } #itemLabel { font-size: 10px; letter-spacing: 1px; bottom: -16px; }
+  #standings { top: calc(108px + var(--sa-t)); font-size: 11px; min-width: 120px; padding: 4px 6px; } #standings .row { gap: 5px; padding: 1px 4px; line-height: 14px; } #standings .row span { max-width: 84px; } #standings .row i { width: 9px; height: 9px; }
+  #lapbox { padding: 6px 12px; min-width: 130px; } #lap { font-size: 20px; } #timer { font-size: 16px; }
+  #coinbox { padding: 3px 10px; font-size: 17px; } #coinbox i { width: 15px; height: 15px; }
+  #pos { font-size: 60px; -webkit-text-stroke: 2px rgba(10,14,40,.85); } #pos sup { font-size: 22px; }
+  #speedo canvas { width: 190px; height: 110px; }
+  #map { padding: 5px; } #map canvas { width: 130px; height: 130px; }
+  .toast { font-size: 28px; padding: 4px 16px; border-width: 2px; }
+  #count { font-size: 110px; -webkit-text-stroke: 3px rgba(10,14,40,.9); }
+  #kartcard { bottom: calc(118px + var(--sa-b)); padding: 8px 14px; gap: 12px; } #kartcard b { font-size: 18px; } #kartcard .bars u { width: 80px; } #kartcard .bars i { width: 54px; }
+  #wrong { font-size: 28px; } #netwait { font-size: 20px; }
+  #hint { font-size: 10px; }
+  #results .card { padding: 14px 18px; border-radius: 16px; } #results h1 { font-size: 30px; } #results h2 { font-size: 12px; margin-bottom: 8px; letter-spacing: 2px; }
+  #results table { font-size: 14px; } #results td { padding: 3px 6px; } #results #cupTable { font-size: 13px; } #results .dim { font-size: 12px; } #results .laps { font-size: 11px; }
+  #results .foot { margin-top: 10px; font-size: 13px; } #results .foot .btn.small { font-size: 12px; padding: 6px 10px; } #results .next { font-size: 14px; }
+  .touch #speedo { transform: translateX(-50%) scale(.85); }
+  .touch #pos { left: calc(50% - 150px); }
+  .touch #kartcard { bottom: calc(112px + var(--sa-b)); }
+  .touch #map canvas { width: 100px; height: 100px; } /* keeps the map clear of the ITEM button */
+}

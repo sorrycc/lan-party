@@ -6,6 +6,7 @@ import { Net, wsUrl } from './core/net.js';
 import { createAudio } from './core/audio.js';
 import { loadPrefs, savePrefs } from './core/prefs.js';
 import { esc, hex } from './core/ui.js';
+import { drawQr } from './core/qr.js';
 
 const $ = id => document.getElementById(id);
 const audio = createAudio();
@@ -87,10 +88,19 @@ function renderTeams(game, me, host) {
   $('btnEnemy').disabled = !canGo(other); $('btnEnemy').onclick = () => other && pickTeam(other.id);
   $('teamBtns').hidden = host; // the host just clicks a column
 }
+/* the join link as a QR code (address + room code as the hash, which the start screen picks up); drawn once per room */
+let qrShown = '';
+function renderQr() {
+  const el = $('roomQr'), link = S.addr && S.room ? `${S.addr}/#${S.room}` : '';
+  if (link === qrShown) return; qrShown = link;
+  if (!link) { el.hidden = true; return; }
+  try { drawQr(el.querySelector('canvas'), link); el.hidden = false; } catch (e) { console.error(e); el.hidden = true; }
+}
 function renderLobby() {
   const me = meP(), host = isHost(), game = curGame(), teams = game.teams || null;
   $('roomCode').textContent = S.room || '----';
   $('roomAddr').innerHTML = S.addr ? `friends on this network open <b>${esc(S.addr)}</b> and enter the code` : '';
+  renderQr();
   $('lobbyGame').textContent = `${game.title.toUpperCase()} · ${S.players.length}/${game.maxPlayers} PLAYERS`;
   const taken = new Set(S.players.filter(p => p.id !== S.id).map(p => p.avatar));
   renderAvatars($('avatarsLobby'), me ? me.avatar : S.avatar, taken, i => S.net && S.net.send({ t: 'lobby', avatar: i }));
@@ -178,14 +188,20 @@ async function joinRoom() {
 /* ---------------------------------------------------------------- wiring */
 $('btnSolo').onclick = startSolo;
 $('btnCreate').onclick = createRoom;
-$('btnJoin').onclick = joinRoom;
+$('btnJoin').onclick = () => { $('btnJoin').classList.remove('hot'); joinRoom(); };
 $('codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(); });
 $('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('nameIn').blur(); });
 $('nameIn').addEventListener('change', () => { readName(); if (S.net && S.net.open) S.net.send({ t: 'lobby', name: S.name }); });
 $('btnReady').onclick = () => { const me = meP(); S.net.send({ t: 'lobby', ready: !(me && me.ready) }); };
 $('btnStart').onclick = () => S.net.send({ t: 'start' });
 $('btnLeave').onclick = () => { S.net.send({ t: 'leave' }); leaveToMenu(); };
-document.addEventListener('pointerdown', () => audio.init()); // browsers only unlock audio inside a user gesture
+/* browsers only unlock audio inside a user gesture; iOS counts touchend and click but not always the pointerdown before them */
+document.addEventListener('pointerdown', () => audio.init());
+document.addEventListener('touchend', () => audio.init(), { passive: true });
+document.addEventListener('click', () => audio.init());
 document.addEventListener('keydown', () => audio.init());
-if (location.hash.length === 5) $('codeIn').value = location.hash.slice(1).toUpperCase();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) audio.init(); });
 renderStart(); show('start');
+if (/^#[A-Za-z]{4}$/.test(location.hash)) { // arrived by a scanned lobby code: fill it in and point at JOIN
+  $('codeIn').value = location.hash.slice(1).toUpperCase(); $('btnJoin').classList.add('hot'); setStatus('Room code filled in from the link. Press JOIN ROOM.', true);
+}
