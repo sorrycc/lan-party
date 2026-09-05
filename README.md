@@ -54,13 +54,14 @@ client/
     dodgeball/    Dodgeball 3v3: index.js (game module) + dodgeball.css (its HUD)
     gta/          Fable Theft Auto 5.1: index.js (game module: lifecycle, input, HUD, netcode glue),
                   world.js (the seeded city + instanced pools), entities.js (how peds and cars draw),
-                  sim.js (the host's simulation), remote.js (a client's copy), fx.js, font.js, gta.css
+                  motion.js (walking and driving, shared by host and prediction), sim.js (the host's simulation),
+                  remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
 ```
 
 The server never simulates a game. It keeps the lobby roster and relays in-game messages between the players in a room.
 Frostline Kart runs its simulation on the host's browser for CPU karts, items and the clock, and on each player's browser for their own kart.
 Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
-Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. The city itself is generated from a fixed seed, so it never travels over the network.
+Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. Clients predict their own body with the same movement code the host runs (`motion.js`) and reconcile against the host's acknowledged input, which hides the round trip. The city itself is generated from a fixed seed, so it never travels over the network.
 
 ## Adding a game
 
@@ -121,6 +122,9 @@ Up to 6 players, 3 per side; empty slots are CPU bodies when the host leaves "fi
 Los Pixeles, a procedurally generated voxel city, shared by up to 8 players. WASD to move or drive, mouse to look and aim, left click to shoot,
 1 / 2 / 3 or the wheel to switch weapon, R to reload, F to enter or exit a car, Shift to sprint, Space to jump or handbrake, M to toggle sound.
 Click once at the start of a round to grab the mouse; Esc releases it and opens the pause card (the city keeps running for everyone else).
+F3 or I opens a stats panel (frame time breakdown, host frame rate, snapshot rate and bandwidth, input lag); the corner always shows FPS and, on a client, the input lag and the host's FPS.
+L cycles the graphics detail (high, medium, low, auto); auto mode drops a level by itself when the frame rate stays under 40.
+Clients predict their own walking and driving locally and are corrected by the host, so your own character answers the keys at once even though everything else is shown a few frames behind.
 Everyone starts on Ender Ave with a sports car in their colour. The Downtown Hit mission is shared: the first player to reach Diamond Plaza flushes Vinny out,
 whoever whacks him collects the $5000 and the heat. Wanted levels are per player and the cops chase whoever they can see. Players can shoot and run each other over
 unless the host turns friendly fire off; a wasted player respawns at the hospital minus $300. Rounds are timed (5, 10, 15 minutes or unlimited) and end with a scoreboard ranked by cash, then kills.

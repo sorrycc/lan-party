@@ -10,6 +10,8 @@ import { clamp, lerp } from '../../core/math.js';
 import { AVATARS } from '../../core/avatars.js';
 import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, cornerXZ, rayAabb, raySphere, computeCamera } from './world.js';
 import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS } from './entities.js';
+import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar } from './motion.js';
+export { IN };
 
 const rnd = Math.random;
 const rr = (a, b) => a + Math.random() * (b - a);
@@ -17,7 +19,6 @@ const ri = (a, b) => Math.floor(rr(a, b + 1));
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
 
-export const IN = { UP: 1, DOWN: 2, LEFT: 4, RIGHT: 8, SPRINT: 16, SPACE: 32, FIRE: 64 };
 export const HINT = ['', 'F  EXIT CAR      SPACE  HANDBRAKE', 'F  JACK CAR', 'F  ENTER CAR'];
 export const MISSION_STATES = ['intro', 'goto', 'hit', 'passed', 'escape', 'done'];
 export const OBJECTIVES = { intro: 'Get to Diamond Plaza, downtown.', goto: 'Get to Diamond Plaza, downtown.', hit: "Whack Vinny 'Snitch' Voxel. Watch the bodyguards.", passed: 'Mission passed. Lose the cops.', escape: 'Lose the wanted level.', done: 'Free roam. Cause chaos in Los Pixeles.' };
@@ -43,7 +44,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   class Player {
     constructor(info, idx) {
       this.id = info.id; this.idx = idx; this.name = info.name || 'Player'; this.avatar = info.avatar | 0; this.ped = null; this.gone = false;
-      this.camYaw = 0; this.camPitch = 0.22; this.bits = 0; this.clicks = 0; this.clicksSeen = null;
+      this.camYaw = 0; this.camPitch = 0.22; this.bits = 0; this.clicks = 0; this.clicksSeen = null; this.seq = 0; this.seqApplied = 0;
       this.wanted = 0; this.heat = 0; this.crimeT = 0; this.seenT = 0; this.copSpawnT = 0; this.cash = 250; this.kills = 0;
       this.weapons = WEAPONS.map(w => ({ ...w })); this.curW = 0; this.reloadT = 0; this.fireT = 0; this.armTimer = 0; this.godT = 0; this.noDmgT = 0; this.wastedT = 0; this.hint = 0; this.jumpLatch = false;
     }
@@ -63,7 +64,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.health = kind === 'vinny' ? 170 : kind === 'guard' ? 90 : kind === 'cop' ? 55 : kind === 'player' ? 100 : 40;
       this.dead = false; this.deadT = 0; this.state = kind === 'civ' ? 'walk' : 'idle'; this.moving = 0;
       this.flee = 0; this.tx = x; this.tz = z; this.speedMul = rr(0.8, 1.25); this.shootT = rr(0.5, 1.5); this.hostile = false; this.pause = 0;
-      this.hitT = 0; this.inCar = null; this.armRaise = 0; this.stuck = 0; this.detourT = 0; this.carStuck = 0; this.camPitch = 0; this.gun = null; this.target = null;
+      this.hitT = 0; this.inCar = null; this.armRaise = 0; this.stuck = 0; this.detourT = 0; this.carStuck = 0; this.camPitch = 0; this.gun = null; this.target = null; this.jumpLatch = false;
       this.threatX = x; this.threatZ = z; this.killedBy = null; this.released = false; this.sent = null; this.entry = null; this.dirty = true;
       this.style = style !== undefined ? style : kind === 'player' ? (owner ? owner.avatar : 0) : ri(0, 1e6);
       this.view = new PedView(W, kind, this.style); this.r = 0.42;
@@ -103,17 +104,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.x += dx / d * s * dt; this.z += dz / d * s * dt; this.moving = speed;
       return d;
     }
-    collideWorld() {
-      const list = W.nearAabbs(this.x, this.z), r = this.r;
-      for (let k = 0; k < list.length; k++) { const b = list[k];
-        const nx = clamp(this.x, b.x0, b.x1), nz = clamp(this.z, b.z0, b.z1); let dx = this.x - nx, dz = this.z - nz; const d2 = dx * dx + dz * dz;
-        if (d2 < r * r) { if (d2 < 1e-6) { const px = Math.min(this.x - b.x0, b.x1 - this.x), pz = Math.min(this.z - b.z0, b.z1 - this.z);
-            if (px < pz) this.x += (this.x - b.x0 < b.x1 - this.x) ? -(px + r) : (px + r); else this.z += (this.z - b.z0 < b.z1 - this.z) ? -(pz + r) : (pz + r); }
-          else { const d = Math.sqrt(d2); this.x += dx / d * (r - d); this.z += dz / d * (r - d); } this.stuck += 1; }
-      }
-      if (this.z > BEACH_Z1 - 2) this.z = BEACH_Z1 - 2;
-      this.x = clamp(this.x, -HALF - 120, HALF + 120); this.z = Math.max(this.z, -HALF - 120);
-    }
+    collideWorld() { pedCollideWorld(W, this); }
     hurt(dmg, by) {
       if (this.dead) return;
       if (this.kind === 'player') { damagePlayer(this.owner, dmg, by); return; }
@@ -287,27 +278,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.hand = desired === 0 && this.speed < 1.5;
     }
     step(dt) {
-      const T = this.type; this.age += dt;
-      let fx = Math.sin(this.yaw), fz = Math.cos(this.yaw), rx = -fz, rz = fx;
-      let vF = this.vx * fx + this.vz * fz, vR = this.vx * rx + this.vz * rz;
-      if (!this.dead) {
-        if (this.throttle > 0) { if (vF < T.max) vF += T.acc * this.throttle * dt; }
-        else if (this.throttle < 0) { if (vF > 0.3) vF -= T.brake * dt; else if (vF > -T.max * 0.33) vF -= T.acc * 0.55 * dt; }
-      }
-      vF -= vF * 0.4 * dt + Math.sign(vF) * vF * vF * 0.0035 * dt;
-      if (this.hand || this.dead) vF -= Math.sign(vF) * Math.min(Math.abs(vF), (this.dead ? 3 : 8) * dt);
-      const offroad = groundY(this.x, this.z) > 0.1 && inCity(this.x, this.z);
-      const grip = this.hand ? 1.3 : offroad ? 5 : 9;
-      vR *= Math.exp(-grip * dt);
-      const steerEff = this.steer * clamp(Math.abs(vF) / 6, 0, 1) * (this.hand ? 1.6 : 1) * (1 - clamp((Math.abs(vF) - 16) / 45, 0, 0.5));
-      this.yaw += steerEff * 2.4 * dt * (vF < 0 ? -1 : 1) + this.angVel * dt;
-      this.angVel *= Math.exp(-3.5 * dt);
-      this.vx = fx * vF + rx * vR; this.vz = fz * vF + rz * vR;
-      this.x += this.vx * dt; this.z += this.vz * dt;
-      this.vF = vF; this.speed = Math.abs(vF);
-      this.fx = Math.sin(this.yaw); this.fz = Math.cos(this.yaw); this.rx = -this.fz; this.rz = this.fx;
-      this.collideWorld();
-      this.y = lerp(this.y, groundY(this.x, this.z), Math.min(1, 12 * dt));
+      const T = this.type; this.age += dt; const crashes = [];
+      const offroad = stepCar(W, this, dt, crashes);
+      for (const cr of crashes) { this.damage(Math.min(30, cr.imp * 0.9)); emit(['crash', r1(cr.x), r1(this.y + 0.8), r1(cr.z), r1(cr.imp)], cr.x, cr.z); if (this.ai === 'traffic') this.panic = Math.max(this.panic, 1.5); }
       if (offroad && this.ai === 'traffic' && this.speed > 1) this.panic = Math.max(this.panic, 1);
       // run over peds (players are knocked aside, everyone else is flattened)
       if (this.speed > 2.5) {
@@ -319,28 +292,6 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
             else { p.hurt(500, drv); emit(['runover', r1(p.x), r1(p.z), r2(this.yaw)], p.x, p.z); p.yaw = this.yaw + rr(-0.5, 0.5); this.damage(1); if (drv) addWanted(drv, 1); } } }
       }
       if (this.burn > 0) this.burn -= dt;
-    }
-    collideWorld() {
-      const list = W.nearAabbs(this.x, this.z), r = this.r;
-      for (const s of [-1, 1]) {
-        const cx = this.x + this.fx * this.off * s, cz = this.z + this.fz * this.off * s;
-        for (let k = 0; k < list.length; k++) { const b = list[k]; if (b.h < 0.6) continue;
-          const nx = clamp(cx, b.x0, b.x1), nz = clamp(cz, b.z0, b.z1); let dx = cx - nx, dz = cz - nz; const d2 = dx * dx + dz * dz;
-          if (d2 >= r * r) continue;
-          let d = Math.sqrt(d2);
-          if (d < 1e-4) { const px = Math.min(cx - b.x0, b.x1 - cx), pz = Math.min(cz - b.z0, b.z1 - cz);
-            if (px < pz) { dx = (cx - b.x0 < b.x1 - cx) ? -1 : 1; dz = 0; d = -px; } else { dz = (cz - b.z0 < b.z1 - cz) ? -1 : 1; dx = 0; d = -pz; } }
-          else { dx /= d; dz /= d; }
-          const pen = r - d; this.x += dx * pen; this.z += dz * pen;
-          const vn = this.vx * dx + this.vz * dz;
-          if (vn < 0) { const imp = -vn; this.vx -= dx * vn * 1.25; this.vz -= dz * vn * 1.25; this.vx *= 0.9; this.vz *= 0.9;
-            const rxv = this.fx * this.off * s, rzv = this.fz * this.off * s; this.angVel += (rzv * dx * imp - rxv * dz * imp) * 0.35 / this.mass;
-            if (imp > 3) { this.damage(Math.min(30, imp * 0.9)); emit(['crash', r1(nx), r1(this.y + 0.8), r1(nz), r1(imp)], nx, nz); if (this.ai === 'traffic') this.panic = Math.max(this.panic, 1.5); } }
-        }
-      }
-      // beach / bounds
-      if (this.z > BEACH_Z1 - 3) { this.z = BEACH_Z1 - 3; if (this.vz > 0) this.vz *= -0.3; }
-      const lim = HALF + 100; if (this.x < -lim) { this.x = -lim; this.vx = Math.abs(this.vx) * 0.3; } if (this.x > lim) { this.x = lim; this.vx = -Math.abs(this.vx) * 0.3; } if (this.z < -lim) { this.z = -lim; this.vz = Math.abs(this.vz) * 0.3; }
     }
     draw(dt) { this.lights = !this.dead && (this.ai === 'cop' || !!this.type.ambulance); this.view.draw(this, dt, S.t); }
   }
@@ -513,17 +464,6 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (P.inCar) { leaveCar(pl, false); return; }
     const c = nearestCar(P, 4.2); if (c) enterCar(pl, c);
   }
-  function pushOutOfCars(e, r, isPlayer) {
-    let pushed = false;
-    for (const c of cars) { if (c.released || c === e.inCar) continue; const dx = e.x - c.x, dz = e.z - c.z; if (dx * dx + dz * dz > 30) continue;
-      const lx = dx * c.rx + dz * c.rz, lz = dx * c.fx + dz * c.fz, hw = c.type.w / 2 + r, hl = c.type.l / 2 + r;
-      if (Math.abs(lx) < hw && Math.abs(lz) < hl) { const px = hw - Math.abs(lx), pz = hl - Math.abs(lz); pushed = true;
-        // the player is pushed out the short way; peds slide along the car's length so a crossing ped walks around it
-        if (px < pz && (isPlayer || c.speed > 1)) { const s = lx > 0 ? px : -px; e.x += c.rx * s; e.z += c.rz * s; }
-        else { const step = isPlayer ? pz : Math.min(pz, 0.08); const s = lz > 0 ? step : -step; e.x += c.fx * s; e.z += c.fz * s; if (!isPlayer && px < pz) { const s2 = lx > 0 ? px * 0.5 : -px * 0.5; e.x += c.rx * s2; e.z += c.rz * s2; } } } }
-    return pushed;
-  }
-
   /* ============================================================ spawning */
   function spawnCopFoot(pl) {
     const P = pl.ped;
@@ -612,32 +552,18 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (P.dead) { P.deadT += dt; pl.wastedT -= dt; if (pl.wastedT <= 0 && live) respawn(pl); P.gun = null; P.draw(dt); return; }
     if (pl.noDmgT > 8 && P.health < 100) P.health = Math.min(100, P.health + 3 * dt);
     if (pl.reloadT > 0) { pl.reloadT -= dt; if (pl.reloadT <= 0) { const w = pl.weapons[pl.curW]; const take = Math.min(w.mag - w.ammo, w.reserve); w.ammo += take; w.reserve -= take; } }
-    const b = live ? pl.bits : 0;
+    const b = live ? pl.bits : 0; pl.seqApplied = pl.seq;
     if (pl.clicksSeen === null) pl.clicksSeen = pl.clicks;
     let clicks = Math.min(3, pl.clicks - pl.clicksSeen); pl.clicksSeen = pl.clicks;
     if (live) { const w = pl.weapons[pl.curW]; if (w.auto) { if (b & IN.FIRE) fireWeapon(pl); } else while (clicks-- > 0) fireWeapon(pl); }
     pl.hint = 0;
     if (P.inCar) {
-      const c = P.inCar;
-      c.throttle = (b & IN.UP) ? 1 : (b & IN.DOWN) ? -1 : 0;
-      const st = ((b & IN.LEFT) ? 1 : 0) - ((b & IN.RIGHT) ? 1 : 0);
-      c.steer = st ? lerp(c.steer, st, Math.min(1, 5 * dt)) : lerp(c.steer, 0, Math.min(1, 8 * dt));
-      c.hand = !!(b & IN.SPACE);
+      const c = P.inCar; driveInput(c, b, dt);
       P.x = c.x; P.z = c.z; P.y = c.y; P.yaw = c.yaw; P.moving = 0;
       pl.hint = 1;
       if (c.dead) leaveCar(pl, false);
     } else {
-      const fx = Math.sin(pl.camYaw), fz = Math.cos(pl.camYaw), rx = -fz, rz = fx;
-      let mx = ((b & IN.RIGHT) ? 1 : 0) - ((b & IN.LEFT) ? 1 : 0), mz = ((b & IN.UP) ? 1 : 0) - ((b & IN.DOWN) ? 1 : 0);
-      const ground = groundY(P.x, P.z);
-      if (mx || mz) { const l = Math.hypot(mx, mz); mx /= l; mz /= l; const speed = (b & IN.SPRINT) && !(pl.armTimer > 0) ? 7.6 : 4.6;
-        const dx = fx * mz + rx * mx, dz = fz * mz + rz * mx; P.x += dx * speed * dt; P.z += dz * speed * dt; P.moving = speed;
-        const ty = pl.armTimer > 0 ? pl.camYaw : Math.atan2(dx, dz); P.yaw += angDiff(ty, P.yaw) * Math.min(1, 14 * dt); }
-      else { P.moving = 0; if (pl.armTimer > 0) P.yaw += angDiff(pl.camYaw, P.yaw) * Math.min(1, 14 * dt); }
-      if ((b & IN.SPACE) && P.y <= ground + 0.02 && !pl.jumpLatch) { P.vy = 5.5; pl.jumpLatch = true; }
-      if (!(b & IN.SPACE)) pl.jumpLatch = false;
-      P.vy -= 16 * dt; P.y += P.vy * dt; if (P.y <= ground) { P.y = ground; P.vy = 0; }
-      P.collideWorld(); pushOutOfCars(P, 0.35, true);
+      stepOnFoot(W, P, b, pl.camYaw, pl.armTimer > 0, dt, cars);
       for (const p of peds) { if (p === P || p.dead || p.inCar) continue; const d2 = dist2(p.x, p.z, P.x, P.z); if (d2 < 0.7 && d2 > 1e-4) { const d = Math.sqrt(d2), push = (0.84 - d) / d; p.x += (p.x - P.x) * push; p.z += (p.z - P.z) * push; } }
       const c = nearestCar(P, 4.2);
       if (c) pl.hint = (c.ai === 'traffic' || (c.ai === 'cop' && c.occupants)) ? 2 : 3;
@@ -656,7 +582,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     collideCars();
     for (const c of cars) if (!c.released) c.draw(dt);
     for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.released) { peds.splice(k, 1); continue; } if (p.kind === 'player') continue; p.update(dt);
-      if (!p.dead && !p.inCar) { if (pushOutOfCars(p, 0.3, false)) { p.carStuck++; if (p.carStuck > 90 && p.kind === 'civ') { p.carStuck = 0; p.flee = 2; p.threatX = p.x + rr(-1, 1); p.threatZ = p.z + rr(-1, 1); p.state = 'flee'; } } else p.carStuck = 0; } }
+      if (!p.dead && !p.inCar) { if (pushOutOfCars(p, 0.3, false, cars)) { p.carStuck++; if (p.carStuck > 90 && p.kind === 'civ') { p.carStuck = 0; p.flee = 2; p.threatX = p.x + rr(-1, 1); p.threatZ = p.z + rr(-1, 1); p.state = 'flee'; } } else p.carStuck = 0; } }
     if (live) { updateWanted(dt); updateMission(dt); }
     updatePickups(dt);
     W.dirtyDynamic();
@@ -680,7 +606,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
 
   /* ============================================================ input from the players */
-  function setInput(pl, m) { if (!pl || pl.gone || !m) return; pl.bits = m.m | 0; if (typeof m.y === 'number') pl.camYaw = m.y; if (typeof m.p === 'number') pl.camPitch = clamp(m.p, -0.45, 1.1); if (typeof m.c === 'number') pl.clicks = m.c; }
+  function setInput(pl, m) { if (!pl || pl.gone || !m) return; pl.bits = m.m | 0; if (typeof m.y === 'number') pl.camYaw = m.y; if (typeof m.p === 'number') pl.camPitch = clamp(m.p, -0.45, 1.1); if (typeof m.c === 'number') pl.clicks = m.c; if (typeof m.q === 'number') pl.seq = m.q; }
   function action(pl, a, n) {
     if (!pl || pl.gone || !pl.ped || S.phase !== 'play') return;
     if (a === 'use') tryEnterExit(pl); else if (a === 'reload') startReload(pl); else if (a === 'weapon') switchWeapon(pl, n | 0);
@@ -700,7 +626,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const pickEntry = p => [p.id, PICK_KINDS.indexOf(p.kind), r1(p.x), r1(p.z)];
   const same = (a, b) => { if (!b || a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
   const block = pl => { const P = pl.ped, w = pl.weapons[pl.curW];
-    return [P ? P.id : -1, P ? Math.round(P.health) : 0, pl.wanted, Math.floor(pl.cash), pl.kills, pl.curW, w.ammo, w.reserve, r2(pl.reloadT), P && P.dead ? 1 : 0, r1(pl.wastedT), P && P.inCar ? P.inCar.id : -1, pl.hint, r2(pl.camPitch), pl.godT > 0 ? 1 : 0, pl.gone ? 1 : 0]; };
+    return [P ? P.id : -1, P ? Math.round(P.health) : 0, pl.wanted, Math.floor(pl.cash), pl.kills, pl.curW, w.ammo, w.reserve, r2(pl.reloadT), P && P.dead ? 1 : 0, r1(pl.wastedT), P && P.inCar ? P.inCar.id : -1, pl.hint, r2(pl.camPitch), pl.godT > 0 ? 1 : 0, pl.gone ? 1 : 0, pl.seqApplied]; };
   function prepareNet() {
     for (const e of ents.values()) { const entry = e.cls === 'ped' ? pedEntry(e) : e.cls === 'car' ? carEntry(e) : pickEntry(e); e.entry = entry; e.dirty = !same(entry, e.sent); }
   }

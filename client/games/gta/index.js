@@ -19,12 +19,15 @@ import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute,
 import { WEAPONS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK } from './sim.js';
-import { createRemote, parseBlock } from './remote.js';
+import { createRemote, parseBlock, INTERP } from './remote.js';
+import { createPredictor } from './predict.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
-const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['ESC', 'pause']];
+const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
+/* graphics detail levels; the auto mode steps down when the frame rate stays low */
+const QUALITY = [{ name: 'HIGH', pr: 1.5, shadow: 2048 }, { name: 'MEDIUM', pr: 1, shadow: 1024 }, { name: 'LOW', pr: 1, shadow: 0 }];
 const HTML = `<canvas class="gl"></canvas><canvas class="hud"></canvas>
 <div class="overlay" hidden><div class="card"><h1 data-title></h1><div class="sub" data-sub></div><div class="controls" data-controls></div><table class="score" data-score hidden></table><div class="foot" data-foot></div></div></div>`;
 const rr = (a, b) => a + Math.random() * (b - a);
@@ -115,7 +118,17 @@ export async function create({ mount, audio, send, hooks }) {
   let t = 0, roundT = 0, fps = 60, clock = START_CLOCK.morning;
   let dmgFlash = 0, wantedFlash = 0, areaT = 0, curDistrict = '', curStreet = '', routeT = 0, route = [], routeTarget = null, wasDead = false;
   const floats = [];
-  let clicks = 0, fireHeld = false, netAcc = 0, lastIn = null, sinceIn = 0;
+  let clicks = 0, fireHeld = false, netAcc = 0, lastIn = null, sinceIn = 0, pred = null, localFireT = 0, localArm = 0;
+  const timing = { frame: 0, sim: 0, render: 0, hud: 0 };
+  const net = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, at: 0, hostFps: 0 };
+  let showStats = false, quality = 0, autoQuality = true, lowFpsT = 0;
+  function setQuality(i, manual) {
+    quality = clamp(i | 0, 0, QUALITY.length - 1); if (manual) { autoQuality = false; try { localStorage.setItem('lan_gta_quality', String(quality)); } catch {} }
+    const q = QUALITY[quality]; renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.pr)); renderer.setSize(innerWidth, innerHeight);
+    W.sun.castShadow = q.shadow > 0;
+    if (q.shadow > 0 && W.sun.shadow.mapSize.x !== q.shadow) { W.sun.shadow.mapSize.set(q.shadow, q.shadow); if (W.sun.shadow.map) { W.sun.shadow.map.dispose(); W.sun.shadow.map = null; } }
+  }
+  { let saved = null; try { saved = localStorage.getItem('lan_gta_quality'); } catch {} if (saved !== null && QUALITY[+saved]) setQuality(+saved, true); }
   const cam = { x: 0, y: 5, z: 0, dx: 0, dy: 0, dz: 1, lx: 0, ly: 0, lz: 1 };
   /* the view model the camera, HUD and audio read; filled from the sim (host) or the snapshot store (client) */
   const V = { me: null, subj: { x: 0, y: 0, z: 0, inCar: null, dead: false }, car: null, timeLeft: -1, phase: 0, ms: 0, vin: null, cops: [], players: [], blocks: [] };
@@ -146,9 +159,9 @@ export async function create({ mount, audio, send, hooks }) {
   function onEvent(ev) {
     const mx = V.subj.x, mz = V.subj.z, d2 = (x, z) => dist2(x, z, mx, mz), near = (x, z) => d2(x, z) < 350 * 350, vol = (x, z, range) => clamp(1 - Math.sqrt(d2(x, z)) / range, 0, 1);
     switch (ev[0]) {
-      case 'shot': { const [, who, key, x, y, z, hits] = ev; const n = near(x, z);
-        if (n) { fx.burst.flash(x, y, z); for (const h of hits) { fx.addTracer(x, y, z, h[0], h[1], h[2]); if (h[3] === 1) fx.burst.blood(h[0], h[1], h[2]); else if (h[3] === 2) fx.burst.sparks(h[0], h[1], h[2]); else if (h[3] === 3) fx.burst.dust(h[0], h[1], h[2]); } }
-        sfx.shot(key, mine(who) ? 1 : vol(x, z, 120)); if (mine(who)) camPitch -= WEAPONS.find(w => w.key === key).recoil; break; }
+      case 'shot': { const [, who, key, x, y, z, hits] = ev; const n = near(x, z), predicted = mine(who) && !isHost; // a client already played its own shot
+        if (n) { if (!predicted) fx.burst.flash(x, y, z); for (const h of hits) { fx.addTracer(x, y, z, h[0], h[1], h[2]); if (h[3] === 1) fx.burst.blood(h[0], h[1], h[2]); else if (h[3] === 2) fx.burst.sparks(h[0], h[1], h[2]); else if (h[3] === 3) fx.burst.dust(h[0], h[1], h[2]); } }
+        if (!predicted) { sfx.shot(key, mine(who) ? 1 : vol(x, z, 120)); if (mine(who)) camPitch -= WEAPONS.find(w => w.key === key).recoil; } break; }
       case 'nshot': { const [, sx, sy, sz, tx, ty, tz, carHit] = ev; if (near(sx, sz)) { fx.burst.flash(sx, sy, sz, 0.35); fx.addTracer(sx, sy, sz, tx, ty, tz); if (carHit) fx.burst.sparks(tx, ty, tz, 1); } sfx.shot('pistol', vol(sx, sz, 70) * 0.7); break; }
       case 'die': { const [, x, z] = ev; if (near(x, z)) { fx.bloodSplat(x, z, 1); fx.burst.death(x, 0, z); sfx.scream(clamp(1 - d2(x, z) / 3600, 0.05, 1)); } break; }
       case 'blood': if (near(ev[1], ev[2])) fx.bloodSplat(ev[1], ev[2], 1); break;
@@ -177,6 +190,10 @@ export async function create({ mount, audio, send, hooks }) {
     onKey: e => {
       if (e.code === 'Escape') { if (state === 'play' && fallbackMouse) pause(); else if (state === 'paused') grab(); return; }
       if (e.code === 'KeyM') { audio.toggle(); return; }
+      if (e.code === 'F3' || e.code === 'KeyI') { e.preventDefault(); showStats = !showStats; return; }
+      if (e.code === 'KeyL') { // HIGH -> MEDIUM -> LOW -> AUTO
+        if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; setQuality(0); try { localStorage.removeItem('lan_gta_quality'); } catch {} }
+        floatText((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 0x9fb4dc); return; }
       if (state !== 'play') return;
       if (e.code === 'KeyF' || e.code === 'KeyE') act('use');
       else if (e.code === 'KeyR') act('reload');
@@ -194,8 +211,15 @@ export async function create({ mount, audio, send, hooks }) {
     if (e.target && e.target.closest && e.target.closest('button')) return;
     if (state === 'grab' || state === 'paused') { if (e.button === 0) grab(); return; }
     if (state !== 'play') return;
-    if (e.button === 0) { fireHeld = true; clicks++; }
+    if (e.button === 0) { fireHeld = true; clicks++; localShot(false); }
   };
+  /* a client plays its own shot the moment it clicks; the host's 'shot' event for it then only adds the tracer and the impact */
+  function localShot(auto) {
+    const me = V.me; if (isHost || state !== 'play' || !me || me.dead || me.carId >= 0 || me.reloadT > 0 || localFireT > 0) return;
+    const w = WEAPONS[me.curW]; if (w.auto !== auto || me.ammo <= 0) return;
+    localFireT = w.rate; localArm = 1.6; sfx.shot(w.key, 1); camPitch -= w.recoil;
+    const fx0 = Math.sin(camYaw), fz0 = Math.cos(camYaw), sj = V.subj; fx.burst.flash(sj.x - fz0 * 0.39 + fx0 * 0.75, sj.y + 1.32 - camPitch * 0.5, sj.z + fx0 * 0.39 + fz0 * 0.75);
+  }
   const onMouseUp = e => { if (e.button === 0) fireHeld = false; };
   const onMouseMove = e => {
     let dx = e.movementX || 0, dy = e.movementY || 0;
@@ -252,12 +276,16 @@ export async function create({ mount, audio, send, hooks }) {
   /* ---- networking glue */
   function hostNetTick(dt) {
     netAcc += dt; if (netAcc < 1 / NET_HZ) return; netAcc = 0;
-    sim.prepareNet(); for (const c of clients) if (!c.pl.gone) { send(sim.snapshotFor(c)); count(netStats.out, 's'); } sim.endNet();
+    sim.prepareNet();
+    for (const c of clients) if (!c.pl.gone) { const msg = sim.snapshotFor(c); msg.hf = Math.round(fps); send(msg); count(netStats.out, 's'); net.outMsgs++; net.outBytes += JSON.stringify(msg).length; }
+    sim.endNet();
   }
+  /* while playing, every frame carries an input (with its sequence number for the predictor); otherwise only changes and a keepalive */
   function clientSendInput(inp, dt) {
     sinceIn += dt;
     const changed = !lastIn || lastIn.m !== inp.m || lastIn.c !== inp.c || Math.abs(lastIn.y - inp.y) > 0.002 || Math.abs(lastIn.p - inp.p) > 0.002;
-    if ((changed && sinceIn >= 1 / 60) || sinceIn >= 0.25) { lastIn = { ...inp }; sinceIn = 0; send({ t: 'in', to: hostId, m: inp.m, y: r3(inp.y), p: r3(inp.p), c: inp.c }); count(netStats.out, 'in'); }
+    const due = state === 'play' ? sinceIn >= 1 / 65 : (changed && sinceIn >= 1 / 60) || sinceIn >= 0.25;
+    if (due) { lastIn = { ...inp }; sinceIn = 0; send({ t: 'in', to: hostId, m: inp.m, y: r3(inp.y), p: r3(inp.p), c: inp.c, q: inp.q || 0 }); count(netStats.out, 'in'); net.outMsgs++; net.outBytes += 64; }
   }
 
   /* ---- per-frame local work: camera, sky, scenery, effects, audio, area names, minimap route */
@@ -287,7 +315,8 @@ export async function create({ mount, audio, send, hooks }) {
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
     if (routeT <= 0) { routeT = 0.6; const ms = MISSION_STATES[V.ms]; const tgt = ms === 'goto' || ms === 'intro' ? PLAZA : ms === 'hit' && V.vin ? V.vin : null; route = tgt ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(tgt.x, tgt.z)) : []; routeTarget = tgt; }
-    areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt;
+    areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt;
+    if (autoQuality && state === 'play' && roundT > 4) { if (fps < 40) { lowFpsT += dt; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; floatText('LOW FRAME RATE: ' + QUALITY[quality].name + ' DETAIL', 0x9fb4dc); } } else lowFpsT = 0; }
     for (let k = floats.length - 1; k >= 0; k--) { floats[k].t += dt; if (floats[k].t > 2.5) floats.splice(k, 1); }
     if (V.phase === 1 && state !== 'over') showOver();
   }
@@ -369,29 +398,51 @@ export async function create({ mount, audio, send, hooks }) {
     if (MISSION_STATES[V.ms] === 'passed') { hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
       ptext(hctx, 'MISSION PASSED', Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, 'RESPECT +', Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
     floats.forEach((f, i) => { const a = clamp(2.5 - f.t, 0, 1); hctx.globalAlpha = a; ptext(hctx, f.text, Wd / 2, Hd * 0.62 - f.t * 30 - i * s * 10, s * 1.1, hex(f.color), 'center'); hctx.globalAlpha = 1; });
-    ptext(hctx, 'FPS ' + Math.round(fps) + (online ? (isHost ? '  HOST' : '') : ''), Wd - 16, Hd - 16 - s * 7, s * 0.7, 'rgba(255,255,255,0.45)', 'right', false);
+    let line = 'FPS ' + Math.round(fps); if (online) line += isHost ? '  HOST' : `  LAG ${Math.round(pred ? pred.lag : 0)} MS  HOST ${net.hostFps} FPS`;
+    ptext(hctx, line, Wd - 16, Hd - 16 - s * 7, s * 0.7, 'rgba(255,255,255,0.45)', 'right', false);
+    if (showStats) drawStats(Wd, Hd, s);
+  }
+  function drawStats(Wd, Hd, s) {
+    const sc = s * 0.8, lines = [
+      `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   RENDER ${timing.render.toFixed(1)}   HUD ${timing.hud.toFixed(1)}`,
+      `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}`,
+    ];
+    if (!online) lines.push(`SOLO   ENTITIES ${sim.peds.length} PEDS  ${sim.cars.length} CARS  ${sim.pickups.length} PICKUPS`);
+    else if (isHost) lines.push(`HOST   SNAPSHOTS OUT ${net.rateOut.toFixed(0)}/S  ${net.kbOut.toFixed(1)} KB/S TO ${clients.filter(c => !c.pl.gone).length} PLAYER(S)   ENTITIES ${sim.peds.length} PEDS  ${sim.cars.length} CARS`);
+    else lines.push(`CLIENT   SNAPSHOTS IN ${net.rateIn.toFixed(0)}/S  ${net.kbIn.toFixed(1)} KB/S   INPUT OUT ${net.rateOut.toFixed(0)}/S   HOST ${net.hostFps} FPS`,
+      `INPUT LAG ${Math.round(pred ? pred.lag : 0)} MS   OTHERS SHOWN ${Math.round(INTERP * 1000)} MS BACK   CORRECTIONS ${pred ? pred.corrections : 0}   ENTITIES ${remote ? remote.ents.size : 0}`);
+    const w = Math.max(...lines.map(l => textW(l, sc))) + s * 8, x = Wd / 2 - w / 2, y = s * 26;
+    hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(x, y - s * 3, w, lines.length * sc * 9 + s * 4);
+    lines.forEach((l, i) => ptext(hctx, l, x + s * 4, y + i * sc * 9, sc, i === 0 ? '#ffe14d' : '#dddddd'));
   }
 
   /* ---- main loop */
   const loop = createLoop((real, now) => {
     const raw = Math.min(0.1, real); t += raw; roundT += raw; fps = lerp(fps, 1 / Math.max(raw, 1e-3), 0.05);
-    const inp = readInput();
+    const t0 = performance.now(), inp = readInput();
     if (isHost) {
       if (online || state === 'play' || state === 'over') { sim.setInput(me, inp); const steps = raw > 0.034 ? 2 : 1, dt = raw / steps; for (let k = 0; k < steps; k++) sim.update(dt); }
       if (online) hostNetTick(raw); else sim.clearEvents();
       hostView();
     } else {
+      if (remote.R.got) inp.q = pred.step(inp.m, camYaw, localArm > 0, raw, remote.R.P[myIdx], remote, t0);
       clientSendInput(inp, raw);
-      if (remote.R.got) { clock += raw / 45; remote.update(raw, t, myIdx, camPitch); }
+      if (remote.R.got) { clock += raw / 45; remote.update(raw, t, myIdx, camPitch, pred.local()); }
       clientView();
+      if (state === 'play' && fireHeld) localShot(true);
     }
+    const t1 = performance.now();
     localFrame(raw);
     renderer.render(scene, camera);
+    const t2 = performance.now();
     drawHUD();
+    const t3 = performance.now();
+    timing.sim = lerp(timing.sim, t1 - t0, 0.1); timing.render = lerp(timing.render, t2 - t1, 0.1); timing.hud = lerp(timing.hud, t3 - t2, 0.1); timing.frame = lerp(timing.frame, raw * 1000, 0.1);
+    if (now - net.at > 1000) { const secs = (now - net.at) / 1000; net.rateIn = net.inMsgs / secs; net.kbIn = net.inBytes / 1024 / secs; net.rateOut = net.outMsgs / secs; net.kbOut = net.outBytes / 1024 / secs; net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0; net.at = now; }
   });
 
   /* ---- session API */
-  function stopRound() { if (sim) { sim.dispose(); sim = null; } if (remote) { remote.clear(); remote = null; } me = null; clients = []; }
+  function stopRound() { if (sim) { sim.dispose(); sim = null; } if (remote) { remote.clear(); remote = null; } pred = null; me = null; clients = []; }
   function start(s) {
     stopRound();
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId; myIdx = Math.max(0, s.players.findIndex(p => p.id === myId));
@@ -402,7 +453,8 @@ export async function create({ mount, audio, send, hooks }) {
       sim = createSim({ W, session: s, opts: s.opts || {}, onEvent }); me = sim.players[myIdx];
       clients = s.players.filter(p => p.id !== myId).map(p => ({ id: p.id, known: new Set(), pl: sim.playerOf(p.id) }));
       hostView();
-    } else { remote = createRemote({ W }); clientView(); }
+    } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
+    localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
     state = 'grab'; showOverlay('grab'); kb.attach(); sizeHud(); audio.init(); loop.start();
   }
   function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }
@@ -417,11 +469,12 @@ export async function create({ mount, audio, send, hooks }) {
   const count = (tab, t) => { tab[t] = (tab[t] || 0) + 1; };
   function onNetMessage(msg) {
     count(netStats.in, msg.t);
-    if (msg.t === 's') { if (!isHost && remote && msg.from === hostId) for (const ev of remote.apply(msg)) onEvent(ev); }
+    if (msg.t === 's') { if (!isHost && remote && msg.from === hostId) { net.inMsgs++; net.inBytes += JSON.stringify(msg).length; if (msg.hf !== undefined) net.hostFps = msg.hf;
+      const evs = remote.apply(msg); pred.reconcile(msg, remote.R.P[myIdx], performance.now()); for (const ev of evs) onEvent(ev); } }
     else if (msg.t === 'in') { if (isHost && sim) sim.setInput(sim.playerOf(msg.from), msg); }
     else if (msg.t === 'a') { if (isHost && sim) sim.action(sim.playerOf(msg.from), msg.a, msg.n); }
   }
-  const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get fps() { return fps; }, grab, get clients() { return clients; }, netStats, get held() { return held; }, get fallbackMouse() { return fallbackMouse; } };
+  const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get fps() { return fps; }, grab, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; } };
   window.__gta = debug;
   return { start, stop, destroy, onNetMessage, playerLeft, debug };
 }

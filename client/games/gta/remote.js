@@ -9,7 +9,7 @@ import { KINDS, PF, CF, CAR_TYPES, WEAPONS, PedView, CarView, drawPickup, PICK_C
 export const INTERP = 0.08;
 
 /* the per-player block the host packs in sim.js (`block`) */
-export const parseBlock = b => ({ pedId: b[0], health: b[1], wanted: b[2], cash: b[3], kills: b[4], curW: b[5], ammo: b[6], reserve: b[7], reloadT: b[8], dead: !!b[9], wastedT: b[10], carId: b[11], hint: b[12], camPitch: b[13], god: !!b[14], gone: !!b[15] });
+export const parseBlock = b => ({ pedId: b[0], health: b[1], wanted: b[2], cash: b[3], kills: b[4], curW: b[5], ammo: b[6], reserve: b[7], reloadT: b[8], dead: !!b[9], wastedT: b[10], carId: b[11], hint: b[12], camPitch: b[13], god: !!b[14], gone: !!b[15], ack: b[16] | 0 });
 
 export function createRemote({ W }) {
   const ents = new Map();
@@ -38,21 +38,24 @@ export function createRemote({ W }) {
     R.got = true;
     return m.ev || [];
   }
-  function update(dt, t, myIdx, localCamPitch) {
+  /* `local`, when given, is the predictor's view of my own body: { pedId, ped: { x, y, z, yaw, moving }, carId, car: { x, y, z, yaw, steer, vF } } */
+  function update(dt, t, myIdx, localCamPitch, local) {
     const rt = nowSec() - INTERP;
     R.P.forEach((P, i) => { const e = ents.get(P.pedId); if (!e) return; e.camPitch = i === myIdx ? localCamPitch : P.camPitch; e.gun = P.carId < 0 && !P.dead ? WEAPONS[P.curW].key : null; });
     for (const e of ents.values()) {
       if (e.cls === 'pick') { e.t += dt; drawPickup(W, e.i, e.x, e.z, e.t); continue; }
       const smp = sampleSnaps(e.buf, rt); if (!smp) continue; const { a, b, f } = smp;
-      if (b) { e.x = lerp(a.x, b.x, f); e.z = lerp(a.z, b.z, f); e.yaw = a.yaw + angDiff(b.yaw, a.yaw) * f; } else { e.x = a.x; e.z = a.z; e.yaw = a.yaw; }
+      const mine = local && (e.id === local.pedId ? local.ped : e.id === local.carId ? local.car : null);
+      if (mine) { e.x = mine.x; e.z = mine.z; e.yaw = mine.yaw; }
+      else if (b) { e.x = lerp(a.x, b.x, f); e.z = lerp(a.z, b.z, f); e.yaw = a.yaw + angDiff(b.yaw, a.yaw) * f; } else { e.x = a.x; e.z = a.z; e.yaw = a.yaw; }
       const s = b && f > 0.5 ? b : a, fl = s.f;
       if (e.cls === 'ped') {
-        e.y = a.y !== undefined ? (b && b.y !== undefined ? lerp(a.y, b.y, f) : a.y) : groundY(e.x, e.z);
+        e.y = mine ? mine.y : a.y !== undefined ? (b && b.y !== undefined ? lerp(a.y, b.y, f) : a.y) : groundY(e.x, e.z);
         const dead = !!(fl & PF.DEAD); if (dead && !e.dead) e.deadT = (fl & PF.OLDDEAD) ? 5 : 0; e.dead = dead; if (dead) e.deadT += dt;
-        e.inCar = !!(fl & PF.INCAR); e.moving = (fl & PF.RUN) ? 5 : (fl & PF.WALK) ? 1.5 : 0; e.armRaise = lerp(e.armRaise, (fl & PF.ARM) ? 1 : 0, Math.min(1, 8 * dt)); e.hitT = (fl & PF.HIT) ? 0.25 : 0;
+        e.inCar = !!(fl & PF.INCAR); e.moving = mine ? mine.moving : (fl & PF.RUN) ? 5 : (fl & PF.WALK) ? 1.5 : 0; e.armRaise = lerp(e.armRaise, (fl & PF.ARM) ? 1 : 0, Math.min(1, 8 * dt)); e.hitT = (fl & PF.HIT) ? 0.25 : 0;
         e.view.draw(e, dt);
       } else {
-        e.steer = b ? lerp(a.steer, b.steer, f) : a.steer; e.vF = b ? lerp(a.vF, b.vF, f) : a.vF; e.speed = Math.abs(e.vF);
+        if (mine) { e.steer = mine.steer; e.vF = mine.vF; } else { e.steer = b ? lerp(a.steer, b.steer, f) : a.steer; e.vF = b ? lerp(a.vF, b.vF, f) : a.vF; } e.speed = Math.abs(e.vF);
         e.y = lerp(e.y, groundY(e.x, e.z), Math.min(1, 12 * dt));
         e.dead = !!(fl & CF.DEAD); e.smoking = !!(fl & CF.SMOKE); e.burn = !!(fl & CF.BURN); e.lights = !!(fl & CF.LIGHTS);
         e.view.draw(e, dt, t);
