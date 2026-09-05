@@ -1,0 +1,13 @@
+{
+  "name": "frostline-kart",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Frostline Kart - snowy kart racer with LAN multiplayer",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "three": "0.169.0",
+    "ws": "^8.18.0"
+  }
+}
