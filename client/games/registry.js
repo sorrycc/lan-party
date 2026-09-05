@@ -14,9 +14,15 @@
    keeps a `team` per player (auto-balanced on join, switchable in the lobby) and it arrives in `session.players`. */
 export const GAMES = [
   {
-    id: 'kart', title: 'Frostline Kart', tagline: 'SNOWY CIRCUIT · 3 LAPS · UP TO 8 KARTS',
+    id: 'kart', title: 'Frostline Kart', tagline: 'SNOWY CIRCUIT · ITEMS · GRAND PRIX · UP TO 8 KARTS',
     minPlayers: 1, maxPlayers: 8,
-    options: [{ key: 'fillAI', type: 'bool', label: 'FILL EMPTY SLOTS WITH CPU', default: true }],
+    options: [
+      { key: 'mode', type: 'select', label: 'MODE', default: 'single', choices: [{ value: 'single', label: 'Single race' }, { value: 'cup', label: 'Grand Prix (4 races)' }] },
+      { key: 'cc', type: 'select', label: 'ENGINE CLASS', default: 100, choices: [{ value: 50, label: '50cc' }, { value: 100, label: '100cc' }, { value: 150, label: '150cc' }] },
+      { key: 'laps', type: 'select', label: 'LAPS', default: 3, choices: [1, 2, 3, 4, 5].map(n => ({ value: n, label: n + (n === 1 ? ' lap' : ' laps') })) },
+      { key: 'cpu', type: 'select', label: 'CPU DIFFICULTY', default: 'normal', choices: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }] },
+      { key: 'fillAI', type: 'bool', label: 'FILL EMPTY SLOTS WITH CPU', default: true },
+    ],
     load: () => import('./kart/index.js'),
   },
   {

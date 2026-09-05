@@ -11,12 +11,27 @@
 #item canvas { width: 84px; height: 84px; }
 #itemLabel { position: absolute; bottom: -22px; left: 0; width: 100%; text-align: center; font-size: 13px; letter-spacing: 2px; color: #cfe3ff; font-weight: 700; }
 
-/* lap + timer */
-#lapbox { top: 18px; right: 18px; padding: 10px 16px; text-align: right; min-width: 170px; }
+/* standings column */
+#standings { top: 162px; left: 18px; padding: 6px 8px; min-width: 150px; font-size: 13px; letter-spacing: .5px; }
+#standings .row { display: flex; align-items: center; gap: 7px; padding: 2px 5px; border-radius: 6px; line-height: 17px; }
+#standings .row b { width: 16px; text-align: right; font-style: italic; color: #cfe3ff; }
+#standings .row i { width: 11px; height: 11px; border-radius: 3px; border: 1px solid rgba(255,255,255,.55); flex: none; }
+#standings .row span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 108px; }
+#standings .row.me { background: rgba(255,213,74,.2); font-weight: 900; color: #ffd54a; }
+#standings .row.done span::after { content: ' 🏁'; font-size: 11px; }
+
+/* lap + timer + coins, stacked top right */
+#rightcol { top: 18px; right: 18px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+#lapbox { padding: 10px 16px; text-align: right; min-width: 170px; }
 #lap { font-size: 26px; font-weight: 900; letter-spacing: 1px; }
 #lap b { color: #ffd54a; }
 #timer { font-size: 22px; font-variant-numeric: tabular-nums; color: #dbe9ff; margin-top: 2px; }
 #lapbox.final #lap { color: #ff8a5c; }
+
+/* coins */
+#coinbox { padding: 5px 14px; display: flex; align-items: center; gap: 8px; font-size: 22px; font-weight: 900; color: #ffd54a; transition: transform .15s; }
+#coinbox i { width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff2a0, #ffd23f 55%, #b07800); border: 2px solid #7a5200; box-shadow: 0 0 8px rgba(255,210,63,.6); }
+#coinbox.bump { animation: pop .25s ease-out; }
 
 /* position */
 #pos { left: 22px; bottom: 18px; font-size: 96px; font-weight: 900; line-height: .9; font-style: italic; color: #fff; -webkit-text-stroke: 3px rgba(10,14,40,.85); text-shadow: 0 6px 0 rgba(0,0,0,.35); transition: transform .15s; }
@@ -47,8 +62,24 @@
 #count.go { color: #5cff8a; }
 @keyframes countPop { 0% { transform: translate(-50%,-50%) scale(1.6); opacity: 0; } 15% { transform: translate(-50%,-50%) scale(1); opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%,-50%) scale(.9); } }
 
+/* kart card during the countdown */
+#kartcard { left: 50%; bottom: 175px; transform: translateX(-50%); padding: 10px 18px; display: none; align-items: center; gap: 16px; }
+#kartcard.show { display: flex; animation: pop .35s ease-out; }
+#kartcard b { font-size: 22px; font-style: italic; letter-spacing: 1px; }
+#kartcard > span { font-size: 12px; letter-spacing: 3px; color: #ffd54a; border: 1px solid rgba(255,213,74,.5); border-radius: 6px; padding: 2px 8px; }
+#kartcard .bars { display: flex; flex-direction: column; gap: 3px; }
+#kartcard .bars div { display: flex; align-items: center; gap: 8px; font-size: 10px; letter-spacing: 2px; color: #cfe3ff; }
+#kartcard .bars i { width: 64px; font-style: normal; text-align: right; }
+#kartcard .bars u { width: 110px; height: 7px; background: rgba(255,255,255,.15); border-radius: 4px; overflow: hidden; text-decoration: none; }
+#kartcard .bars s { display: block; height: 100%; background: linear-gradient(90deg, #4fd1ff, #ffd54a); border-radius: 4px; text-decoration: none; }
+
 /* flash */
 #flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: #ff2030; }
+/* blooper ink */
+#ink { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity .3s;
+  background: radial-gradient(circle at 20% 30%, rgba(10,12,40,.96) 0 14%, transparent 23%), radial-gradient(circle at 70% 22%, rgba(10,12,40,.96) 0 18%, transparent 28%),
+    radial-gradient(circle at 45% 72%, rgba(10,12,40,.96) 0 20%, transparent 31%), radial-gradient(circle at 87% 70%, rgba(10,12,40,.96) 0 12%, transparent 21%),
+    radial-gradient(circle at 8% 82%, rgba(10,12,40,.96) 0 10%, transparent 19%), radial-gradient(circle at 50% 8%, rgba(10,12,40,.96) 0 9%, transparent 16%); }
 
 /* results */
 #results { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(4,8,24,.55); }
@@ -63,8 +94,19 @@
 #results .t { text-align: right; font-variant-numeric: tabular-nums; color: #dbe9ff; }
 #results .cpu { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; vertical-align: middle; margin-left: 6px; }
 #results .foot { margin-top: 18px; text-align: center; font-size: 16px; color: #dbe9ff; letter-spacing: 2px; display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
+#results .tables { display: flex; gap: 28px; align-items: flex-start; }
+#results .tables > div { min-width: 300px; }
+#results h3 { margin: 4px 0 8px; font-size: 13px; font-weight: 700; color: #cfe3ff; letter-spacing: 3px; text-align: center; }
+#results #cupTable { font-size: 17px; }
+#results #cupTable td { padding: 4px 8px; }
+#results .pts { color: #ffd54a; font-weight: 900; }
+#results .dim { color: #8fa3c8; font-size: 15px; }
+#results tr.win td { background: rgba(255,213,74,.28); color: #ffd54a; }
+#results .laps { margin-top: 8px; font-size: 13px; color: #8fa3c8; letter-spacing: 1px; font-variant-numeric: tabular-nums; text-align: center; }
+#results .next { margin-top: 8px; text-align: center; font-size: 18px; font-weight: 900; color: #ffd54a; letter-spacing: 3px; min-height: 22px; }
+#cupline { font-size: 12px; letter-spacing: 2px; color: #ffd54a; margin-bottom: 2px; }
 
 /* hint + wrong way */
-#hint { bottom: 12px; left: calc(50% + 150px); font-size: 12px; color: rgba(255,255,255,.55); letter-spacing: 1px; }
+#hint { bottom: 12px; right: 232px; font-size: 11px; white-space: nowrap; color: rgba(255,255,255,.55); letter-spacing: 1px; }
 #wrong { top: 32%; left: 50%; transform: translateX(-50%); font-size: 40px; font-weight: 900; color: #ff5c6a; display: none; animation: blink .6s infinite; }
 @keyframes blink { 50% { opacity: .35; } }

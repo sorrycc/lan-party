@@ -1,7 +1,6 @@
 # LAN Party
-
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
-Ships with **Frostline Kart**, a snowy kart racer with items, CPU karts and up to 8 players, **Dodgeball 3v3**,
+Ships with **Frostline Kart**, a snowy kart racer with Mario-Kart-style items, coins, Grand Prix cups, CPU karts and up to 8 players, **Dodgeball 3v3**,
 a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest,
 **Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city, and
 **Crossy Farm Car**, a hop-across-the-farm race where up to 8 cars dodge the same herds until the last one is flattened.
@@ -28,7 +27,7 @@ Open one of these on every machine:
 4. Players press **READY**; the host adjusts the game's options and presses **START GAME**.
 5. Afterwards the host can restart (`R`) or send everyone back to the lobby (`Esc`).
 
-**PLAY SOLO** runs the selected game without a room, if the game allows a single player.
+**PLAY SOLO** runs the selected game without a room, if the game allows a single player; the game's options appear under the game list as **SOLO OPTIONS** and apply to every solo restart.
 
 Use `PORT=4000 npm start` to change the port.
 
@@ -111,9 +110,26 @@ Rules of the road:
 - Message names `create join joined lobby opt start end leave left closed error` belong to the lobby. Anything else is relayed as-is; add `to: <playerId>` to send to one player only.
 - Detach every `window` listener and cancel your animation frame in `stop()`/`destroy()`. The shell unmounts the game when the room closes or the player returns to the menu.
 
-## Frostline Kart controls
+## Frostline Kart
 
-Arrows / WASD to drive, Space to use an item, M to toggle sound. Hold the throttle as the countdown hits GO for a rocket start.
+Arrows / WASD to drive, M to toggle sound, R for the next race (host), Esc to leave. Hold the throttle as the countdown hits GO for a rocket start.
+
+Space (or Enter / E) works the item slot. Shells, bananas and bob-ombs are carried: press to deploy one so it trails behind the kart
+(a triple orbits it) where it blocks incoming shells, release to throw it. Hold the brake (↓ / S) while releasing to throw the other way:
+shells backward, a banana or bob-omb forward. Everything else fires on press; the golden mushroom and fire flower fire on every press
+until their timer runs out. Shift is unused, reserved for a future drift key.
+
+Items are rolled by how far you are behind the leader, not by place: coins, bananas and green shells at the front; red shells, triples,
+fire flowers and bob-ombs mid-pack; stars, golden mushrooms, bloopers, blue shells, lightning and bullet bills at the back. Only one
+blue shell and one lightning strike are ever in play at a time. Coins on the road raise top speed by about one percent each up to ten
+and a hit scatters three. The blue shell flies over the field and dives on the leader; a bob-omb blows up on contact or after its fuse;
+a blooper inks everyone ahead of the thrower; a bullet bill drives your kart down the racing line at almost double speed, immune to everything.
+
+Options (in the lobby, or under SOLO OPTIONS on the start screen): a single race or a **Grand Prix** of four races on the four track
+variants (Frostline, Reverse, Mirror, Mirror Reverse) scored 15-12-10-9-8-7-6-5 with a trophy screen at the end, engine class
+(50cc / 100cc / 150cc), laps (1 to 5), CPU difficulty and whether CPUs fill the empty slots. The host moves a cup on a few seconds after
+everyone has finished (or by pressing R once they have finished themselves). Every colour is a kart with a weight class, shown on the
+countdown card: light karts launch and turn better, heavy karts are faster on the straights and shove lighter karts aside.
 
 ## Dodgeball 3v3
 
@@ -132,6 +148,7 @@ Clients predict their own walking and driving locally and are corrected by the h
 Everyone starts on Ender Ave with a sports car in their colour. The Downtown Hit mission is shared: the first player to reach Diamond Plaza flushes Vinny out,
 whoever whacks him collects the $5000 and the heat. Wanted levels are per player and the cops chase whoever they can see. Players can shoot and run each other over
 unless the host turns friendly fire off; a wasted player respawns at the hospital minus $300. Rounds are timed (5, 10, 15 minutes or unlimited) and end with a scoreboard ranked by cash, then kills.
+
 
 ## Crossy Farm Car
 

@@ -1,6 +1,6 @@
 /* Shell: menu, lobby and the lifecycle of the chosen game. Games live in games/<id>/ and are loaded on demand;
    the game contract is documented at the top of games/kart/index.js. */
-import { GAMES, gameById, defaultOpts } from './games/registry.js';
+import { GAMES, gameById, defaultOpts, cleanOpts } from './games/registry.js';
 import { AVATARS, MAX_NAME } from './core/avatars.js';
 import { Net, wsUrl } from './core/net.js';
 import { createAudio } from './core/audio.js';
@@ -9,7 +9,7 @@ import { esc, hex } from './core/ui.js';
 
 const $ = id => document.getElementById(id);
 const audio = createAudio();
-const S = { net: null, id: null, room: null, hostId: null, addr: '', players: [], opts: {}, gameId: GAMES[0].id, mode: 'menu', playing: false, name: '', avatar: 0, game: null, gameMeta: null, loading: null };
+const S = { net: null, id: null, room: null, hostId: null, addr: '', players: [], opts: {}, soloOpts: {}, gameId: GAMES[0].id, mode: 'menu', playing: false, name: '', avatar: 0, game: null, gameMeta: null, loading: null };
 const isHost = () => S.id !== null && S.id === S.hostId;
 const meP = () => S.players.find(p => p.id === S.id);
 const curGame = () => gameById(S.gameId) || GAMES[0];
@@ -46,26 +46,28 @@ function renderGames() {
     el.appendChild(d);
   }
   $('btnSolo').disabled = curGame().minPlayers > 1;
+  renderSoloOpts();
 }
 function renderStart() { renderAvatars($('avatarsStart'), S.avatar, new Set(), i => { S.avatar = i; savePrefsNow(); renderStart(); }); renderGames(); }
 
-/* lobby options are declared by the game (registry.js); the host edits them, everyone else sees them */
-function renderOpts() {
-  const game = curGame(), host = isHost(), el = $('opts'); el.innerHTML = '';
+/* game options are declared by the game (registry.js). In the lobby the host edits them and everyone else sees them;
+   on the start screen the player edits a private copy that PLAY SOLO uses. */
+function renderOptsInto(el, game, opts, enabled, onChange) {
+  el.innerHTML = '';
   for (const o of game.options || []) {
     const label = document.createElement('label'); label.className = 'opt'; let input;
-    if (o.type === 'bool') { input = document.createElement('input'); input.type = 'checkbox'; input.checked = !!S.opts[o.key]; label.append(input, document.createTextNode(o.label)); }
-    else if (o.type === 'number') { input = document.createElement('input'); input.type = 'number'; if (o.min !== undefined) input.min = o.min; if (o.max !== undefined) input.max = o.max; if (o.step !== undefined) input.step = o.step; input.value = S.opts[o.key] ?? o.default; label.append(document.createTextNode(o.label), input); }
-    else if (o.type === 'select') { input = document.createElement('select'); for (const c of o.choices) { const opt = document.createElement('option'); opt.value = String(c.value); opt.textContent = c.label; opt.selected = c.value === S.opts[o.key]; input.appendChild(opt); } label.append(document.createTextNode(o.label), input); }
+    if (o.type === 'bool') { input = document.createElement('input'); input.type = 'checkbox'; input.checked = !!opts[o.key]; label.append(input, document.createTextNode(o.label)); }
+    else if (o.type === 'number') { input = document.createElement('input'); input.type = 'number'; if (o.min !== undefined) input.min = o.min; if (o.max !== undefined) input.max = o.max; if (o.step !== undefined) input.step = o.step; input.value = opts[o.key] ?? o.default; label.append(document.createTextNode(o.label), input); }
+    else if (o.type === 'select') { input = document.createElement('select'); for (const c of o.choices) { const opt = document.createElement('option'); opt.value = String(c.value); opt.textContent = c.label; opt.selected = c.value === opts[o.key]; input.appendChild(opt); } label.append(document.createTextNode(o.label), input); }
     else continue;
-    input.disabled = !host;
-    input.onchange = () => {
-      const v = o.type === 'bool' ? input.checked : o.type === 'number' ? Number(input.value) : (o.choices.find(c => String(c.value) === input.value) || {}).value;
-      if (S.net) S.net.send({ t: 'opt', opts: { [o.key]: v } });
-    };
+    input.disabled = !enabled;
+    input.onchange = () => onChange(o.key, o.type === 'bool' ? input.checked : o.type === 'number' ? Number(input.value) : (o.choices.find(c => String(c.value) === input.value) || {}).value);
     el.appendChild(label);
   }
 }
+function renderOpts() { renderOptsInto($('opts'), curGame(), S.opts, isHost(), (key, v) => { if (S.net) S.net.send({ t: 'opt', opts: { [key]: v } }); }); }
+const soloOpts = () => { const g = curGame(); return (S.soloOpts[g.id] ||= defaultOpts(g)); };
+function renderSoloOpts() { const g = curGame(); $('soloOptsWrap').hidden = !(g.options || []).length; renderOptsInto($('soloOpts'), g, soloOpts(), true, (key, v) => { S.soloOpts[g.id] = cleanOpts(g, { [key]: v }, soloOpts()); }); }
 const playerLi = p => `<li class="${p.id === S.id ? 'me' : ''}"><span class="sw" style="background:${hex(AVATARS[p.avatar].color)}"></span><span class="nm">${esc(p.name)}${p.id === S.id ? ' (you)' : ''}</span>${p.id === S.hostId ? '<span class="tag host">HOST</span>' : p.ready ? '<span class="tag ready">READY</span>' : '<span class="tag wait">NOT READY</span>'}</li>`;
 const pickTeam = id => { const me = meP(); if (S.net && me && !me.ready && me.team !== id) S.net.send({ t: 'lobby', team: id }); };
 /* team games: the roster is split into one column per side; click a column (or the friend/enemy shortcuts) to switch */
@@ -129,7 +131,7 @@ const loadError = (game, e) => { console.error(e); return `Could not load ${game
 
 /* ---------------------------------------------------------------- solo */
 const newSeed = () => (Math.random() * 0x100000000) >>> 0;
-const soloSession = () => { const g = curGame(); return { players: [{ id: 'me', name: S.name, avatar: S.avatar, team: g.teams ? g.teams[0].id : undefined }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: defaultOpts(g), seed: newSeed() }; };
+const soloSession = () => { const g = curGame(); return { players: [{ id: 'me', name: S.name, avatar: S.avatar, team: g.teams ? g.teams[0].id : undefined }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: cleanOpts(g, soloOpts(), defaultOpts(g)), seed: newSeed() }; };
 async function startSolo() {
   readName(); const game = curGame(); if (game.minPlayers > 1) { setStatus(`${game.title} needs at least ${game.minPlayers} players`); return; }
   S.mode = 'solo'; setStatus('Loading…', true); audio.init();
