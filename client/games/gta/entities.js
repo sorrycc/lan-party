@@ -124,6 +124,11 @@ export class CarView {
     W.carLight.color(this.il[4], type.cop ? 0xff2020 : type.taxi ? 0xffe14d : type.ambulance ? 0xff2020 : 0x000000); W.carLight.color(this.il[5], type.cop ? 0x2040ff : type.ambulance ? 0x2040ff : 0x000000);
   }
   release() { if (this.released) return; this.released = true; const W = this.W; W.carBody.release(this.ib); W.carCabin.release(this.ic); this.iw.forEach(i => W.carWheel.release(i)); this.il.forEach(i => W.carLight.release(i)); }
+  /* a fresh paint job (the Pay 'n' Spray); a wreck stays charred */
+  recolor(color, cabin) {
+    if (this.released) return; this.color = color; this.cabin = cabin;
+    if (!this.wasDead) { this.W.carBody.color(this.ib, color); this.W.carCabin.color(this.ic, cabin); }
+  }
   draw(s, dt, t) {
     if (this.released) return;
     const W = this.W, T = this.type, M = this.M, M2 = this.M2, M3 = this.M3;
@@ -155,5 +160,6 @@ export function drawPickup(W, i, x, z, t) {
   const { M, M2 } = _pm; const gy = groundY(x, z);
   M.makeTranslation(x, gy + 0.7 + Math.sin(t * 3) * 0.15, z); M.multiply(M2.makeRotationY(t * 2)); M.multiply(M2.makeScale(0.55, 0.55, 0.55)); W.pickPool.set(i, M);
 }
-export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : 0xff4d4d;
-export const PICK_KINDS = ['cash', 'ammo', 'health'];
+export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : kind === 'bribe' ? 0x4d8bff : 0xff4d4d;
+/* indexed on the wire, so only ever append */
+export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe'];

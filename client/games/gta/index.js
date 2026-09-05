@@ -15,7 +15,7 @@ import { esc, hex, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
 import { createLoop } from '../../core/loop.js';
 import { AVATARS } from '../../core/avatars.js';
-import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
+import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { WEAPONS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK } from './sim.js';
@@ -25,7 +25,7 @@ import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
-const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
+const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car, turn yourself in'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
 /* graphics detail levels; the auto mode steps down when the frame rate stays low */
 const QUALITY = [{ name: 'HIGH', pr: 1.5, shadow: 2048 }, { name: 'MEDIUM', pr: 1, shadow: 1024 }, { name: 'LOW', pr: 1, shadow: 0 }];
 const HTML = `<canvas class="gl"></canvas><canvas class="hud"></canvas>
@@ -63,6 +63,7 @@ function createSfx(audio) {
     explode(vol = 1) { hiss(1.2, 250, 1.2 * vol, 1.5); tone(70, 20, 0.9, 0.7 * vol, 'sawtooth'); },
     cash() { tone(1200, 1200, 0.08, 0.25, 'square'); tone(1800, 1800, 0.12, 0.25, 'square', 0.09); },
     wanted() { tone(500, 500, 0.12, 0.3, 'square'); tone(380, 380, 0.16, 0.3, 'square', 0.14); },
+    cleared() { tone(660, 660, 0.09, 0.25, 'square'); tone(880, 880, 0.09, 0.25, 'square', 0.1); tone(1320, 1320, 0.2, 0.25, 'square', 0.2); },
     wasted() { tone(220, 40, 1.6, 0.5, 'sawtooth'); },
     passed() { [523, 659, 784, 1046].forEach((f, i) => tone(f, f, 0.22, 0.28, 'square', i * 0.14)); },
     enter() { tone(300, 200, 0.12, 0.2, 'square'); },
@@ -174,7 +175,9 @@ export async function create({ mount, audio, send, hooks }) {
       case 'respawn': if (mine(ev[1])) { camYaw = 0; camPitch = 0.22; } break;
       case 'wanted': if (mine(ev[1])) { wantedFlash = 3; sfx.wanted(); } break;
       case 'float': if (ev[1] === -1 || mine(ev[1])) floatText(ev[2], ev[3]); break;
-      case 'pickup': if (mine(ev[1])) { if (ev[2] === 'cash') { sfx.cash(); floatText('+$' + ev[3], 0x3dff7a); } else if (ev[2] === 'ammo') { sfx.pickup(); floatText('AMMO', 0xffe14d); } else { sfx.pickup(); floatText('+HEALTH', 0xff4d4d); } } break;
+      case 'pickup': if (mine(ev[1])) { if (ev[2] === 'cash') { sfx.cash(); floatText('+$' + ev[3], 0x3dff7a); } else if (ev[2] === 'ammo') { sfx.pickup(); floatText('AMMO', 0xffe14d); }
+        else if (ev[2] === 'bribe') { sfx.cleared(); floatText(ev[3] > 0 ? 'BRIBE ACCEPTED  -1 STAR' : 'BRIBE ACCEPTED  YOU LOST THE COPS', 0x4d8bff); } else { sfx.pickup(); floatText('+HEALTH', 0xff4d4d); } } break;
+      case 'cleared': if (mine(ev[1])) { sfx.cleared(); wantedFlash = 0; } break;
       case 'click': if (mine(ev[1])) sfx.click(); break;
       case 'enter': if (mine(ev[1])) sfx.enter(); break;
       case 'reload': if (mine(ev[1])) sfx.reload(); break;
@@ -311,6 +314,7 @@ export async function create({ mount, audio, send, hooks }) {
     computeCamera(W, V.subj, camYaw, camPitch, cam); camera.position.set(cam.x, cam.y, cam.z); camera.lookAt(cam.lx, cam.ly, cam.lz);
     W.dayNight(clock, V.subj.x, V.subj.z, camera); W.animate(dt, t, camera); fx.update(dt); carAmbient(dt); updateAudio();
     W.plazaMarker.visible = V.ms < 2; W.plazaMarker.rotation.y += dt; W.plazaMarker.material.opacity = 0.3 + Math.sin(roundT * 4) * 0.15;
+    W.sprayMarker.rotation.y -= dt; W.sprayMarker.material.opacity = (V.me && V.me.wanted > 0 ? 0.4 : 0.18) + Math.sin(roundT * 3) * 0.1;
     const d = districtAt(V.subj.x, V.subj.z), s = streetAt(V.subj.x, V.subj.z);
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
@@ -334,6 +338,9 @@ export async function create({ mount, audio, send, hooks }) {
       for (const [i, j] of route) hctx.lineTo(wx(X(i)), wx(X(j))); if (routeTarget) hctx.lineTo(wx(routeTarget.x), wx(routeTarget.z)); hctx.stroke(); }
     if (routeTarget) { hctx.fillStyle = '#ffe14d'; hctx.fillRect(wx(routeTarget.x) - 6, wx(routeTarget.z) - 6, 12, 12); }
     hctx.fillStyle = '#ffffff'; hctx.fillRect(wx(HOSPITAL.x) - 6, wx(HOSPITAL.z - 10) - 6, 12, 12); hctx.fillStyle = '#e02020'; hctx.fillRect(wx(HOSPITAL.x) - 4, wx(HOSPITAL.z - 10) - 1.5, 8, 3); hctx.fillRect(wx(HOSPITAL.x) - 1.5, wx(HOSPITAL.z - 10) - 4, 3, 8);
+    // the Pay 'n' Spray (cyan, a spray can) and the precinct door (blue, a badge)
+    { const sx = wx(SPRAY.x), sz = wx(SPRAY.z); hctx.fillStyle = '#2fd0ff'; hctx.fillRect(sx - 6, sz - 6, 12, 12); hctx.fillStyle = '#ffffff'; hctx.fillRect(sx - 2, sz - 2, 4, 6); hctx.fillRect(sx - 1, sz - 4.5, 2, 2); hctx.fillRect(sx + 1, sz - 4, 2.5, 1.5); }
+    { const px = wx(POLICE_DOOR.x), pz = wx(POLICE_DOOR.z - 4); hctx.fillStyle = '#4d7fff'; hctx.fillRect(px - 6, pz - 6, 12, 12); hctx.fillStyle = '#ffffff'; hctx.beginPath(); hctx.moveTo(px, pz - 4); hctx.lineTo(px + 3.5, pz - 2.5); hctx.lineTo(px + 2.5, pz + 2); hctx.lineTo(px, pz + 4); hctx.lineTo(px - 2.5, pz + 2); hctx.lineTo(px - 3.5, pz - 2.5); hctx.closePath(); hctx.fill(); }
     for (const c of V.cops) { if (c.car) { hctx.fillStyle = Math.floor(t * 6) % 2 ? '#4d7fff' : '#ff4d4d'; hctx.fillRect(wx(c.x) - 5, wx(c.z) - 5, 10, 10); } else { hctx.fillStyle = '#4d7fff'; hctx.beginPath(); hctx.arc(wx(c.x), wx(c.z), 4, 0, TAU); hctx.fill(); } }
     if (V.vin && !V.vin.dead && MISSION_STATES[V.ms] === 'hit') { hctx.fillStyle = '#ff4d4d'; hctx.beginPath(); hctx.arc(wx(V.vin.x), wx(V.vin.z), 5, 0, TAU); hctx.fill(); }
     for (const p of V.players) if (!p.me && !p.gone) { hctx.fillStyle = hex(p.color); hctx.fillRect(wx(p.x) - 5, wx(p.z) - 5, 10, 10); hctx.strokeStyle = '#fff'; hctx.lineWidth = 1.5; hctx.strokeRect(wx(p.x) - 5, wx(p.z) - 5, 10, 10); }

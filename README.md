@@ -1,4 +1,5 @@
 # LAN Party
+
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
 Ships with **Frostline Kart**, a snowy kart racer with Mario-Kart-style items, coins, Grand Prix cups, CPU karts and up to 8 players, **Dodgeball 3v3**,
 a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest,
@@ -149,6 +150,9 @@ Everyone starts on Ender Ave with a sports car in their colour. The Downtown Hit
 whoever whacks him collects the $5000 and the heat. Wanted levels are per player and the cops chase whoever they can see. Players can shoot and run each other over
 unless the host turns friendly fire off; a wasted player respawns at the hospital minus $300. Rounds are timed (5, 10, 15 minutes or unlimited) and end with a scoreboard ranked by cash, then kills.
 
+Losing the stars: stay out of the cops' sight for long enough and they drop one at a time; a blue **bribe** pickup (hidden in the parks, behind the precinct and by the
+Ferris wheel, and sometimes dropped by a dead cop) takes one star off; the **Pay 'n' Spray** downtown, marked in cyan on the map, clears them all for $100 a star
+when you stop a car in its bay, and repaints the car; or walk up to the precinct door with F to **turn yourself in**: the same fine, capped at what you carry, plus your spare ammo.
 
 ## Crossy Farm Car
 

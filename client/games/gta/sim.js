@@ -8,7 +8,7 @@
        range that changed since the last tick, plus a per-player HUD block and the events that concern them). */
 import { clamp, lerp } from '../../core/math.js';
 import { AVATARS } from '../../core/avatars.js';
-import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, cornerXZ, rayAabb, raySphere, computeCamera } from './world.js';
+import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, cornerXZ, rayAabb, raySphere, computeCamera } from './world.js';
 import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS } from './entities.js';
 import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar } from './motion.js';
 export { IN };
@@ -19,13 +19,15 @@ const ri = (a, b) => Math.floor(rr(a, b + 1));
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
 
-export const HINT = ['', 'F  EXIT CAR      SPACE  HANDBRAKE', 'F  JACK CAR', 'F  ENTER CAR'];
+export const HINT = ['', 'F  EXIT CAR      SPACE  HANDBRAKE', 'F  JACK CAR', 'F  ENTER CAR', 'STOP IN THE BAY TO RESPRAY   $100 A STAR', 'F  TURN YOURSELF IN   $100 A STAR'];
 export const MISSION_STATES = ['intro', 'goto', 'hit', 'passed', 'escape', 'done'];
-export const OBJECTIVES = { intro: 'Get to Diamond Plaza, downtown.', goto: 'Get to Diamond Plaza, downtown.', hit: "Whack Vinny 'Snitch' Voxel. Watch the bodyguards.", passed: 'Mission passed. Lose the cops.', escape: 'Lose the wanted level.', done: 'Free roam. Cause chaos in Los Pixeles.' };
+export const OBJECTIVES = { intro: 'Get to Diamond Plaza, downtown.', goto: 'Get to Diamond Plaza, downtown.', hit: "Whack Vinny 'Snitch' Voxel. Watch the bodyguards.", passed: 'Mission passed. Lose the cops.', escape: "Lose the wanted level: hide out, find a bribe, hit the Pay 'n' Spray or turn yourself in.", done: 'Free roam. Cause chaos in Los Pixeles.' };
 export const INTRO_T = 5.5;
 export const START_CLOCK = { morning: 9.4, sunset: 18.2, night: 23.5 };
 const NET_RANGE2 = 320 * 320, EV_RANGE2 = 360 * 360, MAX_COPS = 24, MAX_COP_CARS = 8;
-const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload']);
+const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared']);
+/* the wanted level: what a star costs to buy off, how long a taken bribe stays gone, how often a dead cop drops one */
+const STAR_PRICE = 100, BRIBE_RESPAWN = 90, COP_BRIBE_CHANCE = 0.35;
 const SPAWN_ROAD = 3, SPAWN_BLOCK = 7; // the players line up on Ender Ave beside block (3,7), four per sidewalk
 export const SPAWNS = Array.from({ length: 8 }, (_, i) => { const side = i < 4 ? -1 : 1, z = X(SPAWN_BLOCK) + 12 + (i % 4) * 8;
   return { x: X(SPAWN_ROAD) + side * 9.6, z, cx: X(SPAWN_ROAD) + side * PARK, yaw: side < 0 ? 0 : PI, face: side < 0 ? PI / 2 : -PI / 2 }; });
@@ -47,6 +49,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.camYaw = 0; this.camPitch = 0.22; this.bits = 0; this.clicks = 0; this.clicksSeen = null; this.seq = 0; this.seqApplied = 0;
       this.wanted = 0; this.heat = 0; this.crimeT = 0; this.seenT = 0; this.copSpawnT = 0; this.cash = 250; this.kills = 0;
       this.weapons = WEAPONS.map(w => ({ ...w })); this.curW = 0; this.reloadT = 0; this.fireT = 0; this.armTimer = 0; this.godT = 0; this.noDmgT = 0; this.wastedT = 0; this.hint = 0; this.jumpLatch = false;
+      this.msgT = 0; // cooldown on the "can't afford it" reminder
     }
     get car() { return this.ped ? this.ped.inCar : null; }
     get dead() { return !this.ped || this.ped.dead; }
@@ -321,19 +324,35 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
 
   /* ============================================================ pickups */
-  function spawnPickup(x, z, kind, amount) {
-    const i = W.pickPool.alloc(); if (i < 0) return;
+  function spawnPickup(x, z, kind, amount, life = 70) {
+    const i = W.pickPool.alloc(); if (i < 0) return null;
     W.pickPool.color(i, PICK_COLOR(kind));
-    const p = { id: nextId++, cls: 'pick', i, x, z, kind, amount, t: rr(0, TAU), life: 70, released: false, sent: null, entry: null, dirty: true }; pickups.push(p); ents.set(p.id, p);
+    const p = { id: nextId++, cls: 'pick', i, x, z, kind, amount, t: rr(0, TAU), life, spot: null, released: false, sent: null, entry: null, dirty: true }; pickups.push(p); ents.set(p.id, p);
+    return p;
   }
   function updatePickups(dt) {
     for (let k = pickups.length - 1; k >= 0; k--) { const p = pickups[k]; p.t += dt; p.life -= dt; let take = false;
-      for (const pl of players) { if (!alive(pl)) continue; const P = pl.ped; if (dist2(p.x, p.z, P.x, P.z) >= (P.inCar ? 4 : 1.6)) continue; take = true;
-        if (p.kind === 'cash') pl.cash += p.amount; else if (p.kind === 'ammo') { pl.weapons[0].reserve += 24; pl.weapons[1].reserve += 8; pl.weapons[2].reserve += 40; } else P.health = Math.min(100, P.health + 40);
-        emit(['pickup', pl.idx, p.kind, p.amount]); break; }
-      if (take || p.life <= 0) { W.pickPool.release(p.i); p.released = true; ents.delete(p.id); pickups.splice(k, 1); continue; }
+      for (const pl of players) { if (!alive(pl)) continue; const P = pl.ped; if (dist2(p.x, p.z, P.x, P.z) >= (P.inCar ? 4 : 1.6)) continue;
+        if (p.kind === 'bribe' && pl.wanted <= 0) continue; // nothing to buy off: leave it for when it matters
+        take = true;
+        if (p.kind === 'cash') pl.cash += p.amount; else if (p.kind === 'ammo') { pl.weapons[0].reserve += 24; pl.weapons[1].reserve += 8; pl.weapons[2].reserve += 40; }
+        else if (p.kind === 'bribe') { pl.wanted--; if (pl.wanted <= 0) clearWanted(pl); }
+        else P.health = Math.min(100, P.health + 40);
+        emit(['pickup', pl.idx, p.kind, p.kind === 'bribe' ? pl.wanted : p.amount]); break; }
+      if (take || p.life <= 0) { W.pickPool.release(p.i); p.released = true; ents.delete(p.id); pickups.splice(k, 1); if (p.spot) { p.spot.p = null; p.spot.t = BRIBE_RESPAWN; } continue; }
       drawPickup(W, p.i, p.x, p.z, p.t); }
     W.pickPool.dirty();
+  }
+  /* the bribes hidden around the city: each spot holds one until it is taken, then grows a new one after a while */
+  const parkSpot = (i, j, ox, oz) => ({ x: X(i) + PITCH / 2 + ox, z: X(j) + PITCH / 2 + oz });
+  const bribeSpots = [
+    parkSpot(2, 2, 7, 7), parkSpot(10, 9, -7, -7), parkSpot(3, 10, 7, -7), parkSpot(1, 7, -7, 7),   // the four parks
+    { x: POLICE.x, z: X(5) + ROAD / 2 + 2.2 },                                                     // the alley behind the precinct
+    { x: FERRIS.x + 9, z: FERRIS.z },                                                              // beside the Ferris wheel
+  ].map(s => ({ ...s, p: null, t: 0 }));
+  function growBribes(dt) {
+    for (const s of bribeSpots) { if (s.p) continue; s.t -= dt; if (s.t > 0) continue;
+      const p = spawnPickup(s.x, s.z, 'bribe', 1, Infinity); if (p) { p.spot = s; s.p = p; } else s.t = 5; }
   }
 
   /* ============================================================ raycasting & shooting */
@@ -428,7 +447,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (let k = 0; k < 10; k++) spawnTrafficCar(pl);
   }
   function onPlayerKill(p, by) {
-    if (p.kind === 'cop') { addWanted(by, 1); spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), 'ammo', 1); }
+    if (p.kind === 'cop') { addWanted(by, 1); spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), rnd() < COP_BRIBE_CHANCE ? 'bribe' : 'ammo', 1); }
     else if (p.kind === 'civ') { if (rnd() < 0.75 || by.wanted === 0) addWanted(by, 1); if (rnd() < 0.7) spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), 'cash', ri(5, 60)); }
     else if (p.kind === 'guard') { if (by.wanted < 1) addWanted(by, 1); if (rnd() < 0.6) spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), 'ammo', 1); }
   }
@@ -436,6 +455,29 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (!pl || pl.gone) return;
     const old = pl.wanted; pl.wanted = clamp(pl.wanted + n, 0, 5); pl.crimeT = 0; pl.seenT = 0;
     if (pl.wanted > old) emit(['wanted', pl.idx, pl.wanted]);
+  }
+  /* the heat is off: no stars, no simmering heat, and the cops on this player's tail pick a new target or stand down */
+  function clearWanted(pl) {
+    pl.wanted = 0; pl.heat = 0; pl.crimeT = 0; pl.seenT = 0;
+    for (const c of cars) if (c.target === pl) c.target = null;
+    for (const c of cops) if (c.target === pl) c.target = null;
+  }
+  /* the Pay 'n' Spray: parked in the bay with stars, pay per star, get a new colour and a clean record */
+  function trySpray(pl, c) {
+    const cost = STAR_PRICE * pl.wanted;
+    if (pl.cash < cost) { if (pl.msgT <= 0) { pl.msgT = 4; emit(['float', pl.idx, 'THE RESPRAY COSTS $' + cost, 0xff6060]); } return; }
+    pl.cash -= cost; clearWanted(pl);
+    const colors = c.type.colors.filter(k => k !== c.color); c.color = colors.length ? pick(colors) : c.color;
+    if (c.type.cabin === undefined) c.cabinColor = rnd() < 0.5 ? c.color : 0x222630;
+    c.view.recolor(c.color, c.cabinColor);
+    emit(['cleared', pl.idx, 'spray']); emit(['float', pl.idx, 'RESPRAYED  -$' + cost, 0x2fd0ff]);
+  }
+  /* turning yourself in at the precinct: the fine is a star's price each, capped at what you carry, and the spare ammo goes */
+  function surrender(pl) {
+    const fine = Math.min(pl.cash, STAR_PRICE * pl.wanted);
+    pl.cash -= fine; for (const w of pl.weapons) w.reserve = 0;
+    clearWanted(pl);
+    emit(['cleared', pl.idx, 'busted']); emit(['float', pl.idx, 'BUSTED  -$' + fine, 0x4d7fff]); emit(['float', pl.idx, 'SPARE AMMO CONFISCATED', 0xff6060]);
   }
 
   /* ============================================================ cars: enter / exit */
@@ -459,9 +501,12 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     c.ai = null; c.driver = P; c.panic = 0; c.hand = false; c.target = null; P.inCar = c; P.moving = 0; emit(['enter', pl.idx]);
     if (c.type.cop && pl.wanted < 1) addWanted(pl, 1);
   }
+  const atPoliceDoor = P => dist2(P.x, P.z, POLICE_DOOR.x, POLICE_DOOR.z) < 3 * 3;
+  const inSprayBay = c => Math.abs(c.x - SPRAY.x) < SPRAY.hw && Math.abs(c.z - SPRAY.z) < SPRAY.hd;
   function tryEnterExit(pl) {
     const P = pl.ped; if (!P || P.dead) return;
     if (P.inCar) { leaveCar(pl, false); return; }
+    if (pl.wanted > 0 && atPoliceDoor(P)) { surrender(pl); return; }
     const c = nearestCar(P, 4.2); if (c) enterCar(pl, c);
   }
   /* ============================================================ spawning */
@@ -548,7 +593,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
 
   /* ============================================================ the players' own update */
   function updatePlayer(pl, dt, live) {
-    const P = pl.ped; pl.noDmgT += dt; pl.godT -= dt; pl.fireT -= dt; pl.armTimer -= dt;
+    const P = pl.ped; pl.noDmgT += dt; pl.godT -= dt; pl.fireT -= dt; pl.armTimer -= dt; pl.msgT -= dt;
     if (P.dead) { P.deadT += dt; pl.wastedT -= dt; if (pl.wastedT <= 0 && live) respawn(pl); P.gun = null; P.draw(dt); return; }
     if (pl.noDmgT > 8 && P.health < 100) P.health = Math.min(100, P.health + 3 * dt);
     if (pl.reloadT > 0) { pl.reloadT -= dt; if (pl.reloadT <= 0) { const w = pl.weapons[pl.curW]; const take = Math.min(w.mag - w.ammo, w.reserve); w.ammo += take; w.reserve -= take; } }
@@ -562,11 +607,13 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       P.x = c.x; P.z = c.z; P.y = c.y; P.yaw = c.yaw; P.moving = 0;
       pl.hint = 1;
       if (c.dead) leaveCar(pl, false);
+      else if (live && pl.wanted > 0 && dist2(c.x, c.z, SPRAY.x, SPRAY.z) < 22 * 22) { pl.hint = 4; if (c.speed < 1.5 && inSprayBay(c)) trySpray(pl, c); }
     } else {
       stepOnFoot(W, P, b, pl.camYaw, pl.armTimer > 0, dt, cars);
       for (const p of peds) { if (p === P || p.dead || p.inCar) continue; const d2 = dist2(p.x, p.z, P.x, P.z); if (d2 < 0.7 && d2 > 1e-4) { const d = Math.sqrt(d2), push = (0.84 - d) / d; p.x += (p.x - P.x) * push; p.z += (p.z - P.z) * push; } }
       const c = nearestCar(P, 4.2);
       if (c) pl.hint = (c.ai === 'traffic' || (c.ai === 'cop' && c.occupants)) ? 2 : 3;
+      if (pl.wanted > 0 && atPoliceDoor(P)) pl.hint = 5;
       if (dist2(P.x, P.z, HOSPITAL.x, HOSPITAL.z) < 36 && P.health < 100) P.health = Math.min(100, P.health + 25 * dt);
     }
     P.armRaise = lerp(P.armRaise, pl.armTimer > 0 && !P.inCar ? 1 : 0, Math.min(1, 10 * dt));
@@ -584,7 +631,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.released) { peds.splice(k, 1); continue; } if (p.kind === 'player') continue; p.update(dt);
       if (!p.dead && !p.inCar) { if (pushOutOfCars(p, 0.3, false, cars)) { p.carStuck++; if (p.carStuck > 90 && p.kind === 'civ') { p.carStuck = 0; p.flee = 2; p.threatX = p.x + rr(-1, 1); p.threatZ = p.z + rr(-1, 1); p.state = 'flee'; } } else p.carStuck = 0; } }
     if (live) { updateWanted(dt); updateMission(dt); }
-    updatePickups(dt);
+    updatePickups(dt); growBribes(dt);
     W.dirtyDynamic();
     // population maintenance: cull what is far from everyone, top up near a random player
     S.spawnT -= dt;

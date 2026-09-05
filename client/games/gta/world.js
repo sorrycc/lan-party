@@ -49,10 +49,13 @@ export function streetAt(x, z) {
   if (onS) return STREETS[kz];
   return dx < dz ? AVENUES[kx] : STREETS[kz];
 }
-export const SPECIAL = { '6,6': 'plaza', '9,3': 'hospital', '8,5': 'police', '2,2': 'park', '10,9': 'park', '3,10': 'park', '1,7': 'park' };
+export const SPECIAL = { '6,6': 'plaza', '9,3': 'hospital', '8,5': 'police', '4,4': 'spray', '2,2': 'park', '10,9': 'park', '3,10': 'park', '1,7': 'park' };
 export const PLAZA = { x: X(6) + PITCH / 2, z: X(6) + PITCH / 2 };
 export const HOSPITAL = { x: X(9) + PITCH / 2, z: X(3) + PITCH - ROAD / 2 - SW / 2 - 0.5 };
 export const POLICE = { x: X(8) + PITCH / 2, z: X(5) + PITCH - ROAD / 2 - 2 };
+/* the precinct's front door (turn yourself in on foot) and the Pay 'n' Spray bay (drive in and stop); hw/hd are the bay's half extents */
+export const POLICE_DOOR = { x: POLICE.x, z: X(5) + PITCH - ROAD / 2 - SW - 7.2 };
+export const SPRAY = { x: X(4) + PITCH / 2, z: X(4) + PITCH - ROAD / 2 - SW - 7.5, hw: 4.5, hd: 6.5 };
 export const FERRIS = { x: 0, y: 26, z: BEACH_Z0 + 30, r: 22 };
 export const cornerXZ = (i, j, k) => {
   const c = ROAD / 2 + SW / 2;
@@ -390,6 +393,21 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
       propPool.box(cx, 11.3, cz - 4, 8, 0.6, 3, 0x3a4a68);
       glowPool.box(cx - 2, 12, cz - 4, 1.2, 0.8, 1.2, 0x2040ff); glowPool.box(cx + 2, 12, cz - 4, 1.2, 0.8, 1.2, 0xff2020);
       propPool.box(cx, 6, lz1 - 5, 0.3, 12, 0.3, 0xcccccc); propPool.box(cx + 1.2, 11, lz1 - 5, 2.2, 1.3, 0.1, 0x2050c0);
+      glowPool.box(POLICE_DOOR.x, 0.26, POLICE_DOOR.z, 3.2, 0.08, 3.2, 0x4d7fff); // the surrender pad at the front door
+      return;
+    }
+    if (special === 'spray') {
+      // Pay 'n' Spray: a low shop at the back of the lot and an open drive-in bay facing the street to the south.
+      // Only the side walls and the shop collide, so a car can roll in under the roof.
+      addBuilding(lx0 + 1, lz0 + 1, lx1 - 1, lz1 - 15, 9, 0x6c7a89, { sign: "PAY 'N' SPRAY", face: 2, signY: 7.4, noRoof: true, noExtras: true });
+      const bz = SPRAY.z;
+      for (const sx of [-1, 1]) { propPool.box(cx + sx * 6.5, 2.7, bz, 1, 5.4, 15, 0x8a8a8a); addAABB(cx + sx * 6.5 - 0.5, bz - 7.5, cx + sx * 6.5 + 0.5, bz + 7.5, 5.4); }
+      propPool.box(cx, 5.6, bz, 14, 0.5, 15, 0x5e5e66);                       // roof, no collision box
+      propPool.box(cx, 0.24, bz, 12, 0.1, 15, 0x2b2b30);                      // bay floor
+      for (const oz of [-5, 0, 5]) glowPool.box(cx, 0.31, bz + oz, 10, 0.06, 0.6, 0x2fd0ff);   // floor stripes
+      glowPool.box(cx, 5.95, bz + 7.2, 14, 0.25, 0.4, 0xff40c0);               // neon lip over the entrance
+      for (const [ox, oz, col] of [[-11, -3, 0xd12b2b], [-11, 0, 0x2b5fd1], [-11, 3, 0xffe14d], [11, -2, 0x2ba64a], [11, 2, 0xff40c0]]) propPool.box(cx + ox, 0.9, bz + oz, 1.4, 1.4, 1.4, col); // paint drums
+      addTree(lx0 + 2, lz1 - 2, false); addTree(lx1 - 2, lz1 - 2, false);
       return;
     }
     // regular block: split into lots
@@ -517,6 +535,8 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
   bldgPool.finish(); propPool.finish(); flatPool.finish(); textPool.finish(); glowPool.finish();
   const plazaMarker = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 0.45 }));
   plazaMarker.scale.set(1.2, 40, 1.2); plazaMarker.position.set(PLAZA.x, 20, PLAZA.z); scene.add(plazaMarker);
+  const sprayMarker = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({ color: 0x2fd0ff, transparent: true, opacity: 0.4 }));
+  sprayMarker.scale.set(1.2, 40, 1.2); sprayMarker.position.set(SPRAY.x, 26, SPRAY.z); scene.add(sprayMarker);
 
   /* ---- per-frame scenery animation (Ferris wheel, clouds, boats, waves) - identical, purely cosmetic, on every machine */
   const M = new THREE.Matrix4(), M2 = new THREE.Matrix4(), M3 = new THREE.Matrix4();
@@ -565,14 +585,14 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
     c.fillStyle = '#d8c890'; c.fillRect(wx(-HALF - 40), wx(BEACH_Z0), (HALF + 40) * 2 * MS, (BEACH_Z1 - BEACH_Z0) * MS);
     c.fillStyle = '#b9b9b4'; c.fillRect(wx(-HALF - ROAD / 2), wx(-HALF - ROAD / 2), (NB * PITCH + ROAD) * MS, (NB * PITCH + ROAD) * MS);
     for (let j = 0; j < NB; j++) for (let i = 0; i < NB; i++) { const sp = SPECIAL[i + ',' + j];
-      c.fillStyle = sp === 'park' ? '#3f8a3a' : sp === 'plaza' ? '#c9b98a' : sp === 'hospital' ? '#e8e8e8' : sp === 'police' ? '#5b6b8a' : '#585860';
+      c.fillStyle = sp === 'park' ? '#3f8a3a' : sp === 'plaza' ? '#c9b98a' : sp === 'hospital' ? '#e8e8e8' : sp === 'police' ? '#5b6b8a' : sp === 'spray' ? '#2f6f7f' : '#585860';
       c.fillRect(wx(X(i) + ROAD / 2), wx(X(j) + ROAD / 2), BLOCK * MS, BLOCK * MS); }
     c.fillStyle = '#8a6a45'; c.fillRect(wx(-67), wx(BEACH_Z0 + 8), 14 * MS, 80 * MS);
     c.fillStyle = '#ffffff'; c.beginPath(); c.arc(wx(FERRIS.x), wx(FERRIS.z), 22 * MS, 0, TAU); c.lineWidth = 3; c.strokeStyle = '#ff3355'; c.stroke();
   }
 
   return {
-    THREE, scene, sun, hemi, plazaMarker, mapCanvas,
+    THREE, scene, sun, hemi, plazaMarker, sprayMarker, mapCanvas,
     aabbs, nearAabbs, hasLOS,
     pedPools, carBody, carCabin, carWheel, carLight, partPool, decalPool, pickPool, bulletPool, gunPool,
     animate, dayNight,

@@ -26,6 +26,7 @@ export function createRemote({ W }) {
     for (const a of m.v || []) {
       let e = ents.get(a[0]);
       if (!e) { const type = CAR_TYPES[a[1]] || CAR_TYPES[0]; e = { id: a[0], cls: 'car', type, view: new CarView(W, type, a[2], a[3]), buf: [], x: a[4], y: groundY(a[4], a[5]), z: a[5], yaw: a[6], steer: 0, vF: 0, speed: 0, dead: false, smoking: false, burn: false, lights: false }; ents.set(e.id, e); }
+      else if (e.view.color !== a[2] || e.view.cabin !== a[3]) e.view.recolor(a[2], a[3]); // resprayed
       pushSnap(e.buf, { x: a[4], z: a[5], yaw: a[6], steer: a[7], vF: a[8], f: a[9] }, now);
     }
     for (const a of m.k || []) {
