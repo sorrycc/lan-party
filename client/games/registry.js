@@ -8,13 +8,26 @@
    Option types the lobby can render:
      { key, type: 'bool',   label, default }
      { key, type: 'number', label, default, min, max, step }
-     { key, type: 'select', label, default, choices: [{ value, label }] } */
+     { key, type: 'select', label, default, choices: [{ value, label }] }
+
+   Team games declare `teams: [{ id, label, color }]` and `teamSize` (max humans per side). The server then
+   keeps a `team` per player (auto-balanced on join, switchable in the lobby) and it arrives in `session.players`. */
 export const GAMES = [
   {
     id: 'kart', title: 'Frostline Kart', tagline: 'SNOWY CIRCUIT · 3 LAPS · UP TO 8 KARTS',
     minPlayers: 1, maxPlayers: 8,
     options: [{ key: 'fillAI', type: 'bool', label: 'FILL EMPTY SLOTS WITH CPU', default: true }],
     load: () => import('./kart/index.js'),
+  },
+  {
+    id: 'dodgeball', title: 'Dodgeball 3v3', tagline: 'GYM DODGEBALL · BLUE VS RED · FIRST TO 2',
+    minPlayers: 1, maxPlayers: 6,
+    teams: [{ id: 'blue', label: 'BLUE', color: 0x3d8bff }, { id: 'red', label: 'RED', color: 0xff4d5a }], teamSize: 3,
+    options: [
+      { key: 'fillAI', type: 'bool', label: 'FILL EMPTY SLOTS WITH CPU', default: true },
+      { key: 'winScore', type: 'select', label: 'FIRST TO', default: 2, choices: [{ value: 2, label: '2 rounds' }, { value: 3, label: '3 rounds' }] },
+    ],
+    load: () => import('./dodgeball/index.js'),
   },
 ];
 
@@ -24,6 +37,7 @@ export const RESERVED_MESSAGES = new Set(['create', 'join', 'joined', 'lobby', '
 
 export const gameById = id => GAMES.find(g => g.id === id) || null;
 export const defaultOpts = game => Object.fromEntries((game.options || []).map(o => [o.key, o.default]));
+export const teamById = (game, id) => (game.teams || []).find(t => t.id === id) || null;
 
 /* Merge `raw` (untrusted, from the host) over `base`, keeping only declared keys with valid values. */
 export function cleanOpts(game, raw, base) {

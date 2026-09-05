@@ -66,22 +66,43 @@ function renderOpts() {
     el.appendChild(label);
   }
 }
+const playerLi = p => `<li class="${p.id === S.id ? 'me' : ''}"><span class="sw" style="background:${hex(AVATARS[p.avatar].color)}"></span><span class="nm">${esc(p.name)}${p.id === S.id ? ' (you)' : ''}</span>${p.id === S.hostId ? '<span class="tag host">HOST</span>' : p.ready ? '<span class="tag ready">READY</span>' : '<span class="tag wait">NOT READY</span>'}</li>`;
+const pickTeam = id => { const me = meP(); if (S.net && me && !me.ready && me.team !== id) S.net.send({ t: 'lobby', team: id }); };
+/* team games: the roster is split into one column per side; click a column (or the friend/enemy shortcuts) to switch */
+function renderTeams(game, me, host) {
+  const el = $('teams'); el.innerHTML = ''; const size = game.teamSize || Infinity, locked = !!(me && me.ready);
+  for (const t of game.teams) {
+    const members = S.players.filter(p => p.team === t.id), mine = !!(me && me.team === t.id), full = members.length >= size;
+    const d = document.createElement('div'); d.className = 'team-col' + (mine ? ' sel' : '') + (full ? ' full' : '') + (locked ? ' locked' : ''); d.style.setProperty('--tc', hex(t.color));
+    d.title = mine ? '' : locked ? 'Press NOT READY to switch sides' : full ? `${t.label} is full` : `Join ${t.label}`;
+    d.innerHTML = `<div class="team-head"><span>${esc(t.label)}</span><small>${members.length}/${Number.isFinite(size) ? size : '∞'}</small></div>` + (members.length ? `<ul class="players">${members.map(playerLi).join('')}</ul>` : '<div class="empty">NOBODY YET</div>');
+    d.onclick = () => { if (!mine && !full) pickTeam(t.id); };
+    el.appendChild(d);
+  }
+  const hostP = S.players.find(p => p.id === S.hostId), hostTeam = hostP ? hostP.team : null, other = game.teams.find(t => t.id !== hostTeam);
+  const canGo = t => !!(t && me && !locked && me.team !== t.id && S.players.filter(p => p.team === t.id).length < size);
+  $('btnFriend').disabled = !canGo(game.teams.find(t => t.id === hostTeam)); $('btnFriend').onclick = () => hostTeam && pickTeam(hostTeam);
+  $('btnEnemy').disabled = !canGo(other); $('btnEnemy').onclick = () => other && pickTeam(other.id);
+  $('teamBtns').hidden = host; // the host just clicks a column
+}
 function renderLobby() {
-  const me = meP(), host = isHost(), game = curGame();
+  const me = meP(), host = isHost(), game = curGame(), teams = game.teams || null;
   $('roomCode').textContent = S.room || '----';
   $('roomAddr').innerHTML = S.addr ? `friends on this network open <b>${esc(S.addr)}</b> and enter the code` : '';
   $('lobbyGame').textContent = `${game.title.toUpperCase()} · ${S.players.length}/${game.maxPlayers} PLAYERS`;
   const taken = new Set(S.players.filter(p => p.id !== S.id).map(p => p.avatar));
   renderAvatars($('avatarsLobby'), me ? me.avatar : S.avatar, taken, i => S.net && S.net.send({ t: 'lobby', avatar: i }));
-  $('players').innerHTML = S.players.map(p => `<li class="${p.id === S.id ? 'me' : ''}"><span class="sw" style="background:${hex(AVATARS[p.avatar].color)}"></span><span class="nm">${esc(p.name)}${p.id === S.id ? ' (you)' : ''}</span>${p.id === S.hostId ? '<span class="tag host">HOST</span>' : p.ready ? '<span class="tag ready">READY</span>' : '<span class="tag wait">NOT READY</span>'}</li>`).join('');
+  $('players').hidden = !!teams; $('teams').hidden = !teams; $('teamBtns').hidden = !teams;
+  if (teams) renderTeams(game, me, host); else $('players').innerHTML = S.players.map(playerLi).join('');
   renderOpts();
   $('btnReady').style.display = host ? 'none' : ''; $('btnReady').textContent = me && me.ready ? 'NOT READY' : 'READY'; $('btnReady').classList.toggle('good', !(me && me.ready));
   $('btnStart').style.display = host ? '' : 'none';
   const others = S.players.filter(p => p.id !== S.hostId); const allReady = others.every(p => p.ready); const enough = S.players.length >= game.minPlayers;
   $('btnStart').disabled = !allReady || !enough;
+  const emptySide = teams && others.length ? teams.find(t => !S.players.some(p => p.team === t.id)) : null;
   $('lobbyStatus').textContent = host
-    ? (!enough ? `${game.title} needs at least ${game.minPlayers} players.` : others.length === 0 ? 'Waiting for players to join… you can also start alone.' : allReady ? 'Everyone is ready. Start when you like!' : 'Waiting for everyone to press READY…')
-    : (me && me.ready ? 'Waiting for the host to start…' : 'Press READY when you are set.');
+    ? (!enough ? `${game.title} needs at least ${game.minPlayers} players.` : others.length === 0 ? 'Waiting for players to join… you can also start alone.' : (emptySide ? `${emptySide.label} has no players yet. ` : '') + (allReady ? 'Everyone is ready. Start when you like!' : 'Waiting for everyone to press READY…'))
+    : (me && me.ready ? 'Waiting for the host to start…' : teams ? 'Pick your side, then press READY.' : 'Press READY when you are set.');
 }
 
 /* ---------------------------------------------------------------- game lifecycle */
@@ -107,7 +128,7 @@ function destroyGame() { gen++; if (S.game) { try { S.game.destroy(); } catch (e
 const loadError = (game, e) => { console.error(e); return `Could not load ${game.title}: ${e.message}`; };
 
 /* ---------------------------------------------------------------- solo */
-const soloSession = () => ({ players: [{ id: 'me', name: S.name, avatar: S.avatar }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: defaultOpts(curGame()) });
+const soloSession = () => { const g = curGame(); return { players: [{ id: 'me', name: S.name, avatar: S.avatar, team: g.teams ? g.teams[0].id : undefined }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: defaultOpts(g) }; };
 async function startSolo() {
   readName(); const game = curGame(); if (game.minPlayers > 1) { setStatus(`${game.title} needs at least ${game.minPlayers} players`); return; }
   S.mode = 'solo'; setStatus('Loading…', true); audio.init();

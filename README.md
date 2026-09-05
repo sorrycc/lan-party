@@ -1,7 +1,8 @@
 # LAN Party
 
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
-Ships with **Frostline Kart**, a snowy kart racer with items, CPU karts and up to 8 players.
+Ships with **Frostline Kart**, a snowy kart racer with items, CPU karts and up to 8 players, and **Dodgeball 3v3**,
+a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest.
 
 ## Run
 
@@ -13,7 +14,7 @@ npm start
 The server prints the addresses it is reachable on, for example:
 
 ```
-LAN party server running with 1 game(s): Frostline Kart
+LAN party server running with 2 game(s): Frostline Kart, Dodgeball 3v3
 Open one of these on every machine:
   http://localhost:3000   (this machine)
   http://192.168.8.112:3000
@@ -21,8 +22,9 @@ Open one of these on every machine:
 
 1. One person opens the page, picks a name, a colour and a game, and presses **CREATE ROOM**.
 2. Everyone else opens the LAN address, enters the 4-letter room code and presses **JOIN ROOM**. A room plays one game; the code implies which.
-3. Players press **READY**; the host adjusts the game's options and presses **START GAME**.
-4. Afterwards the host can restart (`R`) or send everyone back to the lobby (`Esc`).
+3. In a team game the lobby shows one column per side. Click a side to switch, or use **JOIN HOST'S TEAM** / **JOIN OTHER TEAM**; sides lock once you press READY.
+4. Players press **READY**; the host adjusts the game's options and presses **START GAME**.
+5. Afterwards the host can restart (`R`) or send everyone back to the lobby (`Esc`).
 
 **PLAY SOLO** runs the selected game without a room, if the game allows a single player.
 
@@ -48,10 +50,12 @@ client/
   games/
     registry.js   the game manifest (see below)
     kart/         Frostline Kart: index.js (game module) + kart.css (its HUD)
+    dodgeball/    Dodgeball 3v3: index.js (game module) + dodgeball.css (its HUD)
 ```
 
 The server never simulates a game. It keeps the lobby roster and relays in-game messages between the players in a room.
 Frostline Kart runs its simulation on the host's browser for CPU karts, items and the clock, and on each player's browser for their own kart.
+Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
 
 ## Adding a game
 
@@ -70,6 +74,8 @@ Frostline Kart runs its simulation on the host's browser for CPU karts, items an
 
 The server reads the same file for player limits and option validation, so nothing else needs to change. Option types are `bool`, `number` (`min`, `max`, `step`) and `select` (`choices`). The host edits them in the lobby; they arrive in `session.opts`.
 
+A team game adds `teams: [{ id, label, color }]` and `teamSize` (max players per side). The server then auto-balances newcomers, lets players switch sides in the lobby (`{ t: 'lobby', team }`) until they are READY, caps each side at `teamSize`, and every entry in `session.players` carries a `team`. What to do with an empty side is the game's call; Dodgeball fills it with CPU bodies.
+
 ### Game module contract
 
 ```js
@@ -79,7 +85,7 @@ export async function create({ mount, audio, send, hooks }) {
   // send(msg): relay a JSON message ({ t: 'yourType', ... }) to the other players; a no-op when solo
   // hooks.onRestart() / hooks.onExit(): call these for R / ESC and result-screen buttons; the shell decides what they mean
   return {
-    start(session),   // { players: [{ id, name, avatar }], myId, hostId, isHost, online, opts } - may be called again to restart
+    start(session),   // { players: [{ id, name, avatar, team? }], myId, hostId, isHost, online, opts } - may be called again to restart
     stop(),           // round over, back to the lobby: hide, stop your loop, stay ready for another start()
     destroy(),        // free everything: DOM, listeners, WebGL, audio nodes
     onNetMessage(m),  // a relayed message from another player; m.from is their id
@@ -98,3 +104,9 @@ Rules of the road:
 ## Frostline Kart controls
 
 Arrows / WASD to drive, Space to use an item, M to toggle sound. Hold the throttle as the countdown hits GO for a rocket start.
+
+## Dodgeball 3v3
+
+Blue vs red, first to 2 (or 3) rounds. Arrows / WASD to move, Shift to sprint (watch the stamina bar), Space to throw at the nearest enemy once your arm is ready, M to toggle sound.
+Balls start on the centre line; a live ball that touches an enemy sends them to the bench, and after 45 seconds the line drops so either side can cross.
+Up to 6 players, 3 per side; empty slots are CPU bodies when the host leaves "fill empty slots with CPU" on. A player who drops out mid-match is taken over by a CPU.

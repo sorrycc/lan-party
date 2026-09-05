@@ -67,6 +67,18 @@ input.code { width: 150px; text-transform: uppercase; letter-spacing: 6px; font-
 .players .tag.host { color: #ffd54a; border-color: #ffd54a; }
 .players .tag.ready { color: #5cff8a; border-color: #5cff8a; }
 .players .tag.wait { color: #9fb4dc; }
+/* team games: one column per side, click a column to switch (locked once READY) */
+.teams { display: flex; gap: 14px; justify-content: center; align-items: stretch; flex-wrap: wrap; margin: 10px 0 6px; }
+.team-col { --tc: #fff; flex: 1 1 240px; max-width: 320px; text-align: left; border: 2px solid var(--tc); border-radius: 14px; padding: 8px 10px 6px; background: rgba(255,255,255,.04); cursor: pointer; transition: background .15s, box-shadow .15s; }
+.team-col:hover { background: rgba(255,255,255,.09); }
+.team-col.sel { background: rgba(255,255,255,.08); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tc) 45%, transparent); }
+.team-col.locked, .team-col.full { cursor: default; }
+.team-col.full:not(.sel) { opacity: .7; }
+.team-col .team-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 17px; font-weight: 900; letter-spacing: 3px; color: var(--tc); padding: 2px 4px 6px; border-bottom: 1px solid rgba(255,255,255,.12); }
+.team-col .team-head small { font-size: 12px; letter-spacing: 1px; color: #cfe3ff; font-weight: 700; }
+.team-col .players { margin: 4px 0 0; max-width: none; }
+.team-col .players li { font-size: 17px; padding: 7px 8px; }
+.team-col .empty { font-size: 14px; color: #9fb4dc; padding: 12px 8px; letter-spacing: 1px; }
 .opts { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; margin: 6px 0 10px; min-height: 22px; }
 label.opt { font-size: 15px; letter-spacing: 1px; color: #dbe9ff; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 label.opt input[type=checkbox] { width: 18px; height: 18px; accent-color: #ffd54a; }

@@ -3,7 +3,7 @@
 
    Lobby protocol (client -> server): create, join, lobby, opt, start, end, leave
    Lobby protocol (server -> client): joined, lobby, start, end, left, closed, error */
-import { gameById, defaultOpts, cleanOpts } from '../client/games/registry.js';
+import { gameById, defaultOpts, cleanOpts, teamById } from '../client/games/registry.js';
 import { AVATARS, cleanName, cleanAvatar } from '../client/core/avatars.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -16,11 +16,14 @@ export function createRooms({ addrHint, log = console.log }) {
   function newCode() { let c; do { c = ''; for (let i = 0; i < 4; i++) c += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)]; } while (rooms.has(c)); return c; }
   function broadcast(room, msg, except) { const data = JSON.stringify(msg); for (const p of room.players.values()) if (p.ws !== except && p.ws.readyState === p.ws.OPEN) p.ws.send(data); }
   function freeAvatar(room, want) { const taken = new Set([...room.players.values()].map(p => p.avatar)); if (want >= 0 && !taken.has(want)) return want; for (let i = 0; i < AVATARS.length; i++) if (!taken.has(i)) return i; return -1; }
-  const playersOf = room => [...room.players.values()].map(p => ({ id: p.id, name: p.name, avatar: p.avatar, ready: p.ready }));
+  const playersOf = room => [...room.players.values()].map(p => ({ id: p.id, name: p.name, avatar: p.avatar, ready: p.ready, team: p.team }));
+  /* team games: count a side, and pick the emptier side for a newcomer (ties go to the first side) */
+  const teamCount = (room, id) => [...room.players.values()].filter(p => p.team === id).length;
+  function balancedTeam(room) { const teams = room.game.teams; if (!teams) return null; let best = teams[0]; for (const t of teams) if (teamCount(room, t.id) < teamCount(room, best.id)) best = t; return best.id; }
   const lobbyMsg = room => ({ t: 'lobby', room: room.code, game: room.game.id, hostId: room.hostId, state: room.state, opts: room.opts, players: playersOf(room) });
 
   function joinRoom(ws, room, name, avatar) {
-    const p = ws.meta; p.room = room; p.name = cleanName(name); p.avatar = freeAvatar(room, cleanAvatar(avatar)); p.ready = false;
+    const p = ws.meta; p.room = room; p.name = cleanName(name); p.avatar = freeAvatar(room, cleanAvatar(avatar)); p.ready = false; p.team = balancedTeam(room);
     room.players.set(p.id, p);
     send(ws, { t: 'joined', id: p.id, room: room.code, game: room.game.id, hostId: room.hostId, addr: addrHint() });
     broadcast(room, lobbyMsg(room));
@@ -54,6 +57,10 @@ export function createRooms({ addrHint, log = console.log }) {
         if (msg.name !== undefined) p.name = cleanName(msg.name);
         if (msg.avatar !== undefined) { const a = cleanAvatar(msg.avatar); if (a >= 0 && ![...room.players.values()].some(o => o !== p && o.avatar === a)) p.avatar = a; }
         if (msg.ready !== undefined) p.ready = !!msg.ready;
+        if (msg.team !== undefined && room.game.teams) { // switch sides (until READY); a side holds at most teamSize players
+          const t = teamById(room.game, msg.team);
+          if (t && t.id !== p.team && !p.ready) { if (teamCount(room, t.id) >= (room.game.teamSize || Infinity)) send(ws, { t: 'error', msg: `${t.label} is full` }); else p.team = t.id; }
+        }
         broadcast(room, lobbyMsg(room)); break;
       }
       case 'opt': if (isHost && room.state === 'lobby') { room.opts = cleanOpts(room.game, msg.opts, room.opts); broadcast(room, lobbyMsg(room)); } break;
@@ -74,7 +81,7 @@ export function createRooms({ addrHint, log = console.log }) {
 
   function attach(wss) {
     wss.on('connection', ws => {
-      ws.meta = { id: nextId++, ws, room: null, name: 'Player', avatar: 0, ready: false }; ws.isAlive = true;
+      ws.meta = { id: nextId++, ws, room: null, name: 'Player', avatar: 0, ready: false, team: null }; ws.isAlive = true;
       ws.on('pong', () => { ws.isAlive = true; });
       ws.on('message', raw => { let msg; try { msg = JSON.parse(raw); } catch { return; } if (!msg || typeof msg.t !== 'string') return; onMessage(ws, msg); });
       ws.on('close', () => leaveRoom(ws));

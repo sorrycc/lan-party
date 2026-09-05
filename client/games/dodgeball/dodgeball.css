@@ -1,0 +1,61 @@
+/* Dodgeball 3v3 HUD. Loaded by the game module while it is mounted; everything is scoped under .db so the
+   shell's own #status / .players styles are untouched. The shell supplies .btn for the result buttons. */
+.db { --bg: #0e1116; --panel: #151a22; --ink: #e8ecf1; --muted: #8a94a6; --blue: #3d8bff; --red: #ff4d5a; --yellow: #ffd23f; --green: #47e07a;
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--bg); color: var(--ink);
+  font-family: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif; user-select: none; }
+/* the court keeps its 1040x640 aspect: cap the width by the viewport height as well as its width */
+.db .app { width: min(100vw - 24px, 1040px, calc((100vh - 200px) * 1.625)); display: flex; flex-direction: column; gap: 8px; }
+
+.db header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  background: linear-gradient(180deg, #1b212b, #12171f); border: 1px solid #262e3a; border-radius: 12px;
+  padding: 8px 18px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+.db .team { display: flex; align-items: center; gap: 12px; }
+.db .team.red { justify-content: flex-end; }
+.db .team .name { font-weight: 800; letter-spacing: .12em; font-size: 20px; white-space: nowrap; }
+.db .team.blue .name { color: var(--blue); }
+.db .team.red .name { color: var(--red); }
+.db .team .pips { display: flex; gap: 5px; }
+.db .pip { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; transition: all .25s; }
+.db .team.blue .pip { color: var(--blue); } .db .team.red .pip { color: var(--red); }
+.db .pip.on { background: currentColor; box-shadow: 0 0 10px currentColor; }
+.db .pip.off { opacity: .3; transform: scale(.75); }
+.db .team .score { font-size: 34px; font-weight: 900; font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,.6); }
+.db .mid { text-align: center; padding: 0 22px; }
+.db .mid .count { font-size: 30px; font-weight: 900; letter-spacing: .06em; line-height: 1; font-variant-numeric: tabular-nums; transition: transform .15s; }
+.db .mid .count.bump { transform: scale(1.25); }
+.db .mid .count .v { color: var(--muted); font-weight: 500; font-size: 20px; padding: 0 3px; }
+.db .mid .count .b { color: var(--blue); } .db .mid .count .r { color: var(--red); }
+.db .mid .sub { font-size: 12px; color: var(--muted); letter-spacing: .18em; margin-top: 4px; text-transform: uppercase; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.db .mid .sub .warn { color: var(--yellow); }
+.db .mid .sub .down { color: var(--red); }
+
+.db .court { position: relative; }
+.db canvas { width: 100%; height: auto; display: block; border-radius: 14px; box-shadow: 0 16px 50px rgba(0,0,0,.55), 0 0 0 1px #262e3a; background: #0b0d11; }
+
+/* match result card, over the lower half of the court */
+.db .result { position: absolute; left: 50%; bottom: 10%; transform: translateX(-50%); min-width: 320px; text-align: center; padding: 16px 26px 18px;
+  background: rgba(8,10,14,.92); border: 1px solid #2c3542; border-radius: 16px; box-shadow: 0 16px 50px rgba(0,0,0,.6); animation: db-pop .35s ease-out; }
+.db .result h1 { margin: 0; font-size: 30px; font-weight: 900; letter-spacing: .1em; }
+.db .result h2 { margin: 4px 0 12px; font-size: 22px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.db .result .foot { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); letter-spacing: .08em; }
+@keyframes db-pop { 0% { transform: translateX(-50%) scale(.85); opacity: 0; } 100% { transform: translateX(-50%) scale(1); opacity: 1; } }
+
+.db .status { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 44px; padding: 0 14px; white-space: nowrap; overflow: hidden;
+  font-size: 20px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; border-radius: 10px;
+  background: var(--panel); border: 1px solid #262e3a; transition: color .15s, background .15s, border-color .15s; }
+.db .status .hint { font-size: 12px; font-weight: 500; letter-spacing: .06em; color: var(--muted); text-transform: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.db .status.grab { color: #cfd6e0; }
+.db .status.arming { color: var(--yellow); border-color: #5a4a12; background: #1b1a12; }
+.db .status.ready { color: var(--green); border-color: #1f5a34; background: #10201a; }
+.db .status.out { color: var(--red); border-color: #5a1f27; background: #211215; }
+.db .status.info { color: var(--ink); }
+.db .charge { width: 120px; height: 8px; background: #2a2a1f; border-radius: 4px; overflow: hidden; display: none; }
+.db .charge > i { display: block; height: 100%; width: 0%; background: var(--yellow); box-shadow: 0 0 10px var(--yellow); }
+.db .status.arming .charge { display: block; }
+
+.db footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; line-height: 20px; color: var(--muted); padding: 0 6px; letter-spacing: .04em; white-space: nowrap; }
+.db footer > div:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.db footer kbd { font-family: inherit; background: #1d232d; border: 1px solid #2c3542; border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: #d5dbe5; font-weight: 700; }
+.db footer .right { display: flex; gap: 14px; font-variant-numeric: tabular-nums; flex: none; }
+.db footer .fps { min-width: 52px; text-align: right; }
+.db footer .snd { cursor: pointer; }
