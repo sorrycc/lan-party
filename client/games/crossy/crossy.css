@@ -1,0 +1,56 @@
+/* Crossy Farm Car HUD. Loaded by the game module while it is mounted; everything is scoped under .cf so the
+   shell's own .btn / .row / .tag styles are untouched (the card buttons restyle .btn to the farm's cartoon look). */
+.cf { --cream: #fff3dc; --cream2: #ffe3b3; --orange: #ff8a1f; --brown: #3b2413; --brown2: #5a3a22; --red: #e63946; --green: #4caf50;
+  position: absolute; inset: 0; overflow: hidden; color: var(--brown); background: #8fd3ff;
+  font-family: "Arial Rounded MT Bold", "Nunito", "Varela Round", "Trebuchet MS", "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
+.cf .gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+/* hud */
+.cf .hud { position: absolute; inset: 0; display: flex; flex-direction: column; pointer-events: none;
+  padding: calc(14px + env(safe-area-inset-top)) 14px calc(12px + env(safe-area-inset-bottom)); }
+.cf .hud-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.cf .score { font-size: clamp(46px, 10vw, 74px); font-weight: 900; color: var(--cream); -webkit-text-stroke: 3px var(--brown); paint-order: stroke fill; text-shadow: 0 5px 0 var(--brown); line-height: 1; transition: transform .1s; }
+.cf .score.bump { transform: scale(1.15); }
+.cf .coins { display: inline-flex; align-items: center; gap: 8px; background: var(--cream); border: 3px solid var(--brown); border-radius: 999px; padding: 6px 14px; font-weight: 900; font-size: 20px; box-shadow: 0 4px 0 var(--brown); margin-top: 8px; transition: transform .12s; }
+.cf .coins.bump { transform: scale(1.25) rotate(-5deg); }
+.cf .coin-ico { width: 16px; height: 16px; border-radius: 50%; background: #ffcf33; border: 3px solid #d9950a; box-shadow: inset 0 0 0 2px #ffe680; display: inline-block; flex: none; vertical-align: -2px; }
+.cf .hud-mid { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 10px; padding-bottom: 6vh; }
+.cf .tag { background: var(--orange); color: var(--cream); font-weight: 900; font-size: clamp(30px, 7vw, 48px); line-height: 1; padding: 10px 28px; border-radius: 999px; border: 4px solid var(--brown); box-shadow: 0 5px 0 var(--brown); animation: cf-pop .3s cubic-bezier(.2,1.4,.4,1); }
+.cf .warn { background: var(--red); color: var(--cream); font-weight: 900; font-size: clamp(18px, 4.5vw, 26px); padding: 8px 20px; border-radius: 999px; border: 4px solid var(--brown); box-shadow: 0 5px 0 var(--brown); animation: cf-shake .35s infinite; text-transform: uppercase; letter-spacing: 1px; }
+.cf .spect { background: rgba(59,36,19,.55); color: var(--cream); font-weight: 900; font-size: 15px; letter-spacing: 1px; padding: 6px 16px; border-radius: 999px; }
+.cf .hint-play { color: var(--cream); font-weight: 900; font-size: 16px; text-shadow: 0 2px 0 var(--brown); background: rgba(59,36,19,.35); padding: 6px 14px; border-radius: 999px; transition: opacity .6s; }
+.cf .hud-bot { display: flex; gap: 14px; align-items: center; font-size: 13px; font-weight: 800; color: var(--cream); text-shadow: 0 2px 0 rgba(59,36,19,.6); letter-spacing: .5px; }
+.cf .hud-bot kbd { background: var(--cream); color: var(--brown); border-radius: 6px; padding: 1px 7px; margin: 0 3px 0 6px; text-shadow: none; }
+.cf .hud-bot kbd:first-child { margin-left: 0; }
+.cf .snd { pointer-events: auto; font: inherit; color: inherit; background: rgba(59,36,19,.35); border: 0; border-radius: 999px; padding: 4px 10px; cursor: pointer; text-shadow: inherit; letter-spacing: inherit; }
+
+/* cards: my death while the others drive on, and the round-over standings */
+.cf .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(59,36,19,.35); padding: 14px; overflow-y: auto; }
+.cf .card { background: var(--cream); border: 4px solid var(--brown); border-radius: 30px; box-shadow: 0 8px 0 var(--brown), 0 16px 30px rgba(40,20,5,.28); padding: 22px 20px; width: min(100%, 540px); text-align: center; animation: cf-pop .35s cubic-bezier(.2,1.4,.4,1); }
+.cf .pill { display: inline-block; background: var(--red); color: var(--cream); font-weight: 900; font-size: 15px; padding: 6px 16px; border-radius: 999px; border: 3px solid var(--brown); transform: rotate(-3deg); letter-spacing: .4px; box-shadow: 0 4px 0 var(--brown); }
+.cf .pill.dark { background: var(--brown); border-color: var(--brown2); }
+.cf .card h1 { font-size: clamp(40px, 9vw, 60px); font-weight: 900; line-height: 1; letter-spacing: -.5px; color: var(--red); text-transform: uppercase; -webkit-text-stroke: 2px var(--brown); paint-order: stroke fill; text-shadow: 0 5px 0 var(--brown); margin: 10px 0 8px; }
+.cf .card h1.win { color: var(--orange); }
+.cf .joke { font-weight: 700; font-size: 16px; color: var(--brown2); margin: 0 0 14px; line-height: 1.35; min-height: 1.35em; }
+.cf .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.cf .stat { background: var(--cream2); border: 3px solid var(--brown); border-radius: 18px; padding: 10px 8px; }
+.cf .stat .k { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: var(--brown2); }
+.cf .stat .v { font-size: 26px; font-weight: 900; line-height: 1.1; margin-top: 2px; }
+.cf .standings { width: 100%; border-collapse: separate; border-spacing: 0 6px; margin: 0 0 12px; }
+.cf .standings td { background: var(--cream2); padding: 7px 10px; font-weight: 800; font-size: 15px; border-top: 3px solid var(--brown); border-bottom: 3px solid var(--brown); text-align: left; white-space: nowrap; }
+.cf .standings td:first-child { border-left: 3px solid var(--brown); border-radius: 14px 0 0 14px; width: 40px; color: var(--orange); font-size: 17px; font-weight: 900; }
+.cf .standings td:last-child { border-right: 3px solid var(--brown); border-radius: 0 14px 14px 0; text-align: right; }
+.cf .standings tr.top td { background: var(--orange); color: var(--cream); }
+.cf .standings tr.top td:first-child { color: var(--cream); }
+.cf .standings tr.me td { box-shadow: inset 0 0 0 2px var(--orange); }
+.cf .standings td.s { font-size: 18px; font-weight: 900; }
+.cf .standings .sw { display: inline-block; width: 12px; height: 12px; border-radius: 4px; border: 2px solid var(--brown); vertical-align: -1px; margin-right: 6px; }
+.cf .foot { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-weight: 800; color: var(--brown2); font-size: 15px; }
+.cf .btn { font-family: inherit; font-size: 17px; font-weight: 900; letter-spacing: .5px; padding: 10px 22px; border-radius: 999px; border: 4px solid var(--brown); background: var(--cream2); color: var(--brown); box-shadow: 0 5px 0 var(--brown); cursor: pointer; transition: transform .08s, box-shadow .08s, background .15s; }
+.cf .btn:hover { background: #fff8e8; transform: none; }
+.cf .btn.primary { background: var(--orange); color: var(--cream); }
+.cf .btn.primary:hover { background: #ff9d3f; }
+.cf .btn:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--brown); }
+@keyframes cf-pop { from { transform: scale(.85) translateY(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes cf-shake { 0%, 100% { transform: rotate(-2deg) scale(1); } 50% { transform: rotate(2deg) scale(1.06); } }
+@media (max-width: 560px) { .cf .standings td:nth-child(3) { display: none; } }

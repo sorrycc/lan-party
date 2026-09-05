@@ -128,7 +128,8 @@ function destroyGame() { gen++; if (S.game) { try { S.game.destroy(); } catch (e
 const loadError = (game, e) => { console.error(e); return `Could not load ${game.title}: ${e.message}`; };
 
 /* ---------------------------------------------------------------- solo */
-const soloSession = () => { const g = curGame(); return { players: [{ id: 'me', name: S.name, avatar: S.avatar, team: g.teams ? g.teams[0].id : undefined }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: defaultOpts(g) }; };
+const newSeed = () => (Math.random() * 0x100000000) >>> 0;
+const soloSession = () => { const g = curGame(); return { players: [{ id: 'me', name: S.name, avatar: S.avatar, team: g.teams ? g.teams[0].id : undefined }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: defaultOpts(g), seed: newSeed() }; };
 async function startSolo() {
   readName(); const game = curGame(); if (game.minPlayers > 1) { setStatus(`${game.title} needs at least ${game.minPlayers} players`); return; }
   S.mode = 'solo'; setStatus('Loading…', true); audio.init();
@@ -154,7 +155,7 @@ async function connect() {
   net.on('lobby', m => { S.players = m.players; S.hostId = m.hostId; S.opts = m.opts || {}; S.room = m.room; if (gameById(m.game)) S.gameId = m.game; const me = meP(); if (me) { S.avatar = me.avatar; savePrefsNow(); } renderLobby(); });
   net.on('start', async m => {
     S.hostId = m.hostId; S.playing = true; audio.init(); const game = curGame();
-    const session = { players: m.players, myId: S.id, hostId: m.hostId, isHost: isHost(), online: true, opts: m.opts || {} };
+    const session = { players: m.players, myId: S.id, hostId: m.hostId, isHost: isHost(), online: true, opts: m.opts || {}, seed: (m.seed >>> 0) || newSeed() };
     try { const inst = await ensureGame(game); if (!inst || !S.playing || S.mode !== 'online') return; inst.start(session); show(null); }
     catch (e) { $('lobbyStatus').textContent = loadError(game, e); }
   });

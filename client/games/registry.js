@@ -39,6 +39,12 @@ export const GAMES = [
     ],
     load: () => import('./gta/index.js'),
   },
+  {
+    id: 'crossy', title: 'Crossy Farm Car', tagline: 'HOP THE ROADS · DODGE THE HERDS · LAST CAR STANDING',
+    minPlayers: 1, maxPlayers: 8,
+    options: [],
+    load: () => import('./crossy/index.js'),
+  },
 ];
 
 /* Message types owned by the lobby protocol. Games must not use these as their own `t` values;

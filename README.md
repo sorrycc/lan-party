@@ -2,8 +2,9 @@
 
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
 Ships with **Frostline Kart**, a snowy kart racer with items, CPU karts and up to 8 players, **Dodgeball 3v3**,
-a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest, and
-**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city.
+a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest,
+**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city, and
+**Crossy Farm Car**, a hop-across-the-farm race where up to 8 cars dodge the same herds until the last one is flattened.
 
 ## Run
 
@@ -15,7 +16,7 @@ npm start
 The server prints the addresses it is reachable on, for example:
 
 ```
-LAN party server running with 3 game(s): Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1
+LAN party server running with 4 game(s): Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1, Crossy Farm Car
 Open one of these on every machine:
   http://localhost:3000   (this machine)
   http://192.168.8.112:3000
@@ -56,12 +57,14 @@ client/
                   world.js (the seeded city + instanced pools), entities.js (how peds and cars draw),
                   motion.js (walking and driving, shared by host and prediction), sim.js (the host's simulation),
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
+    crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
 ```
 
 The server never simulates a game. It keeps the lobby roster and relays in-game messages between the players in a room.
 Frostline Kart runs its simulation on the host's browser for CPU karts, items and the clock, and on each player's browser for their own kart.
 Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
 Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. Clients predict their own body with the same movement code the host runs (`motion.js`) and reconcile against the host's acknowledged input, which hides the round trip. The city itself is generated from a fixed seed, so it never travels over the network.
+Crossy Farm Car works like Kart: every machine simulates its own car and broadcasts 20 Hz snapshots of it. The farm is generated from the round's seed (`session.seed`) and everything that moves on it is a function of the world clock, which the host carries in its snapshots, so nobody ever sends a cow.
 
 ## Adding a game
 
@@ -91,7 +94,8 @@ export async function create({ mount, audio, send, hooks }) {
   // send(msg): relay a JSON message ({ t: 'yourType', ... }) to the other players; a no-op when solo
   // hooks.onRestart() / hooks.onExit(): call these for R / ESC and result-screen buttons; the shell decides what they mean
   return {
-    start(session),   // { players: [{ id, name, avatar, team? }], myId, hostId, isHost, online, opts } - may be called again to restart
+    start(session),   // { players: [{ id, name, avatar, team? }], myId, hostId, isHost, online, opts, seed } - may be called again to restart
+                      // seed: a fresh 32-bit number per round, the same on every machine - generate your world from it with core/math.js makeRng
     stop(),           // round over, back to the lobby: hide, stop your loop, stay ready for another start()
     destroy(),        // free everything: DOM, listeners, WebGL, audio nodes
     onNetMessage(m),  // a relayed message from another player; m.from is their id
@@ -128,3 +132,10 @@ Clients predict their own walking and driving locally and are corrected by the h
 Everyone starts on Ender Ave with a sports car in their colour. The Downtown Hit mission is shared: the first player to reach Diamond Plaza flushes Vinny out,
 whoever whacks him collects the $5000 and the heat. Wanted levels are per player and the cops chase whoever they can see. Players can shoot and run each other over
 unless the host turns friendly fire off; a wasted player respawns at the hospital minus $300. Rounds are timed (5, 10, 15 minutes or unlimited) and end with a scoreboard ranked by cash, then kills.
+
+## Crossy Farm Car
+
+Everyone starts on the same farm and hops forward through traffic, rivers and stampede tracks; the round ends when every car is dead, and the standings are furthest row first, coins second.
+Arrows / WASD / Space to hop (hold a key to keep hopping), swipe or tap on a phone, M to toggle sound. Logs carry you; drifting off the edge counts.
+Stop moving and a UFO comes for you. Cars pass through each other. Dead players watch whoever is furthest ahead; the host presses `R` for another round.
+Your lobby colour picks your vehicle.

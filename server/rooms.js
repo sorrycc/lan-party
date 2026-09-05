@@ -68,7 +68,8 @@ export function createRooms({ addrHint, log = console.log }) {
         if (!isHost) break;
         if (room.players.size < room.game.minPlayers) { send(ws, { t: 'error', msg: `Needs at least ${room.game.minPlayers} players` }); break; }
         room.state = 'playing';
-        broadcast(room, { t: 'start', players: playersOf(room), hostId: room.hostId, opts: room.opts }); broadcast(room, lobbyMsg(room));
+        const seed = (Math.random() * 0x100000000) >>> 0; // one seed per round, so games that generate their world agree on it
+        broadcast(room, { t: 'start', players: playersOf(room), hostId: room.hostId, opts: room.opts, seed }); broadcast(room, lobbyMsg(room));
         log(`room ${room.code}: ${room.game.id} started with ${room.players.size} player(s)`); break;
       }
       case 'end': if (isHost) { room.state = 'lobby'; for (const o of room.players.values()) o.ready = false; broadcast(room, { t: 'end' }); broadcast(room, lobbyMsg(room)); } break;
