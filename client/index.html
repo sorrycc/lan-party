@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAN Party</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<!-- the chosen game mounts its canvas and HUD in here -->
+<div id="stage" hidden></div>
+
+<div id="intro"><div class="card">
+  <h1>LAN <span>PARTY</span></h1>
+  <div class="sub" id="subtitle">PICK A GAME · CREATE A ROOM · FRIENDS JOIN WITH THE CODE</div>
+
+  <div id="screenStart" class="screen show">
+    <div class="row"><span class="lbl">PLAYER</span><input id="nameIn" class="txt" type="text" maxlength="12" placeholder="Your name" autocomplete="off"></div>
+    <div class="row" style="margin-bottom:26px"><div id="avatarsStart" class="avatars"></div></div>
+    <div class="lbl">GAME</div>
+    <div id="gameList" class="games"></div>
+    <div class="row">
+      <button id="btnCreate" class="btn primary">CREATE ROOM</button>
+      <input id="codeIn" class="txt code" type="text" maxlength="4" placeholder="CODE" autocomplete="off">
+      <button id="btnJoin" class="btn">JOIN ROOM</button>
+    </div>
+    <div class="row"><button id="btnSolo" class="btn small">PLAY SOLO</button></div>
+    <div id="status"></div>
+  </div>
+
+  <div id="screenLobby" class="screen">
+    <div class="lbl">ROOM CODE</div>
+    <h2 id="roomCode">----</h2>
+    <div id="roomAddr"></div>
+    <div id="lobbyGame" class="gametag"></div>
+    <div class="row"><div id="avatarsLobby" class="avatars"></div></div>
+    <ul id="players" class="players"></ul>
+    <div id="opts" class="opts"></div>
+    <div class="row">
+      <button id="btnReady" class="btn good">READY</button>
+      <button id="btnStart" class="btn primary">START GAME</button>
+      <button id="btnLeave" class="btn small">LEAVE</button>
+    </div>
+    <div id="lobbyStatus" class="help"></div>
+  </div>
+</div></div>
+
+<script type="importmap">{ "imports": { "three": "/lib/three.module.js" } }</script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

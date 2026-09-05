@@ -1,0 +1,70 @@
+/* Frostline Kart HUD. Loaded by the game module while it is mounted; the shell supplies the body font and .btn. */
+:root { --hud: rgba(6,10,28,.62); --line: rgba(255,255,255,.18); }
+#c { position: fixed; inset: 0; display: block; }
+.hud { position: fixed; pointer-events: none; text-shadow: 0 2px 0 rgba(0,0,0,.45); }
+.panel { background: var(--hud); border: 2px solid var(--line); border-radius: 14px; backdrop-filter: blur(4px); }
+@keyframes pop { 0% { transform: scale(.85); } 60% { transform: scale(1.1); } 100% { transform: scale(1); } }
+
+/* item slot */
+#item { top: 18px; left: 18px; width: 108px; height: 108px; display: flex; align-items: center; justify-content: center; border-width: 3px; }
+#item.pulse { animation: pop .3s ease-out; border-color: #ffd54a; }
+#item canvas { width: 84px; height: 84px; }
+#itemLabel { position: absolute; bottom: -22px; left: 0; width: 100%; text-align: center; font-size: 13px; letter-spacing: 2px; color: #cfe3ff; font-weight: 700; }
+
+/* lap + timer */
+#lapbox { top: 18px; right: 18px; padding: 10px 16px; text-align: right; min-width: 170px; }
+#lap { font-size: 26px; font-weight: 900; letter-spacing: 1px; }
+#lap b { color: #ffd54a; }
+#timer { font-size: 22px; font-variant-numeric: tabular-nums; color: #dbe9ff; margin-top: 2px; }
+#lapbox.final #lap { color: #ff8a5c; }
+
+/* position */
+#pos { left: 22px; bottom: 18px; font-size: 96px; font-weight: 900; line-height: .9; font-style: italic; color: #fff; -webkit-text-stroke: 3px rgba(10,14,40,.85); text-shadow: 0 6px 0 rgba(0,0,0,.35); transition: transform .15s; }
+#pos sup { font-size: 34px; vertical-align: top; margin-left: 2px; }
+#pos.p1 { color: #ffd54a; } #pos.p2 { color: #e6eefc; } #pos.p3 { color: #ffa86a; }
+#pos.bump { transform: scale(1.18); }
+
+/* speedometer */
+#speedo { left: 50%; bottom: 10px; transform: translateX(-50%); }
+
+/* minimap */
+#map { right: 18px; bottom: 18px; padding: 8px; }
+#map canvas { display: block; width: 190px; height: 190px; }
+
+/* toasts */
+#toasts { top: 18%; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.toast { font-size: 44px; font-weight: 900; font-style: italic; letter-spacing: 2px; padding: 6px 24px; border-radius: 12px; background: rgba(6,10,28,.55); border: 2px solid rgba(255,255,255,.25); animation: toastIn 1.6s ease-out forwards; white-space: nowrap; }
+.toast.up { color: #5cff8a; border-color: #5cff8a; }
+.toast.down { color: #ff5c6a; border-color: #ff5c6a; }
+.toast.gold { color: #ffd54a; border-color: #ffd54a; }
+.toast.blue { color: #7fd0ff; border-color: #7fd0ff; }
+.toast.orange { color: #ffa040; border-color: #ffa040; }
+@keyframes toastIn { 0% { opacity: 0; transform: translateY(-20px) scale(.7); } 12% { opacity: 1; transform: translateY(0) scale(1.08); } 20% { transform: scale(1); } 75% { opacity: 1; } 100% { opacity: 0; transform: translateY(-14px); } }
+
+/* countdown */
+#count { top: 50%; left: 50%; transform: translate(-50%,-50%); font-size: 180px; font-weight: 900; font-style: italic; color: #fff; -webkit-text-stroke: 4px rgba(10,14,40,.9); text-shadow: 0 8px 0 rgba(0,0,0,.4); display: none; }
+#count.show { display: block; animation: countPop .95s ease-out forwards; }
+#count.go { color: #5cff8a; }
+@keyframes countPop { 0% { transform: translate(-50%,-50%) scale(1.6); opacity: 0; } 15% { transform: translate(-50%,-50%) scale(1); opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%,-50%) scale(.9); } }
+
+/* flash */
+#flash { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: #ff2030; }
+
+/* results */
+#results { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(4,8,24,.55); }
+#results.show { display: flex; }
+#results .card { background: rgba(8,12,34,.88); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 28px 36px; min-width: 460px; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: pop .4s ease-out; }
+#results h1 { margin: 0 0 6px; font-size: 52px; font-style: italic; letter-spacing: 3px; color: #ffd54a; text-align: center; }
+#results h2 { margin: 0 0 18px; font-size: 16px; font-weight: 400; color: #cfe3ff; text-align: center; letter-spacing: 3px; }
+#results table { width: 100%; border-collapse: collapse; font-size: 20px; }
+#results td { padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,.1); }
+#results tr.me td { background: rgba(255,213,74,.15); font-weight: 900; }
+#results .sw { display: inline-block; width: 18px; height: 18px; border-radius: 5px; vertical-align: middle; margin-right: 8px; border: 2px solid rgba(255,255,255,.5); }
+#results .t { text-align: right; font-variant-numeric: tabular-nums; color: #dbe9ff; }
+#results .cpu { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; vertical-align: middle; margin-left: 6px; }
+#results .foot { margin-top: 18px; text-align: center; font-size: 16px; color: #dbe9ff; letter-spacing: 2px; display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; }
+
+/* hint + wrong way */
+#hint { bottom: 12px; left: calc(50% + 150px); font-size: 12px; color: rgba(255,255,255,.55); letter-spacing: 1px; }
+#wrong { top: 32%; left: 50%; transform: translateX(-50%); font-size: 40px; font-weight: 900; color: #ff5c6a; display: none; animation: blink .6s infinite; }
+@keyframes blink { 50% { opacity: .35; } }

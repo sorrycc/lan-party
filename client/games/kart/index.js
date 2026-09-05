@@ -1,14 +1,61 @@
-import * as THREE from 'three';
+/* Frostline Kart - a snowy kart racer. Game module for the LAN party shell.
 
-/* ============================================================ utils */
-const $ = id => document.getElementById(id);
-const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
-const lerp = (a, b, t) => a + (b - a) * t;
-const wrapAngle = a => { a = a % (Math.PI * 2); if (a > Math.PI) a -= Math.PI * 2; if (a < -Math.PI) a += Math.PI * 2; return a; };
-let seed = 1337;
-const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
-const rr = (a, b) => a + rnd() * (b - a);
-const ordinal = n => n + (n === 1 ? 'st' : n === 2 ? 'nd' : n === 3 ? 'rd' : 'th');
+   Contract (every game module exports this):
+     create({ mount, audio, send, hooks }) -> Promise<instance>
+       mount  element the game owns; build the HUD into it, empty it in destroy()
+       audio  shared synth from core/audio.js (already unlocked by the shell's first click)
+       send   send(msg) relays a JSON message to the rest of the room; a no-op when playing solo
+       hooks  { onRestart(), onExit() } - what R / ESC and the result-screen buttons mean is the shell's call
+     instance.start(session)   begin a round; session = { players: [{ id, name, avatar }], myId, hostId, isHost, online, opts }
+     instance.stop()           end the round and go quiet (back to the lobby); the instance may be started again
+     instance.destroy()        release everything: DOM, listeners, GL, audio voices
+     instance.onNetMessage(m)  a relayed message from another player (m.from is their id)
+     instance.playerLeft(id)   a player dropped out mid-round
+
+   Netcode: each machine simulates only the karts it owns - its own kart plus, on the host, every CPU kart,
+   shells, bananas, item boxes and the race clock. Everything else is interpolated from 30 Hz snapshots.
+   Hits are decided by the victim's machine. */
+import * as THREE from 'three';
+import { clamp, lerp, wrapAngle, ordinal, makeRng } from '../../core/math.js';
+import { createToasts, esc, fmtTime, loadStylesheet } from '../../core/ui.js';
+import { createInput } from '../../core/input.js';
+import { createLoop, fixedStep } from '../../core/loop.js';
+import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
+
+/* kart skins, indexed by the shared avatar index (core/avatars.js) */
+const SKINS = [
+  { name: 'Frost', color: 0xff3b3b, helmet: 0xffffff },
+  { name: 'Yeti', color: 0x3b82f6, helmet: 0xffd54a }, { name: 'Blizzard', color: 0xfacc15, helmet: 0x1e293b }, { name: 'Glacier', color: 0x22c55e, helmet: 0xffffff },
+  { name: 'Aurora', color: 0xa855f7, helmet: 0x7fd0ff }, { name: 'Flurry', color: 0xf97316, helmet: 0x111827 }, { name: 'Penguin', color: 0x06b6d4, helmet: 0xff3b3b }, { name: 'Frostbite', color: 0xf472b6, helmet: 0xffffff },
+];
+
+const HUD = `
+<canvas id="c"></canvas>
+<div id="item" class="hud panel"><canvas id="itemCanvas" width="168" height="168"></canvas><div id="itemLabel"></div></div>
+<div id="lapbox" class="hud panel"><div id="lap">LAP <b>1</b>/3</div><div id="timer">0:00.00</div></div>
+<div id="pos" class="hud">8<sup>th</sup></div>
+<div id="speedo" class="hud"><canvas id="speedCanvas" width="260" height="150" style="width:260px;height:150px"></canvas></div>
+<div id="map" class="hud panel"><canvas id="mapCanvas" width="380" height="380"></canvas></div>
+<div id="toasts" class="hud"></div>
+<div id="count" class="hud"></div>
+<div id="wrong" class="hud">⟲ WRONG WAY</div>
+<div id="hint" class="hud"></div>
+<div id="flash"></div>
+<div id="results"><div class="card"><h1>FINISH!</h1><h2 id="resSub">FINAL STANDINGS</h2><table id="resTable"></table><div class="foot" id="resFoot"></div></div></div>`;
+
+function disposeScene(scene) {
+  scene.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) { for (const v of Object.values(m)) if (v && v.isTexture) v.dispose(); m.dispose(); }
+  });
+}
+
+export async function create({ mount, audio, send, hooks }) {
+const unloadCss = await loadStylesheet('/games/kart/kart.css');
+mount.innerHTML = HUD;
+const $ = id => mount.querySelector('#' + id);
+const { rnd, rr } = makeRng(1337);
 
 /* ============================================================ renderer / scene */
 const canvas = $('c');
@@ -20,7 +67,7 @@ const scene = new THREE.Scene();
 const FOG_COLOR = new THREE.Color(0x3a4370);
 scene.fog = new THREE.Fog(FOG_COLOR, 160, 820);
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.3, 3200);
-addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+const onResize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }; addEventListener('resize', onResize);
 
 scene.add(new THREE.HemisphereLight(0x8ea6ff, 0x4b5482, 1.15));
 scene.add(new THREE.AmbientLight(0x7080b0, 0.35));
@@ -410,15 +457,9 @@ function updateParticles(dt) {
 }
 
 /* ============================================================ karts */
-export const SKINS = [
-  { name: 'Frost', color: 0xff3b3b, helmet: 0xffffff },
-  { name: 'Yeti', color: 0x3b82f6, helmet: 0xffd54a }, { name: 'Blizzard', color: 0xfacc15, helmet: 0x1e293b }, { name: 'Glacier', color: 0x22c55e, helmet: 0xffffff },
-  { name: 'Aurora', color: 0xa855f7, helmet: 0x7fd0ff }, { name: 'Flurry', color: 0xf97316, helmet: 0x111827 }, { name: 'Penguin', color: 0x06b6d4, helmet: 0xff3b3b }, { name: 'Frostbite', color: 0xf472b6, helmet: 0xffffff },
-];
 const VMAX = 32, ACC = 18, BOOST_ACC = 52, BRAKE = 30, REV_MAX = 9, TURN = 2.6, TURN_HI = 0.55, GRIP = 7.5, KART_R = 1.3;
 const CP = 12, CPL = L / CP;
 const wrapHalf = d => { d = ((d % L) + L) % L; return d > L / 2 ? d - L : d; };
-const nowSec = () => performance.now() / 1000;
 const r2 = v => Math.round((v > 0 ? v : 0) * 100) / 100;
 
 function buildKart(def) {
@@ -537,14 +578,10 @@ function packKart(k) {
   return { i: k.id, x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vx: +k.vx.toFixed(2), vz: +k.vz.toFixed(2), vf: +k.vf.toFixed(2), st: +k.steer.toFixed(2), th: k.throttle, lp: k.lap, cp: k.cpNext, d: +k.dist.toFixed(1), sc: +k.score.toFixed(2),
     bo: r2(k.boost), sp: r2(k.spin), sa: +k.spinAng.toFixed(2), sr: r2(k.star), sh: r2(k.shrink), it: k.item, ro: r2(k.roulette), fi: k.finished ? 1 : 0, ft: r2(k.finishTime), or: k.offroad ? 1 : 0 };
 }
-function pushSnap(k, s) { s.t = nowSec(); k.buf.push(s); if (k.buf.length > 24) k.buf.shift(); }
 function applyRemote(k, dt) {
-  const buf = k.buf; if (!buf.length) return;
-  const rt = nowSec() - INTERP; let a = null, b = null;
-  for (let i = buf.length - 1; i >= 0; i--) if (buf[i].t <= rt) { a = buf[i]; b = buf[i + 1] || null; break; }
-  if (!a) a = buf[0];
-  const latest = buf[buf.length - 1];
-  if (b) { const f = clamp((rt - a.t) / Math.max(b.t - a.t, 1e-3), 0, 1); k.x = lerp(a.x, b.x, f); k.z = lerp(a.z, b.z, f); k.h = a.h + wrapAngle(b.h - a.h) * f; }
+  const buf = k.buf, rt = nowSec() - INTERP; const smp = sampleSnaps(buf, rt); if (!smp) return;
+  const { a, b, f } = smp, latest = buf[buf.length - 1];
+  if (b) { k.x = lerp(a.x, b.x, f); k.z = lerp(a.z, b.z, f); k.h = a.h + wrapAngle(b.h - a.h) * f; }
   else { const ex = clamp(rt - a.t, 0, 0.25); k.x = a.x + a.vx * ex; k.z = a.z + a.vz * ex; k.h = a.h; }
   const age = nowSec() - latest.t;
   Object.assign(k, { vx: latest.vx, vz: latest.vz, vf: latest.vf, steer: latest.st, throttle: latest.th, lap: latest.lp, cpNext: latest.cp, dist: latest.d, score: latest.sc, item: latest.it, roulette: latest.ro, finished: !!latest.fi, finishTime: latest.ft, offroad: !!latest.or });
@@ -628,17 +665,16 @@ function aiControl(k, dt) {
 
 /* ============================================================ race state */
 const race = { state: 'intro', t: 0, time: 0, stage: 0, shake: 0, flash: 0, placeCand: 0, placeCandT: 0, shownPlace: 0, resultsT: 0, humanScore: 0 };
-/* ============================================================ audio */
+/* ============================================================ audio: kart cues on top of the shared synth */
 const sfx = (() => {
-  let ctx = null, master, eng, engGain, engGain2, muted = false;
-  const init = () => { if (ctx) { if (ctx.state === 'suspended') ctx.resume().catch(() => {}); return; } try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
-    master = ctx.createGain(); master.gain.value = 0.5; master.connect(ctx.destination);
+  const { beep, noise } = audio; let eng = null, engGain = null;
+  const unsub = audio.whenReady((ctx, master) => {
     eng = ctx.createOscillator(); eng.type = 'sawtooth'; const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 700; engGain = ctx.createGain(); engGain.gain.value = 0; eng.connect(f).connect(engGain).connect(master); eng.start();
-  };
-  const beep = (freq, dur, type = 'square', vol = 0.22, delay = 0) => { if (!ctx || muted) return; const t = ctx.currentTime + delay; const o = ctx.createOscillator(), g = ctx.createGain(); o.type = type; o.frequency.value = freq; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur); o.connect(g).connect(master); o.start(t); o.stop(t + dur); };
-  const noise = (dur, vol = 0.3, freq = 800, q = 1) => { if (!ctx || muted) return; const n = Math.floor(ctx.sampleRate * dur), b = ctx.createBuffer(1, n, ctx.sampleRate), d = b.getChannelData(0); for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n); const s = ctx.createBufferSource(); s.buffer = b; const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = q; const g = ctx.createGain(); g.gain.value = vol; s.connect(f).connect(g).connect(master); s.start(); };
-  return { init, get on() { return !!ctx; },
-    engine(speed, boost) { if (!engGain) return; eng.frequency.setTargetAtTime(50 + speed * 4.2 + (boost ? 60 : 0), ctx.currentTime, 0.05); engGain.gain.setTargetAtTime(muted ? 0 : 0.05 + speed * 0.0012, ctx.currentTime, 0.05); },
+  });
+  return {
+    engine(speed, boost) { if (!engGain) return; const ctx = audio.ctx; eng.frequency.setTargetAtTime(50 + speed * 4.2 + (boost ? 60 : 0), ctx.currentTime, 0.05); engGain.gain.setTargetAtTime(audio.muted ? 0 : 0.05 + speed * 0.0012, ctx.currentTime, 0.05); },
+    silence() { if (engGain) engGain.gain.setTargetAtTime(0, audio.ctx.currentTime, 0.05); },
+    dispose() { unsub(); if (eng) { try { eng.stop(); } catch {} eng.disconnect(); eng = null; engGain = null; } },
     count() { beep(440, 0.25); }, go() { beep(880, 0.7, 'square', 0.28); },
     pickup() { beep(660, 0.1); beep(880, 0.1, 'square', 0.22, 0.08); beep(1100, 0.2, 'square', 0.22, 0.16); },
     tick() { beep(1400, 0.03, 'square', 0.07); }, boost() { noise(0.6, 0.3, 1600, 0.7); beep(220, 0.5, 'sawtooth', 0.12); },
@@ -646,13 +682,11 @@ const sfx = (() => {
     up() { beep(620, 0.1); beep(930, 0.18, 'square', 0.22, 0.1); }, down() { beep(520, 0.1); beep(300, 0.25, 'square', 0.22, 0.1); },
     lap() { beep(700, 0.1); beep(900, 0.1, 'square', 0.22, 0.1); beep(1200, 0.3, 'square', 0.22, 0.2); },
     star() { [523, 659, 784, 1046, 1318].forEach((f, i) => beep(f, 0.18, 'square', 0.2, i * 0.09)); }, lightning() { noise(0.8, 0.7, 900, 0.3); beep(60, 0.8, 'sawtooth', 0.35); },
-    finish() { [784, 784, 784, 1046].forEach((f, i) => beep(f, i === 3 ? 0.7 : 0.15, 'square', 0.25, i * 0.18)); },
-    toggle() { muted = !muted; if (master) master.gain.value = muted ? 0 : 0.5; return muted; } };
+    finish() { [784, 784, 784, 1046].forEach((f, i) => beep(f, i === 3 ? 0.7 : 0.15, 'square', 0.25, i * 0.18)); }, };
 })();
 
 /* ============================================================ toasts / flash */
-const toastsEl = $('toasts');
-function toast(text, cls = '') { const d = document.createElement('div'); d.className = 'toast ' + cls; d.textContent = text; toastsEl.appendChild(d); while (toastsEl.children.length > 4) toastsEl.firstChild.remove(); setTimeout(() => d.remove(), 1650); }
+const toasts = createToasts($('toasts')), toast = toasts.toast;
 const flashEl = $('flash');
 function flash(color, strength = 0.6) { flashEl.style.background = color; race.flash = strength; }
 
@@ -702,13 +736,13 @@ function useItem(k) {
   else if (t === 'green' || t === 'red' || t === 'banana') {
     const target = t === 'red' ? pickRedTarget(k) : null;
     if (isHost) spawnHazard(t, k, k.x, k.z, k.h, k.vf, target);
-    else netSend({ t: 'use', it: t, x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vf: +k.vf.toFixed(2), tg: target ? target.id : -1 });
+    else send({ t: 'use', it: t, x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vf: +k.vf.toFixed(2), tg: target ? target.id : -1 });
     if (isMe(k) && t !== 'banana') sfx.throwIt();
   }
   else if (t === 'star') { k.star = 7.5; if (isMe(k)) { toast('★ STAR POWER!', 'gold'); sfx.star(); } }
   else if (t === 'lightning') {
     for (const o of active) if (o !== k && owned(o)) hitKart(o, 'lightning', k.id);
-    if (online) netSend({ t: 'zap', by: k.id });
+    if (online) send({ t: 'zap', by: k.id });
     if (isMe(k)) { toast('⚡ LIGHTNING!', 'gold'); flash('#ffffff', 0.5); } sfx.lightning(); if (!isMe(k) && me.star <= 0) flash('#ffff80', 0.7);
   }
 }
@@ -729,7 +763,7 @@ function killHazard(i) { const h = hazards[i]; hazBurst(h); scene.remove(h.mesh)
 /* client: a hazard hit (or bounced off) the local kart - destroy it here and tell the host */
 function localKillHazard(h, spun) {
   hazBurst(h); scene.remove(h.mesh); remoteHaz.delete(h.id); ignoreHaz.set(h.id, nowSec() + 3);
-  netSend({ t: 'hit', id: h.id, v: me.id, c: h.type === 'banana' ? 'banana' : 'shell', s: spun ? 1 : 0 });
+  send({ t: 'hit', id: h.id, v: me.id, c: h.type === 'banana' ? 'banana' : 'shell', s: spun ? 1 : 0 });
 }
 
 function updateItems(dt) {
@@ -741,7 +775,7 @@ function updateItems(dt) {
     for (const k of active) if (owned(k) && !k.item && k.roulette <= 0 && (k.x - b.x) ** 2 + (k.z - b.z) ** 2 < 2.1 * 2.1) {
       b.active = false; b.g.visible = false; b.respawn = 3.5; b.hideUntil = nowSec() + 1.0; k.roulette = 1.35; k.ai.itemTimer = 0;
       for (let i = 0; i < 10; i++) spawnP(b.x, b.y + 1.3, b.z, rr(-4, 4), rr(1, 6), rr(-4, 4), rr(0.3, 0.6), 0x9fe8ff, 0.8, 6);
-      if (isMe(k)) sfx.pickup(); if (!isHost) netSend({ t: 'pick', b: bi }); break;
+      if (isMe(k)) sfx.pickup(); if (!isHost) send({ t: 'pick', b: bi }); break;
     }
   }
   for (const k of active) if (owned(k) && k.roulette > 0) { k.roulette -= dt; if (k.roulette <= 0) { k.item = rollItem(k.place); if (isMe(k)) { drawItemSlot(k.item); $('item').classList.remove('pulse'); void $('item').offsetWidth; $('item').classList.add('pulse'); toast(ITEM_LABEL[k.item] + '!', 'blue'); } } else if (isMe(k)) { drawItemSlot(ITEMS[Math.floor(timeU.value * 14) % ITEMS.length], true); if (Math.floor(timeU.value * 14) !== k._tick) { k._tick = Math.floor(timeU.value * 14); sfx.tick(); } } }
@@ -771,7 +805,7 @@ function updateHostHazards(dt) {
       if (!owned(k)) continue; if (k.id === h.owner && h.age < 0.6) continue;
       if ((k.x - h.x) ** 2 + (k.z - h.z) ** 2 < (KART_R + 0.8) ** 2) {
         if (k.star > 0) { dead = true; break; }
-        if (k.hitCd <= 0) { const cause = h.type === 'banana' ? 'banana' : 'shell'; hitKart(k, cause, h.owner); if (online) netSend({ t: 'hitev', v: k.id, c: cause, by: h.owner }); dead = true; break; }
+        if (k.hitCd <= 0) { const cause = h.type === 'banana' ? 'banana' : 'shell'; hitKart(k, cause, h.owner); if (online) send({ t: 'hitev', v: k.id, c: cause, by: h.owner }); dead = true; break; }
       }
     }
     if (dead) killHazard(i);
@@ -781,11 +815,9 @@ function updateHostHazards(dt) {
 function updateRemoteHazards(dt) {
   const rt = nowSec() - INTERP;
   for (const h of remoteHaz.values()) {
-    h.age += dt; const buf = h.buf; let a = null, b = null;
-    for (let i = buf.length - 1; i >= 0; i--) if (buf[i].t <= rt) { a = buf[i]; b = buf[i + 1] || null; break; }
-    if (!a) a = buf[0];
-    if (b) { const f = clamp((rt - a.t) / Math.max(b.t - a.t, 1e-3), 0, 1); h.x = lerp(a.x, b.x, f); h.z = lerp(a.z, b.z, f); }
-    else { const p = buf[buf.length - 2]; const ex = clamp(rt - a.t, 0, 0.2); if (p && h.type !== 'banana') { const it = Math.max(a.t - p.t, 1e-3); h.x = a.x + (a.x - p.x) / it * ex; h.z = a.z + (a.z - p.z) / it * ex; } else { h.x = a.x; h.z = a.z; } }
+    h.age += dt; const smp = sampleSnaps(h.buf, rt); if (!smp) continue; const { a, b, f, prev: p } = smp;
+    if (b) { h.x = lerp(a.x, b.x, f); h.z = lerp(a.z, b.z, f); }
+    else { const ex = clamp(rt - a.t, 0, 0.2); if (p && h.type !== 'banana') { const it = Math.max(a.t - p.t, 1e-3); h.x = a.x + (a.x - p.x) / it * ex; h.z = a.z + (a.z - p.z) / it * ex; } else { h.x = a.x; h.z = a.z; } }
     h.h = a.h; h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.position.set(h.x, h.y + 0.6, h.z); h.mesh.rotation.y += dt * (h.type === 'banana' ? 0.5 : 12);
     if (h.type === 'red' && Math.random() < 0.5) spawnP(h.x, h.y + 0.5, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.3, 0xff6040, 0.5);
     if (me.kind !== 'local') continue; if (h.owner === me.id && h.age < 0.6) continue;
@@ -803,7 +835,7 @@ function syncHazards(list) {
     if (ignoreHaz.has(hs.id)) continue; seen.add(hs.id);
     let h = remoteHaz.get(hs.id);
     if (!h) { h = { id: hs.id, type: hs.ty, owner: hs.o, x: hs.x, z: hs.z, y: terrainH(hs.x, hs.z) + ROAD_Y, h: hs.h || 0, age: 0, buf: [], mesh: hazMesh(hs.ty) }; h.mesh.position.set(h.x, h.y + 0.6, h.z); remoteHaz.set(hs.id, h); }
-    h.buf.push({ t: now, x: hs.x, z: hs.z, h: hs.h || 0 }); if (h.buf.length > 24) h.buf.shift();
+    pushSnap(h.buf, { x: hs.x, z: hs.z, h: hs.h || 0 }, now);
   }
   for (const [id, h] of remoteHaz) if (!seen.has(id)) { hazBurst(h); scene.remove(h.mesh); remoteHaz.delete(id); }
 }
@@ -817,7 +849,7 @@ function clearHazards() {
 }
 
 /* ============================================================ laps / finish */
-const fmtT = t => { const m = Math.floor(t / 60), s = t - m * 60; return m + ':' + (s < 10 ? '0' : '') + s.toFixed(2); };
+const fmtT = fmtTime;
 function onLapLine(k) {
   if (race.state === 'intro' || race.state === 'countdown') return;
   k.lap++;
@@ -830,7 +862,6 @@ function finishPlayer() {
   race.state = 'finished'; race.resultsT = 1.6; toast('FINISH!', 'gold'); sfx.finish(); flash('#ffffff', 0.4);
   for (let i = 0; i < 60; i++) spawnP(me.x + rr(-6, 6), me.y + rr(1, 6), me.z + rr(-6, 6), rr(-4, 4), rr(2, 10), rr(-4, 4), rr(0.8, 1.6), CROWD_COLORS[i % CROWD_COLORS.length], 1.2, 8);
 }
-const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function renderResults() {
   const sorted = active.slice().sort((a, b) => b.score - a.score);
   $('resTable').innerHTML = sorted.map((k, i) => `<tr class="${isMe(k) ? 'me' : ''}"><td>${ordinal(i + 1)}</td><td><span class="sw" style="background:#${k.color.toString(16).padStart(6, '0')}"></span>${esc(k.name)}${k.kind === 'ai' ? ' <span class="cpu">CPU</span>' : ''}</td><td class="t">${k.finished ? fmtT(k.finishTime) : 'racing…'}</td></tr>`).join('');
@@ -842,7 +873,7 @@ function resetRace() {
   clearHazards();
   for (const b of itemBoxes) { b.active = true; b.g.visible = true; b.hideUntil = 0; }
   Object.assign(race, { state: 'countdown', t: 0, time: 0, stage: 0, shake: 0, placeCand: active.length, placeCandT: 0, shownPlace: active.length, resultsT: 0, humanScore: 0 });
-  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toastsEl.innerHTML = ''; drawItemSlot(null); setGantry(0); setPosHud(active.length); input.pressAt = -1; input.up = input.down = input.left = input.right = false;
+  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length); input.pressAt = -1; input.up = input.down = input.left = input.right = false;
   karts.forEach(k => { k.startDelay = k.kind === 'ai' ? rr(0.05, 0.45) : 0; });
   camState.pos.copy(trackPoint(L - 40, 0)).add(new THREE.Vector3(0, 8, 0)); camState.init = true;
 }
@@ -886,22 +917,18 @@ const posEl = $('pos');
 function setPosHud(p) { posEl.innerHTML = `${p}<sup>${ordinal(p).slice(-2)}</sup>`; posEl.className = 'hud p' + p; posEl.classList.add('bump'); setTimeout(() => posEl.classList.remove('bump'), 160); }
 
 /* ============================================================ input */
-const input = { up: false, down: false, left: false, right: false, item: false, pressAt: -1 };
-const KEYS = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right' };
-const typing = e => e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
-addEventListener('keydown', e => {
-  if (typing(e)) return;
-  if (e.repeat) { if (KEYS[e.code] || e.code === 'Space') e.preventDefault(); return; }
-  sfx.init();
-  if (race.state === 'intro') return; // the lobby owns the screen
-  if (KEYS[e.code]) { const k = KEYS[e.code]; if (k === 'up' && !input.up) input.pressAt = race.t; input[k] = true; e.preventDefault(); }
-  if (e.code === 'Space' || e.code === 'Enter' || e.code === 'ShiftLeft' || e.code === 'KeyE') { e.preventDefault(); if (race.state === 'race' && me.kind === 'local' && !me.finished) useItem(me); }
-  if (e.code === 'KeyR') hooks.onRestart?.();
-  if (e.code === 'Escape') hooks.onEscape?.();
-  if (e.code === 'KeyM') { toast(sfx.toggle() ? 'SOUND OFF' : 'SOUND ON', 'blue'); }
+const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right' }, {
+  onDown: (name, e, wasHeld) => { audio.init(); if (name === 'up' && !wasHeld) input.pressAt = race.t; },
+  onUp: name => { if (name === 'up') input.pressAt = -1; },
+  onKey: e => {
+    audio.init();
+    if (e.code === 'Space' || e.code === 'Enter' || e.code === 'ShiftLeft' || e.code === 'KeyE') { e.preventDefault(); if (race.state === 'race' && me.kind === 'local' && !me.finished) useItem(me); }
+    if (e.code === 'KeyR') hooks.onRestart?.();
+    if (e.code === 'Escape') hooks.onExit?.();
+    if (e.code === 'KeyM') toast(audio.toggle() ? 'SOUND OFF' : 'SOUND ON', 'blue');
+  },
 });
-addEventListener('keyup', e => { if (KEYS[e.code]) { input[KEYS[e.code]] = false; if (KEYS[e.code] === 'up') input.pressAt = -1; } });
-addEventListener('blur', () => { input.up = input.down = input.left = input.right = false; });
+const input = kb.held; input.pressAt = -1;
 
 /* ============================================================ camera */
 const camState = { pos: new THREE.Vector3(0, 10, -30), look: new THREE.Vector3(), fov: 70, init: false };
@@ -933,8 +960,6 @@ function updateAmbient(dt) {
 }
 
 /* ============================================================ networking glue */
-let netSend = () => {};
-const hooks = {};
 let netAcc = 0;
 function netTick(dt) {
   if (!online) return; netAcc += dt; if (netAcc < 1 / 30) return; netAcc = 0;
@@ -944,7 +969,7 @@ function netTick(dt) {
     msg.z = hazards.map(h => ({ id: h.id, ty: h.type, o: h.owner, x: +h.x.toFixed(2), z: +h.z.toFixed(2), h: h.type === 'red' ? +h.h.toFixed(3) : 0 }));
     let m = 0; itemBoxes.forEach((b, i) => { if (b.active) m |= 1 << i; }); msg.b = m;
   }
-  netSend(msg);
+  send(msg);
 }
 /* client: follow the host's clock */
 function syncRace(r) {
@@ -954,7 +979,7 @@ function syncRace(r) {
 const kartOf = pid => karts.find(k => k.pid === pid && k.kind !== 'none');
 
 /* ============================================================ main loop */
-let last = performance.now(); const lapEl = $('lap'), timerEl = $('timer'), countEl = $('count'), lapboxEl = $('lapbox');
+const lapEl = $('lap'), timerEl = $('timer'), countEl = $('count');
 /* simulation step: fixed-size sub-steps so game time keeps up with real time even on a slow machine */
 function simStep(dt) {
   race.t += dt;
@@ -999,30 +1024,34 @@ function present(dt) {
   if (race.flash > 0) { race.flash -= dt * 1.8; flashEl.style.opacity = Math.max(race.flash, 0); }
   sfx.engine(Math.abs(me.vf), me.boost > 0);
 }
-const MAX_FRAME = 0.25, SUB = 1 / 60;
-function frame(now) {
-  requestAnimationFrame(frame); const real = Math.min((now - last) / 1000, MAX_FRAME); last = now; timeU.value += real;
-  if (race.state !== 'intro') { const n = Math.max(1, Math.ceil(real / SUB)); const dt = real / n; for (let i = 0; i < n; i++) simStep(dt); present(real); }
-  else { const a = timeU.value * 0.15; const p = trackPoint(L - 30, 0); camera.position.set(p.x + Math.sin(a) * 40, p.y + 16, p.z + Math.cos(a) * 40); camera.lookAt(p.x, p.y + 2, p.z); updateParticles(real); updateAmbient(real); for (const b of itemBoxes) { b.g.rotation.y += real; } }
-  renderer.render(scene, camera);
-}
+const SUB = 1 / 60;
+const loop = createLoop(real => { timeU.value += real; fixedStep(real, SUB, simStep); present(real); renderer.render(scene, camera); });
 karts.forEach((k, i) => resetKart(k, i)); karts.forEach(k => kartVisual(k, 0.016));
 drawItemSlot(null); setPosHud(8); setGantry(0);
-requestAnimationFrame(frame);
 
-/* ============================================================ public API (used by app.js) */
-export function setNetSend(fn) { netSend = fn || (() => {}); }
-export function setHooks(h) { Object.assign(hooks, h); }
-export function initAudio() { sfx.init(); }
-export function setHint(text) { $('hint').textContent = text; }
-
-/* slots: 8 entries indexed by kart/skin id: { kind: 'human' | 'ai' | 'none', id?, name? } */
-export function startRace({ slots, myId, host, online: isOnline }) {
-  isHost = !!host; online = !!isOnline; me = null;
+/* ============================================================ session API (used by the shell) */
+let session = null;
+const hintEl = $('hint');
+/* 8 slots indexed by kart/avatar id: { kind: 'human' | 'ai' | 'none', id?, name? } */
+function slotsFor({ players, opts }) {
+  const slots = SKINS.map(() => ({ kind: opts && opts.fillAI ? 'ai' : 'none' }));
+  for (const p of players) if (SKINS[p.avatar]) slots[p.avatar] = { kind: 'human', id: p.id, name: p.name };
+  return slots;
+}
+function renderFoot() {
+  const f = $('resFoot'); f.innerHTML = '';
+  const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
+  if (!online) { btn('RACE AGAIN  (R)', 'primary', () => hooks.onRestart?.()); btn('MENU  (ESC)', '', () => hooks.onExit?.()); }
+  else if (isHost) { btn('RACE AGAIN  (R)', 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY  (ESC)', '', () => hooks.onExit?.()); }
+  else f.textContent = 'WAITING FOR THE HOST TO RESTART OR RETURN TO THE LOBBY…';
+}
+function start(s) {
+  session = s; isHost = !!s.isHost; online = !!s.online; me = null;
+  const slots = slotsFor(s);
   for (const k of karts) {
-    const s = slots[k.id] || { kind: 'none' };
-    k.kind = s.kind === 'human' ? (s.id === myId ? 'local' : 'remote') : s.kind === 'ai' ? 'ai' : 'none';
-    k.pid = s.kind === 'human' ? s.id : null; k.name = s.kind === 'human' ? (s.name || SKINS[k.id].name) : SKINS[k.id].name; k.buf = [];
+    const sl = slots[k.id] || { kind: 'none' };
+    k.kind = sl.kind === 'human' ? (sl.id === s.myId ? 'local' : 'remote') : sl.kind === 'ai' ? 'ai' : 'none';
+    k.pid = sl.kind === 'human' ? sl.id : null; k.name = sl.kind === 'human' ? (sl.name || SKINS[k.id].name) : SKINS[k.id].name; k.buf = [];
     k.vis.g.visible = k.kind !== 'none'; setLabel(k, k.kind === 'remote' ? k.name : null);
     if (k.kind === 'local') me = k;
   }
@@ -1031,33 +1060,44 @@ export function startRace({ slots, myId, host, online: isOnline }) {
   gridOrder = active.filter(k => k.kind === 'ai').map(k => k.id).concat(active.filter(k => k.kind !== 'ai').map(k => k.id));
   for (const k of karts) if (k.kind === 'none') k.place = 99;
   resetRace();
+  hintEl.textContent = !online ? 'ARROWS / WASD · SPACE item · R restart · ESC menu · M sound' : isHost ? 'ARROWS / WASD · SPACE item · R again · ESC lobby · M sound' : 'ARROWS / WASD · SPACE item · M sound';
+  renderFoot();
+  audio.init(); kb.attach(); loop.start();
 }
-export function toLobby() {
-  race.state = 'intro'; clearHazards();
-  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toastsEl.innerHTML = ''; countEl.className = 'hud'; $('wrong').style.display = 'none'; flashEl.style.opacity = 0;
+function stop() {
+  session = null; race.state = 'intro'; clearHazards();
+  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); countEl.className = 'hud'; $('wrong').style.display = 'none'; flashEl.style.opacity = 0;
   for (const k of karts) { setLabel(k, null); k.vis.g.visible = true; k.vis.bodyMat.color.set(k.color); k.vis.bodyMat.emissive.set(0); k.vis.bodyMat.emissiveIntensity = 0; }
   active = karts; karts.forEach((k, i) => resetKart(k, i)); for (const b of itemBoxes) { b.active = true; b.g.visible = true; }
+  kb.detach(); loop.stop(); sfx.silence();
+}
+function destroy() {
+  stop(); sfx.dispose(); removeEventListener('resize', onResize);
+  disposeScene(scene); renderer.dispose(); renderer.forceContextLoss?.();
+  mount.innerHTML = ''; unloadCss(); if (window.__kart === debug) delete window.__kart;
 }
 /* a player dropped out mid-race: the host drives that kart from now on */
-export function playerLeft(pid) {
+function playerLeft(pid) {
   const k = kartOf(pid); if (!k) return;
   k.kind = 'ai'; k.pid = null; k.buf = []; k.name = SKINS[k.id].name; setLabel(k, null);
   k.ai = { skill: rr(0.93, 1.0), wander: rr(0.6, 1.4), aggr: rr(0.2, 0.9), lane: 0, laneTarget: 0, laneTimer: rr(0, 2), stuck: 0, reverse: 0, itemTimer: 0, rubber: 1 };
   k.throttle = 0; k.steer = 0; k.roulette = 0;
 }
-export function onNetMessage(msg) {
+function onNetMessage(msg) {
   if (race.state === 'intro') return;
   switch (msg.t) {
     case 's':
-      for (const ks of msg.k || []) { const k = karts[ks.i]; if (k && !owned(k) && k.kind !== 'none') pushSnap(k, ks); }
+      for (const ks of msg.k || []) { const k = karts[ks.i]; if (k && !owned(k) && k.kind !== 'none') pushSnap(k.buf, ks); }
       if (!isHost && msg.r) { syncRace(msg.r); syncHazards(msg.z || []); if (msg.b !== undefined) syncBoxes(msg.b); }
       break;
     case 'pick': if (isHost) { const b = itemBoxes[msg.b]; if (b && b.active) { b.active = false; b.g.visible = false; b.respawn = 3.5; for (let i = 0; i < 10; i++) spawnP(b.x, b.y + 1.3, b.z, rr(-4, 4), rr(1, 6), rr(-4, 4), rr(0.3, 0.6), 0x9fe8ff, 0.8, 6); } } break;
     case 'use': if (isHost) { const k = kartOf(msg.from); if (k) spawnHazard(msg.it, k, msg.x, msg.z, msg.h, msg.vf, msg.tg >= 0 ? karts[msg.tg] : null); } break;
     case 'zap': { for (const o of active) if (owned(o) && o.id !== msg.by) hitKart(o, 'lightning', msg.by); sfx.lightning(); if (me.star <= 0) flash('#ffff80', 0.7); break; }
-    case 'hit': if (isHost) { const i = hazards.findIndex(h => h.id === msg.id); if (i >= 0) { const h = hazards[i]; killHazard(i); if (msg.s) { const v = karts[msg.v]; if (v) hitBurst(v, msg.c); if (h.owner === me.id) niceShot(); netSend({ t: 'hitev', v: msg.v, c: msg.c, by: h.owner }); } } } break;
+    case 'hit': if (isHost) { const i = hazards.findIndex(h => h.id === msg.id); if (i >= 0) { const h = hazards[i]; killHazard(i); if (msg.s) { const v = karts[msg.v]; if (v) hitBurst(v, msg.c); if (h.owner === me.id) niceShot(); send({ t: 'hitev', v: msg.v, c: msg.c, by: h.owner }); } } } break;
     case 'hitev': { const v = karts[msg.v]; if (!v || owned(v)) break; hitBurst(v, msg.c); if (msg.by === me.id && msg.c !== 'lightning') niceShot(); break; }
   }
 }
-export const debug = { karts, race, hazards, remoteHaz, itemBoxes, S, L, N, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; } };
-window.__dbg = debug;
+const debug = { karts, race, hazards, remoteHaz, itemBoxes, S, L, N, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; } };
+window.__kart = debug;
+return { start, stop, destroy, onNetMessage, playerLeft, debug };
+}

@@ -1,10 +1,11 @@
 {
-  "name": "frostline-kart",
-  "version": "1.0.0",
+  "name": "lan-party",
+  "version": "2.0.0",
   "private": true,
-  "description": "Frostline Kart - snowy kart racer with LAN multiplayer",
+  "type": "module",
+  "description": "Browser party games over the LAN. Ships with Frostline Kart, a snowy kart racer.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server/index.js"
   },
   "dependencies": {
     "three": "0.169.0",

@@ -1,0 +1,167 @@
+/* Shell: menu, lobby and the lifecycle of the chosen game. Games live in games/<id>/ and are loaded on demand;
+   the game contract is documented at the top of games/kart/index.js. */
+import { GAMES, gameById, defaultOpts } from './games/registry.js';
+import { AVATARS, MAX_NAME } from './core/avatars.js';
+import { Net, wsUrl } from './core/net.js';
+import { createAudio } from './core/audio.js';
+import { loadPrefs, savePrefs } from './core/prefs.js';
+import { esc, hex } from './core/ui.js';
+
+const $ = id => document.getElementById(id);
+const audio = createAudio();
+const S = { net: null, id: null, room: null, hostId: null, addr: '', players: [], opts: {}, gameId: GAMES[0].id, mode: 'menu', playing: false, name: '', avatar: 0, game: null, gameMeta: null, loading: null };
+const isHost = () => S.id !== null && S.id === S.hostId;
+const meP = () => S.players.find(p => p.id === S.id);
+const curGame = () => gameById(S.gameId) || GAMES[0];
+
+/* ---------------------------------------------------------------- persisted prefs */
+{ const p = loadPrefs(); S.name = p.name; S.avatar = AVATARS[p.avatar] ? p.avatar : 0; if (gameById(p.game)) S.gameId = p.game; }
+$('nameIn').value = S.name;
+const savePrefsNow = () => savePrefs({ name: S.name, avatar: S.avatar, game: S.gameId });
+const readName = () => { S.name = $('nameIn').value.trim().slice(0, MAX_NAME) || 'Player'; $('nameIn').value = S.name; savePrefsNow(); return S.name; };
+
+/* ---------------------------------------------------------------- screens */
+function show(screen, status) {
+  $('intro').hidden = !screen; $('stage').hidden = !!screen;
+  $('screenStart').classList.toggle('show', screen === 'start'); $('screenLobby').classList.toggle('show', screen === 'lobby');
+  if (screen === 'start') setStatus(status || '');
+}
+function setStatus(text, ok = false) { const el = $('status'); el.textContent = text; el.className = ok ? 'ok' : ''; }
+
+function renderAvatars(el, selected, taken, onPick) {
+  el.innerHTML = '';
+  AVATARS.forEach((av, i) => {
+    const d = document.createElement('div'); d.className = 'avatar' + (i === selected ? ' sel' : '') + (taken.has(i) && i !== selected ? ' taken' : '');
+    d.style.background = hex(av.color); d.title = av.name; const n = document.createElement('span'); n.textContent = av.name.toUpperCase(); d.appendChild(n);
+    d.onclick = () => { if (taken.has(i) && i !== selected) return; onPick(i); };
+    el.appendChild(d);
+  });
+}
+function renderGames() {
+  const el = $('gameList'); el.innerHTML = '';
+  for (const g of GAMES) {
+    const d = document.createElement('div'); d.className = 'game-card' + (g.id === S.gameId ? ' sel' : '');
+    d.innerHTML = `<div class="title">${esc(g.title)}</div><div class="tag">${esc(g.tagline || '')}</div><div class="cap">${g.minPlayers === g.maxPlayers ? g.maxPlayers : `${g.minPlayers}–${g.maxPlayers}`} players${g.minPlayers <= 1 ? ' · solo ok' : ''}</div>`;
+    d.onclick = () => { S.gameId = g.id; savePrefsNow(); renderGames(); };
+    el.appendChild(d);
+  }
+  $('btnSolo').disabled = curGame().minPlayers > 1;
+}
+function renderStart() { renderAvatars($('avatarsStart'), S.avatar, new Set(), i => { S.avatar = i; savePrefsNow(); renderStart(); }); renderGames(); }
+
+/* lobby options are declared by the game (registry.js); the host edits them, everyone else sees them */
+function renderOpts() {
+  const game = curGame(), host = isHost(), el = $('opts'); el.innerHTML = '';
+  for (const o of game.options || []) {
+    const label = document.createElement('label'); label.className = 'opt'; let input;
+    if (o.type === 'bool') { input = document.createElement('input'); input.type = 'checkbox'; input.checked = !!S.opts[o.key]; label.append(input, document.createTextNode(o.label)); }
+    else if (o.type === 'number') { input = document.createElement('input'); input.type = 'number'; if (o.min !== undefined) input.min = o.min; if (o.max !== undefined) input.max = o.max; if (o.step !== undefined) input.step = o.step; input.value = S.opts[o.key] ?? o.default; label.append(document.createTextNode(o.label), input); }
+    else if (o.type === 'select') { input = document.createElement('select'); for (const c of o.choices) { const opt = document.createElement('option'); opt.value = String(c.value); opt.textContent = c.label; opt.selected = c.value === S.opts[o.key]; input.appendChild(opt); } label.append(document.createTextNode(o.label), input); }
+    else continue;
+    input.disabled = !host;
+    input.onchange = () => {
+      const v = o.type === 'bool' ? input.checked : o.type === 'number' ? Number(input.value) : (o.choices.find(c => String(c.value) === input.value) || {}).value;
+      if (S.net) S.net.send({ t: 'opt', opts: { [o.key]: v } });
+    };
+    el.appendChild(label);
+  }
+}
+function renderLobby() {
+  const me = meP(), host = isHost(), game = curGame();
+  $('roomCode').textContent = S.room || '----';
+  $('roomAddr').innerHTML = S.addr ? `friends on this network open <b>${esc(S.addr)}</b> and enter the code` : '';
+  $('lobbyGame').textContent = `${game.title.toUpperCase()} · ${S.players.length}/${game.maxPlayers} PLAYERS`;
+  const taken = new Set(S.players.filter(p => p.id !== S.id).map(p => p.avatar));
+  renderAvatars($('avatarsLobby'), me ? me.avatar : S.avatar, taken, i => S.net && S.net.send({ t: 'lobby', avatar: i }));
+  $('players').innerHTML = S.players.map(p => `<li class="${p.id === S.id ? 'me' : ''}"><span class="sw" style="background:${hex(AVATARS[p.avatar].color)}"></span><span class="nm">${esc(p.name)}${p.id === S.id ? ' (you)' : ''}</span>${p.id === S.hostId ? '<span class="tag host">HOST</span>' : p.ready ? '<span class="tag ready">READY</span>' : '<span class="tag wait">NOT READY</span>'}</li>`).join('');
+  renderOpts();
+  $('btnReady').style.display = host ? 'none' : ''; $('btnReady').textContent = me && me.ready ? 'NOT READY' : 'READY'; $('btnReady').classList.toggle('good', !(me && me.ready));
+  $('btnStart').style.display = host ? '' : 'none';
+  const others = S.players.filter(p => p.id !== S.hostId); const allReady = others.every(p => p.ready); const enough = S.players.length >= game.minPlayers;
+  $('btnStart').disabled = !allReady || !enough;
+  $('lobbyStatus').textContent = host
+    ? (!enough ? `${game.title} needs at least ${game.minPlayers} players.` : others.length === 0 ? 'Waiting for players to join… you can also start alone.' : allReady ? 'Everyone is ready. Start when you like!' : 'Waiting for everyone to press READY…')
+    : (me && me.ready ? 'Waiting for the host to start…' : 'Press READY when you are set.');
+}
+
+/* ---------------------------------------------------------------- game lifecycle */
+const hooks = {
+  onRestart: () => { if (!S.playing || !S.game) return; if (S.mode === 'solo') S.game.start(soloSession()); else if (isHost()) S.net.send({ t: 'start' }); },
+  onExit: () => { if (!S.playing) return; if (S.mode === 'solo') leaveToMenu(); else if (isHost()) S.net.send({ t: 'end' }); },
+};
+const send = msg => { if (S.mode === 'online' && S.net) S.net.send(msg); };
+let gen = 0; // bumps whenever the current game is torn down, so a load that finishes late is discarded
+async function ensureGame(game) {
+  if (S.game && S.gameMeta && S.gameMeta.id === game.id) return S.game;
+  if (S.loading && S.loading.id === game.id) return S.loading.promise;
+  destroyGame(); const my = ++gen;
+  const promise = (async () => {
+    const mod = await game.load(); const inst = await mod.create({ mount: $('stage'), audio, send, hooks });
+    if (my !== gen) { inst.destroy(); return null; }
+    S.game = inst; S.gameMeta = game; return inst;
+  })().finally(() => { if (S.loading && S.loading.promise === promise) S.loading = null; });
+  S.loading = { id: game.id, promise };
+  return promise;
+}
+function destroyGame() { gen++; if (S.game) { try { S.game.destroy(); } catch (e) { console.error(e); } } S.game = null; S.gameMeta = null; S.loading = null; $('stage').innerHTML = ''; }
+const loadError = (game, e) => { console.error(e); return `Could not load ${game.title}: ${e.message}`; };
+
+/* ---------------------------------------------------------------- solo */
+const soloSession = () => ({ players: [{ id: 'me', name: S.name, avatar: S.avatar }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: defaultOpts(curGame()) });
+async function startSolo() {
+  readName(); const game = curGame(); if (game.minPlayers > 1) { setStatus(`${game.title} needs at least ${game.minPlayers} players`); return; }
+  S.mode = 'solo'; setStatus('Loading…', true); audio.init();
+  try { const inst = await ensureGame(game); if (!inst || S.mode !== 'solo') return; S.playing = true; inst.start(soloSession()); show(null); }
+  catch (e) { S.mode = 'menu'; setStatus(loadError(game, e)); }
+}
+function leaveToMenu(msg) {
+  S.playing = false; S.mode = 'menu'; destroyGame();
+  if (S.net) { S.net.close(); S.net = null; } S.id = null; S.room = null; S.hostId = null; S.players = []; S.opts = {};
+  renderStart(); show('start', msg);
+}
+
+/* ---------------------------------------------------------------- online */
+async function connect() {
+  if (S.net && S.net.open) return S.net;
+  const net = new Net(); setStatus('Connecting…', true);
+  await net.connect(wsUrl()); S.net = net;
+  net.on('joined', m => {
+    S.id = m.id; S.room = m.room; S.hostId = m.hostId; S.addr = m.addr; S.mode = 'online'; if (gameById(m.game)) S.gameId = m.game; savePrefsNow();
+    renderLobby(); show('lobby');
+    ensureGame(curGame()).catch(e => { $('lobbyStatus').textContent = loadError(curGame(), e); }); // build the game while people gather so START is instant
+  });
+  net.on('lobby', m => { S.players = m.players; S.hostId = m.hostId; S.opts = m.opts || {}; S.room = m.room; if (gameById(m.game)) S.gameId = m.game; const me = meP(); if (me) { S.avatar = me.avatar; savePrefsNow(); } renderLobby(); });
+  net.on('start', async m => {
+    S.hostId = m.hostId; S.playing = true; audio.init(); const game = curGame();
+    const session = { players: m.players, myId: S.id, hostId: m.hostId, isHost: isHost(), online: true, opts: m.opts || {} };
+    try { const inst = await ensureGame(game); if (!inst || !S.playing || S.mode !== 'online') return; inst.start(session); show(null); }
+    catch (e) { $('lobbyStatus').textContent = loadError(game, e); }
+  });
+  net.on('end', () => { S.playing = false; if (S.game) S.game.stop(); renderLobby(); show('lobby'); });
+  net.on('left', m => { if (S.playing && S.game) S.game.playerLeft(m.id); });
+  net.on('closed', m => leaveToMenu(m.reason || 'The room was closed'));
+  net.on('error', m => { setStatus(m.msg || 'Error'); $('lobbyStatus').textContent = m.msg || ''; });
+  net.on('_close', () => leaveToMenu('Lost the connection to the server'));
+  net.on('*', m => { if (S.playing && S.game) S.game.onNetMessage(m); });
+  return net;
+}
+async function createRoom() { readName(); try { const net = await connect(); net.send({ t: 'create', name: S.name, avatar: S.avatar, game: S.gameId }); } catch (e) { setStatus(e.message); } }
+async function joinRoom() {
+  readName(); const code = $('codeIn').value.trim().toUpperCase(); if (code.length !== 4) { setStatus('Enter the 4-letter room code'); $('codeIn').focus(); return; }
+  try { const net = await connect(); net.send({ t: 'join', room: code, name: S.name, avatar: S.avatar }); } catch (e) { setStatus(e.message); }
+}
+
+/* ---------------------------------------------------------------- wiring */
+$('btnSolo').onclick = startSolo;
+$('btnCreate').onclick = createRoom;
+$('btnJoin').onclick = joinRoom;
+$('codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(); });
+$('nameIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('nameIn').blur(); });
+$('nameIn').addEventListener('change', () => { readName(); if (S.net && S.net.open) S.net.send({ t: 'lobby', name: S.name }); });
+$('btnReady').onclick = () => { const me = meP(); S.net.send({ t: 'lobby', ready: !(me && me.ready) }); };
+$('btnStart').onclick = () => S.net.send({ t: 'start' });
+$('btnLeave').onclick = () => { S.net.send({ t: 'leave' }); leaveToMenu(); };
+document.addEventListener('pointerdown', () => audio.init()); // browsers only unlock audio inside a user gesture
+document.addEventListener('keydown', () => audio.init());
+if (location.hash.length === 5) $('codeIn').value = location.hash.slice(1).toUpperCase();
+renderStart(); show('start');
