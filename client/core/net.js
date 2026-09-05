@@ -7,7 +7,7 @@ export class Net {
       ws.onopen = () => resolve();
       ws.onerror = () => reject(new Error('Could not reach the server'));
       ws.onclose = () => { this.ws = null; this.emit('_close', {}); };
-      ws.onmessage = ev => { let msg; try { msg = JSON.parse(ev.data); } catch { return; } if (msg && msg.t) this.emit(msg.t, msg); };
+      ws.onmessage = ev => { let msg; try { msg = JSON.parse(ev.data); } catch { return; } if (msg && msg.t) { Object.defineProperty(msg, '_len', { value: ev.data.length }); this.emit(msg.t, msg); } }; // _len: wire size, for a game's stats panel
     });
   }
   get open() { return !!this.ws && this.ws.readyState === WebSocket.OPEN; }

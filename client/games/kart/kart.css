@@ -110,3 +110,8 @@
 #hint { bottom: 12px; right: 232px; font-size: 11px; white-space: nowrap; color: rgba(255,255,255,.55); letter-spacing: 1px; }
 #wrong { top: 32%; left: 50%; transform: translateX(-50%); font-size: 40px; font-weight: 900; color: #ff5c6a; display: none; animation: blink .6s infinite; }
 @keyframes blink { 50% { opacity: .35; } }
+
+/* frame + network readout: the corner line always, the panel on F3 / I, the banner when the host's snapshots stop */
+#corner { top: 10px; left: 50%; transform: translateX(-50%); font-size: 11px; letter-spacing: 1px; color: rgba(255,255,255,.6); white-space: nowrap; }
+#stats { top: 30px; left: 50%; transform: translateX(-50%); margin: 0; padding: 8px 12px; font: 11px/1.5 Menlo, Consolas, monospace; color: #dbe9ff; white-space: pre; text-shadow: none; }
+#netwait { top: 42%; left: 50%; transform: translateX(-50%); font-size: 28px; font-weight: 900; letter-spacing: 3px; color: #ffd54a; animation: blink 1s infinite; }

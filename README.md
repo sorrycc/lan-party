@@ -30,7 +30,8 @@ Open one of these on every machine:
 
 **PLAY SOLO** runs the selected game without a room, if the game allows a single player; the game's options appear under the game list as **SOLO OPTIONS** and apply to every solo restart.
 
-Use `PORT=4000 npm start` to change the port.
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock and the Kart wire format).
+`FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
 
@@ -46,22 +47,32 @@ client/
   core/           shared by shell and games
     net.js        WebSocket client          audio.js   WebAudio synth (unlocked once by the shell)
     input.js      keyboard state            loop.js    rAF loop + fixed-step helper
-    interp.js     snapshot interpolation    math.js    clamp / lerp / seeded rng
+    interp.js     snapshot buffers + the per-sender clock (sender timestamps, jitter, adaptive delay)
+    ticker.js     a worker-driven timer that keeps ticking in a hidden tab    math.js    clamp / lerp / seeded rng
     ui.js         toasts, escaping, stylesheet loading   prefs.js  name / colour / last game
     avatars.js    the shared colour palette players pick from
   games/
     registry.js   the game manifest (see below)
-    kart/         Frostline Kart: index.js (game module) + kart.css (its HUD)
+    kart/         Frostline Kart: index.js (game module), net.js (the wire format, testable in node), kart.css (its HUD)
     dodgeball/    Dodgeball 3v3: index.js (game module) + dodgeball.css (its HUD)
     gta/          Fable Theft Auto 5.1: index.js (game module: lifecycle, input, HUD, netcode glue),
                   world.js (the seeded city + instanced pools), entities.js (how peds and cars draw),
                   motion.js (walking and driving, shared by host and prediction), sim.js (the host's simulation),
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
     crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
+test/             node --test: the snapshot clock and the Kart wire format
 ```
 
 The server never simulates a game. It keeps the lobby roster and relays in-game messages between the players in a room.
 Frostline Kart runs its simulation on the host's browser for CPU karts, items and the clock, and on each player's browser for their own kart.
+Each machine broadcasts what it drives as two streams: motion (pose, velocity, controls, effect flags) 30 times a second from a worker timer that keeps
+ticking when the tab is hidden, and status (laps, items, timers) 5 times a second or as soon as something discrete changes. Every message carries the
+sender's clock, and the receiver maps it through a per-sender clock that measures the link's jitter, so a burst of late packets keeps its real spacing.
+Everyone else's karts and the host's shells are dead-reckoned to the present with the same kinematics the owner runs, so contact and hits happen where
+the other kart really is; the correction a fresh snapshot brings is hidden in a visual offset that decays over a few frames, and on a jittery link the
+clock backs the display off a little so there is usually a later snapshot to interpolate toward instead. Players ping each other once a second, and half
+the best round trip is how far past its snapshots each sender's present is placed. A client shows a ghost of its own thrown item
+at once and hands it over to the host's copy when that arrives.
 Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
 Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. Clients predict their own body with the same movement code the host runs (`motion.js`) and reconcile against the host's acknowledged input, which hides the round trip. The city itself is generated from a fixed seed, so it never travels over the network.
 Crossy Farm Car works like Kart: every machine simulates its own car and broadcasts 20 Hz snapshots of it. The farm is generated from the round's seed (`session.seed`) and everything that moves on it is a function of the world clock, which the host carries in its snapshots, so nobody ever sends a cow.
@@ -114,6 +125,9 @@ Rules of the road:
 ## Frostline Kart
 
 Arrows / WASD to drive, M to toggle sound, R for the next race (host), Esc to leave. Hold the throttle as the countdown hits GO for a rocket start.
+F3 (or I) opens a stats panel: frame time breakdown, message rates, every sender's snapshot spacing and jitter, and how many corrections the remote karts
+needed; the top of the screen always shows FPS and, on a client, how old the host's data is, the jitter and the host's frame rate. L cycles the detail
+level (auto, high, medium, low); auto lowers the pixel ratio by itself when the frame rate stays under 40.
 
 Space (or Enter / E) works the item slot. Shells, bananas and bob-ombs are carried: press to deploy one so it trails behind the kart
 (a triple orbits it) where it blocks incoming shells, release to throw it. Hold the brake (↓ / S) while releasing to throw the other way:

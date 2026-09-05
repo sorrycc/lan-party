@@ -7,6 +7,8 @@ import { gameById, defaultOpts, cleanOpts, teamById } from '../client/games/regi
 import { AVATARS, cleanName, cleanAvatar } from '../client/core/avatars.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+/* FAKE_LAG_MS / FAKE_JITTER_MS delay every relayed in-game message by lag + random(jitter) ms, to try the netcode on a pretend bad network */
+const FAKE_LAG = Math.max(0, Number(process.env.FAKE_LAG_MS) || 0), FAKE_JITTER = Math.max(0, Number(process.env.FAKE_JITTER_MS) || 0);
 const send = (ws, msg) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); };
 
 export function createRooms({ addrHint, log = console.log }) {
@@ -36,6 +38,7 @@ export function createRooms({ addrHint, log = console.log }) {
     broadcast(room, { t: 'left', id: p.id }); broadcast(room, lobbyMsg(room));
   }
 
+  const relay = (room, ws, msg) => { if (msg.to !== undefined) { const o = room.players.get(msg.to); if (o) send(o.ws, msg); } else broadcast(room, msg, ws); };
   function onMessage(ws, msg) {
     const p = ws.meta, room = p.room, isHost = room && room.hostId === p.id;
     switch (msg.t) {
@@ -76,7 +79,8 @@ export function createRooms({ addrHint, log = console.log }) {
       case 'leave': leaveRoom(ws); break;
       default: // in-game traffic: relay to the rest of the room (or to one recipient)
         if (!room) break; msg.from = p.id;
-        if (msg.to !== undefined) { const o = room.players.get(msg.to); if (o) send(o.ws, msg); } else broadcast(room, msg, ws);
+        if (FAKE_LAG || FAKE_JITTER) { setTimeout(() => relay(room, ws, msg), FAKE_LAG + Math.random() * FAKE_JITTER); break; } // test aid: pretend to be a bad Wi-Fi
+        relay(room, ws, msg);
     }
   }
 

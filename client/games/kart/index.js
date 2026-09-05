@@ -13,14 +13,19 @@
      instance.playerLeft(id)   a player dropped out mid-round
 
    Netcode: each machine simulates only the karts it owns - its own kart plus, on the host, every CPU kart,
-   shells, bananas, item boxes and the race clock. Everything else is interpolated from 30 Hz snapshots.
-   Hits are decided by the victim's machine. */
+   shells, bananas, item boxes and the race clock - and broadcasts them as two streams (net.js): motion at 30 Hz from a
+   steady worker timer and status at 5 Hz or on change, each stamped with the sender's clock. Everyone else's karts and
+   the host's hazards are dead-reckoned to the present from those snapshots with the same kinematics (kartMotion), and
+   the correction a fresh snapshot brings is hidden in a decaying visual offset. A client shows a ghost of its own throw
+   until the host's copy arrives. Hits are decided by the victim's machine. F3 / I shows frame and network stats. */
 import * as THREE from 'three';
 import { clamp, lerp, wrapAngle, ordinal, makeRng } from '../../core/math.js';
 import { createToasts, esc, fmtTime, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
 import { createLoop, fixedStep } from '../../core/loop.js';
-import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
+import { nowSec, pushSnap, sampleSnaps, createSnapClock } from '../../core/interp.js';
+import { createTicker } from '../../core/ticker.js';
+import { NET_HZ, STATUS_HZ, F, HAZ_TYPES, packMotion, unpackMotion, packStatus, unpackStatus, statusKey, packHaz, unpackHaz } from './net.js';
 
 /* kart skins, indexed by the shared avatar index (core/avatars.js) */
 const SKINS = [
@@ -49,6 +54,9 @@ const HUD = `
 <div id="kartcard" class="hud panel"><b id="kcName"></b><span id="kcClass"></span><div class="bars"><div><i>SPEED</i><u><s></s></u></div><div><i>ACCEL</i><u><s></s></u></div><div><i>HANDLING</i><u><s></s></u></div></div></div>
 <div id="wrong" class="hud">⟲ WRONG WAY</div>
 <div id="hint" class="hud"></div>
+<div id="corner" class="hud"></div>
+<pre id="stats" class="hud panel" hidden></pre>
+<div id="netwait" class="hud" hidden>WAITING FOR THE HOST…</div>
 <div id="flash"></div>
 <div id="ink"></div>
 <div id="results"><div class="card"><h1 id="resTitle">FINISH!</h1><h2 id="resSub">FINAL STANDINGS</h2>
@@ -601,7 +609,7 @@ function setLabel(k, text) {
 /* kart.kind: 'local' (driven here), 'remote' (another player's machine), 'ai' (driven by the host), 'none' (unused slot) */
 const karts = SKINS.map((def, i) => {
   const vis = buildKart(def);
-  return { id: i, name: def.name, color: def.color, w: WEIGHT[def.w], kind: i === 0 ? 'local' : 'ai', pid: null, vis, buf: [], startDelay: 0, x: 0, y: 0, z: 0, h: 0, vx: 0, vz: 0, vf: 0, steer: 0, throttle: 0, idx: -1, dist: 0, lat: 0, lap: 0, cpNext: 0, score: 0, place: i + 1, finished: false, finishTime: 0,
+  return { id: i, name: def.name, color: def.color, w: WEIGHT[def.w], kind: i === 0 ? 'local' : 'ai', pid: null, vis, buf: [], status: null, statusT: 0, lastTs: -1, netA: null, netB: null, clock: null, clockFrom: null, ox: 0, oz: 0, oh: 0, sentKey: '', startDelay: 0, x: 0, y: 0, z: 0, h: 0, vx: 0, vz: 0, vf: 0, steer: 0, throttle: 0, idx: -1, dist: 0, lat: 0, lap: 0, cpNext: 0, score: 0, place: i + 1, finished: false, finishTime: 0,
     item: null, itemN: 0, held: false, coins: 0, timed: 0, fireCd: 0, bullet: 0, ink: 0, roulette: 0, boost: 0, spin: 0, spinAng: 0, star: 0, shrink: 0, hitCd: 0, wallCd: 0, offroad: false, lapTimes: [], lapStart: 0, wheelRot: 0, roll: 0, pitch: 0, prevVf: 0, steerVis: 0, wrongWay: 0,
     ai: { skill: 1, wander: 1, aggr: 0.5, lane: 0, laneTarget: 0, laneTimer: 0, stuck: 0, reverse: 0, itemTimer: 0, rubber: 1 } };
 });
@@ -615,7 +623,7 @@ const isMe = k => k === me;
 const gridSlot = i => ({ dist: L - 9 - Math.floor(i / 2) * 6, lat: i % 2 ? -2.8 : 2.8 });
 function resetKart(k, slot) {
   const s = gridSlot(slot); const p = trackPoint(s.dist, s.lat); const i = Math.floor(s.dist / DS) % N;
-  Object.assign(k, { x: p.x, y: p.y, z: p.z, h: headingAt(i), vx: 0, vz: 0, vf: 0, steer: 0, throttle: 0, idx: i, dist: s.dist, lat: s.lat, lap: 0, cpNext: 0, score: 0, finished: false, finishTime: 0, item: null, itemN: 0, held: false, coins: 0, timed: 0, fireCd: 0, bullet: 0, ink: 0, roulette: 0, boost: 0, spin: 0, spinAng: 0, star: 0, shrink: 0, hitCd: 0, wallCd: 0, offroad: false, lapTimes: [], lapStart: 0, prevVf: 0, wrongWay: 0, startDelay: 0, buf: [] });
+  Object.assign(k, { x: p.x, y: p.y, z: p.z, h: headingAt(i), vx: 0, vz: 0, vf: 0, steer: 0, throttle: 0, idx: i, dist: s.dist, lat: s.lat, lap: 0, cpNext: 0, score: 0, finished: false, finishTime: 0, item: null, itemN: 0, held: false, coins: 0, timed: 0, fireCd: 0, bullet: 0, ink: 0, roulette: 0, boost: 0, spin: 0, spinAng: 0, star: 0, shrink: 0, hitCd: 0, wallCd: 0, offroad: false, lapTimes: [], lapStart: 0, prevVf: 0, wrongWay: 0, startDelay: 0, buf: [], status: null, statusT: 0, lastTs: -1, netA: null, netB: null, clock: null, clockFrom: null, ox: 0, oz: 0, oh: 0, sentKey: '' });
   k.ai = freshAi(k.kind === 'ai');
   k.vis.body.scale.setScalar(1); k.vis.bodyMat.color.set(k.color); k.vis.bodyMat.emissive.set(0); k.vis.bodyMat.emissiveIntensity = 0; heldVisual(k);
 }
@@ -624,19 +632,17 @@ const freshAi = cpu => ({ skill: cpu ? rr(cpuCfg.skill[0], cpuCfg.skill[1]) : 1,
 const kartVmax = k => VMAX * k.w.vmax * (1 + 0.009 * k.coins) * (k.boost > 0 ? 1.42 : 1) * (k.star > 0 ? 1.18 : 1) * (k.bullet > 0 ? 1.9 : 1) * (k.shrink > 0 ? 0.72 : 1) * (k.offroad && k.star <= 0 && k.bullet <= 0 ? 0.55 : 1) * (k.kind === 'ai' ? k.ai.skill * k.ai.rubber : 1);
 const turnRate = vf => TURN * (1 - TURN_HI * clamp(Math.abs(vf) / VMAX, 0, 1));
 
-function kartStep(k, dt, canMove) {
+/* the kinematic core, shared by kartStep (the karts this machine drives) and the dead reckoning of everyone else's:
+   accelerate, turn, slide, integrate, then keep the kart inside the walls. Reads the effect timers, never changes them.
+   Returns the side (+1 / -1) of a hard wall hit, else 0. */
+function kartMotion(k, dt, throttle, steer) {
   const fx = Math.sin(k.h), fz = Math.cos(k.h), lx = Math.cos(k.h), lz = -Math.sin(k.h);
   let vf = k.vx * fx + k.vz * fz, vl = k.vx * lx + k.vz * lz;
   const vmax = kartVmax(k);
-  let throttle = canMove ? k.throttle : 0, steer = k.steer;
-  // timed items and status effects
-  if (k.timed > 0) { k.timed -= dt; if (k.timed <= 0) { k.timed = 0; if (k.item && ITEM_DEF[k.item].timed) takeOne(k); } }
-  if (k.fireCd > 0) k.fireCd -= dt; if (k.ink > 0) k.ink -= dt;
-  if (k.bullet > 0) { k.bullet -= dt; throttle = 1; if (k.bullet <= 0) { k.boost = Math.max(k.boost, 1.0); k.hitCd = Math.max(k.hitCd, 1.0); } }
   if (k.ink > 0) steer = clamp(steer + Math.sin(timeU.value * 6 + k.id) * 0.3, -1, 1); // inked: the kart wanders
-  if (k.spin > 0) { throttle = 0; steer = 0; k.spin -= dt; k.spinAng += dt * 10.5; vf *= Math.exp(-2.2 * dt); }
-  if (k.boost > 0) { k.boost -= dt; if (vf < vmax) vf = Math.min(vmax, vf + BOOST_ACC * dt); }
-  if (k.bullet > 0 && vf < vmax) vf = Math.min(vmax, vf + BOOST_ACC * 1.5 * dt);
+  if (k.spin > 0) { throttle = 0; steer = 0; vf *= Math.exp(-2.2 * dt); }
+  if (k.boost > 0 && vf < vmax) vf = Math.min(vmax, vf + BOOST_ACC * dt);
+  if (k.bullet > 0) { throttle = 1; if (vf < vmax) vf = Math.min(vmax, vf + BOOST_ACC * 1.5 * dt); }
   if (throttle > 0) { const acc = (k.boost > 0 ? BOOST_ACC : ACC) * k.w.acc; vf += (throttle * acc - acc * Math.max(vf, 0) / vmax) * dt; }
   else if (throttle < 0) { if (vf > 0.4) vf -= BRAKE * dt; else vf = Math.max(vf - ACC * 0.6 * dt, -REV_MAX * -throttle); }
   else { vf -= Math.sign(vf) * Math.min(Math.abs(vf), (4 + Math.abs(vf) * 0.35) * dt); }
@@ -648,50 +654,103 @@ function kartStep(k, dt, canMove) {
   const nfx = Math.sin(k.h), nfz = Math.cos(k.h), nlx = Math.cos(k.h), nlz = -Math.sin(k.h);
   k.vx = nfx * vf + nlx * vl; k.vz = nfz * vf + nlz * vl; k.vf = vf;
   k.x += k.vx * dt; k.z += k.vz * dt;
-  // track projection + walls
+  return trackClamp(k);
+}
+/* project onto the track (idx, lat, dist, offroad, road height) and push back inside the walls; returns the side of a hard wall hit */
+function trackClamp(k) {
   k.idx = nearestSample(k.x, k.z, k.idx, k.idx < 0 ? 0 : 40);
   const s = S[k.idx]; const dx = k.x - s.x, dz = k.z - s.z; let lat = dx * s.lx + dz * s.lz; const along = clamp(dx * s.tx + dz * s.tz, -DS, DS);
-  const lim = WALL - KART_R;
+  const lim = WALL - KART_R; let hit = 0;
   if (Math.abs(lat) > lim) {
     const sign = Math.sign(lat); const over = Math.abs(lat) - lim; k.x -= s.lx * over * sign; k.z -= s.lz * over * sign; lat = sign * lim;
-    const vn = k.vx * s.lx + k.vz * s.lz; if (vn * sign > 0) { k.vx -= s.lx * vn * 1.3; k.vz -= s.lz * vn * 1.3; if (Math.abs(vn) > 6 && k.wallCd <= 0) { k.wallCd = 0.4; k.vf *= 0.8; k.vx *= 0.8; k.vz *= 0.8; for (let i = 0; i < 6; i++) spawnP(k.x + s.lx * sign, k.y + 0.6, k.z + s.lz * sign, rr(-3, 3), rr(2, 6), rr(-3, 3), rr(0.3, 0.6), 0xfff2a0, 0.8, 12); if (isMe(k)) sfx.bump(); } }
+    const vn = k.vx * s.lx + k.vz * s.lz; if (vn * sign > 0) { k.vx -= s.lx * vn * 1.3; k.vz -= s.lz * vn * 1.3; if (Math.abs(vn) > 6 && k.wallCd <= 0) { k.wallCd = 0.4; k.vf *= 0.8; k.vx *= 0.8; k.vz *= 0.8; hit = sign; } }
   }
-  k.wallCd -= dt; k.hitCd -= dt; k.lat = lat; k.offroad = Math.abs(lat) > HW + CURB * 0.6; k.y = terrainH(k.x, k.z) + ROAD_Y;
+  k.lat = lat; k.offroad = Math.abs(lat) > HW + CURB * 0.6; k.y = terrainH(k.x, k.z) + ROAD_Y;
   k.dist = ((k.idx * DS + along) % L + L) % L;
+  return hit;
+}
+/* lap progress: laps, then checkpoints, then distance within the segment (finishers rank by time) */
+function scoreOf(k) { const last = (k.cpNext - 1 + CP) % CP; return k.finished ? 1e7 - k.finishTime : k.lap * L + last * CPL + clamp(wrapHalf(k.dist - last * CPL), -CPL, CPL * 1.5); }
+
+function kartStep(k, dt, canMove) {
+  // timed items and status effects
+  if (k.timed > 0) { k.timed -= dt; if (k.timed <= 0) { k.timed = 0; if (k.item && ITEM_DEF[k.item].timed) takeOne(k); } }
+  if (k.fireCd > 0) k.fireCd -= dt; if (k.ink > 0) k.ink -= dt;
+  if (k.bullet > 0) { k.bullet -= dt; if (k.bullet <= 0) { k.boost = Math.max(k.boost, 1.0); k.hitCd = Math.max(k.hitCd, 1.0); } }
+  const spinning = k.spin > 0, boosting = k.boost > 0;
+  const hit = kartMotion(k, dt, canMove ? k.throttle : 0, k.steer);
+  if (spinning) { k.spin -= dt; k.spinAng += dt * 10.5; }
+  if (boosting) k.boost -= dt;
+  if (hit) { const s = S[k.idx]; for (let i = 0; i < 6; i++) spawnP(k.x + s.lx * hit, k.y + 0.6, k.z + s.lz * hit, rr(-3, 3), rr(2, 6), rr(-3, 3), rr(0.3, 0.6), 0xfff2a0, 0.8, 12); if (isMe(k)) sfx.bump(); }
+  k.wallCd -= dt; k.hitCd -= dt;
   // checkpoints + laps
   const segStart = k.cpNext * CPL; const rel = ((k.dist - segStart) % L + L) % L;
   if (rel < CPL) { if (k.cpNext === 0) onLapLine(k); k.cpNext = (k.cpNext + 1) % CP; }
-  const last = (k.cpNext - 1 + CP) % CP;
-  k.score = k.finished ? 1e7 - k.finishTime : k.lap * L + last * CPL + clamp(wrapHalf(k.dist - last * CPL), -CPL, CPL * 1.5);
+  k.score = scoreOf(k);
   // wrong way (local player only)
-  const dot = nfx * s.tx + nfz * s.tz; k.wrongWay = (dot < -0.3 && k.vf > 3) ? k.wrongWay + dt : 0;
+  const s = S[k.idx]; const dot = Math.sin(k.h) * s.tx + Math.cos(k.h) * s.tz; k.wrongWay = (dot < -0.3 && k.vf > 3) ? k.wrongWay + dt : 0;
   k.star -= dt; k.shrink -= dt;
   if (k.shrink > 0 && k.shrink < 0.01) k.vis.body.scale.setScalar(1);
 }
 
-/* ---- remote karts: snapshot buffer + interpolation (rendered INTERP seconds in the past) */
-const INTERP = 0.1;
-function packKart(k) {
-  return { i: k.id, x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vx: +k.vx.toFixed(2), vz: +k.vz.toFixed(2), vf: +k.vf.toFixed(2), st: +k.steer.toFixed(2), th: k.throttle, lp: k.lap, cp: k.cpNext, d: +k.dist.toFixed(1), sc: +k.score.toFixed(2),
-    bo: r2(k.boost), sp: r2(k.spin), sa: +k.spinAng.toFixed(2), sr: r2(k.star), sh: r2(k.shrink), bu: r2(k.bullet), ik: r2(k.ink), it: k.item, ic: k.itemN, he: k.held ? 1 : 0, co: k.coins, ro: r2(k.roulette), fi: k.finished ? 1 : 0, ft: r2(k.finishTime), or: k.offroad ? 1 : 0 };
+/* ---- remote karts: dead-reckoned to the present from their owner's snapshots
+   Each snapshot carries pose, velocity and controls, stamped with the sender's clock (mapped into ours by its SnapClock).
+   The kart is shown at `now - D`, D being that clock's adaptive delay: zero on a clean LAN, so the latest snapshot is
+   carried forward with the shared kinematics and the kart is where it really is; more on a jittery link, so there is
+   usually a later snapshot to interpolate toward instead. When a fresh snapshot lands somewhere other than where the
+   extrapolation had put the kart, the difference goes into a visual offset (ox, oz, oh) that decays over a few frames, so
+   the correction is a glide rather than a jump; a jump too big to hide snaps. Collisions and hits use the predicted pose;
+   the offset is for the eyes only. */
+const MAX_LEAD = 0.35, DR_STEP = 1 / 60, SNAP_DIST = 4, SNAP_ANG = 1.2, OFFSET_DECAY = 14;
+const drA = {}, drB = {}; // scratch karts for dead reckoning
+/* a snapshot far from the kart's last known sample (a long stall, a respawn) needs a fresh full search, or the narrow local
+   search would lock onto the wrong part of the circuit and the wall clamp would drag the kart there */
+const idxNear = (idx, x, z) => { if (idx < 0) return -1; const s = S[idx]; return (s.x - x) ** 2 + (s.z - z) ** 2 > 12 * 12 ? -1 : idx; };
+/* carry snapshot `a` of kart k forward by `lead` seconds into `out` */
+function deadReckon(k, a, lead, out) {
+  Object.assign(out, { id: k.id, w: k.w, kind: 'remote', coins: k.coins, x: a.x, z: a.z, h: a.h, vx: a.vx, vz: a.vz, vf: a.vf, idx: idxNear(k.idx, a.x, a.z), wallCd: 0, lat: 0, dist: 0, y: 0,
+    boost: a.fl & F.BOOST ? 1 : 0, spin: a.fl & F.SPIN ? 1 : 0, star: a.fl & F.STAR ? 1 : 0, bullet: a.fl & F.BULLET ? 1 : 0, shrink: a.fl & F.SHRINK ? 1 : 0, ink: a.fl & F.INK ? 1 : 0, offroad: !!(a.fl & F.OFFROAD) });
+  const n = lead > 0 ? Math.ceil(lead / DR_STEP) : 0;
+  if (!n) trackClamp(out); else { const dt = lead / n; for (let i = 0; i < n; i++) kartMotion(out, dt, a.th, a.st); }
+  return out;
 }
+/* hide a pose jump in the object's visual offset, or snap when it is too big to glide */
+function absorbJump(o, jx, jz, jh) {
+  if (jx * jx + jz * jz > SNAP_DIST * SNAP_DIST || Math.abs(jh) > SNAP_ANG) { o.ox = o.oz = o.oh = 0; netStats.snaps++; return; }
+  o.ox += jx; o.oz += jz; o.oh += jh; netStats.corr++; netStats.corrM += Math.hypot(jx, jz);
+}
+function decayOffset(o, dt) { const f = Math.exp(-OFFSET_DECAY * dt); o.ox *= f; o.oz *= f; o.oh *= f; }
 function applyRemote(k, dt) {
-  const buf = k.buf, rt = nowSec() - INTERP; const smp = sampleSnaps(buf, rt); if (!smp) return;
-  const { a, b, f } = smp, latest = buf[buf.length - 1];
-  if (b) { k.x = lerp(a.x, b.x, f); k.z = lerp(a.z, b.z, f); k.h = a.h + wrapAngle(b.h - a.h) * f; }
-  else { const ex = clamp(rt - a.t, 0, 0.25); k.x = a.x + a.vx * ex; k.z = a.z + a.vz * ex; k.h = a.h; }
-  const age = nowSec() - latest.t;
-  Object.assign(k, { vx: latest.vx, vz: latest.vz, vf: latest.vf, steer: latest.st, throttle: latest.th, lap: latest.lp, cpNext: latest.cp, dist: latest.d, score: latest.sc, item: latest.it, itemN: latest.ic || 0, held: !!latest.he, coins: latest.co || 0, roulette: latest.ro, finished: !!latest.fi, finishTime: latest.ft, offroad: !!latest.or });
-  k.boost = latest.bo - age; k.spin = latest.sp - age; k.star = latest.sr - age; k.shrink = latest.sh - age; k.bullet = (latest.bu || 0) - age; k.ink = (latest.ik || 0) - age;
-  k.spinAng = k.spin > 0 ? latest.sa + age * 10.5 : 0;
-  k.idx = nearestSample(k.x, k.z, k.idx, k.idx < 0 ? 0 : 60); const s = S[k.idx]; k.lat = (k.x - s.x) * s.lx + (k.z - s.z) * s.lz;
-  k.y = terrainH(k.x, k.z) + ROAD_Y;
+  decayOffset(k, dt);
+  const buf = k.buf; if (!buf.length || !k.clock) return;
+  const now = nowSec(), rt = now + k.clock.transit - k.clock.D, latest = buf[buf.length - 1]; // the sender's present, less the jitter backoff
+  const { a, b, f } = sampleSnaps(buf, rt);
+  let p;
+  if (b) { p = drA; Object.assign(p, { x: lerp(a.x, b.x, f), z: lerp(a.z, b.z, f), h: a.h + wrapAngle(b.h - a.h) * f, vx: lerp(a.vx, b.vx, f), vz: lerp(a.vz, b.vz, f), vf: lerp(a.vf, b.vf, f), idx: idxNear(k.idx, a.x, a.z), wallCd: 0 }); trackClamp(p); }
+  else { const lead = rt - a.t; if (lead > MAX_LEAD) { if (!k.frozen) { k.frozen = true; netStats.frozen++; } } else k.frozen = false; p = deadReckon(k, a, clamp(lead, 0, MAX_LEAD), drA); } // past MAX_LEAD the kart holds still: a stall, counted once
+  if (k.netA && !k.netB && (a !== k.netA || b)) { // we were extrapolating from netA: how far off was that, carried to the same instant?
+    const c = deadReckon(k, k.netA, clamp(rt - k.netA.t, 0, MAX_LEAD), drB);
+    absorbJump(k, c.x - p.x, c.z - p.z, wrapAngle(c.h - p.h));
+  }
+  k.netA = a; k.netB = b; netStats.lead += ((now - latest.t) - netStats.lead) * 0.05;
+  k.x = p.x; k.z = p.z; k.h = p.h; k.vx = p.vx; k.vz = p.vz; k.vf = p.vf; k.idx = p.idx; k.lat = p.lat; k.dist = p.dist; k.offroad = p.offroad; k.y = p.y;
+  k.steer = latest.st; k.throttle = latest.th; k.finished = !!(latest.fl & F.FINISHED);
+  // laps, items and the effect timers arrive at STATUS_HZ; the motion flags say which effects are on right now
+  const st = k.status, age = st ? now - k.statusT : 0, fl = latest.fl, tmr = (bit, v) => fl & bit ? Math.max(v - age, 0.05) : 0;
+  if (st) {
+    k.lap = st.lp; k.cpNext = st.cp; k.item = st.it; k.itemN = st.ic; k.held = st.he; k.coins = st.co; k.roulette = st.ro; k.finishTime = st.ft; if (st.fi) k.finished = true;
+    k.boost = tmr(F.BOOST, st.bo); k.spin = tmr(F.SPIN, st.sp); k.star = tmr(F.STAR, st.sr); k.shrink = tmr(F.SHRINK, st.sh); k.bullet = tmr(F.BULLET, st.bu); k.ink = tmr(F.INK, st.ik);
+    k.spinAng = k.spin > 0 ? st.sa + age * 10.5 : 0;
+  } else { k.boost = fl & F.BOOST ? 1 : 0; k.spin = fl & F.SPIN ? 1 : 0; k.star = fl & F.STAR ? 1 : 0; k.shrink = fl & F.SHRINK ? 1 : 0; k.bullet = fl & F.BULLET ? 1 : 0; k.ink = fl & F.INK ? 1 : 0; }
+  if (k.finished && !k.finishTime) k.finishTime = race.time; // until the status with the real time lands
+  k.score = scoreOf(k);
 }
 
+const kvN = new THREE.Vector3(), kvUp = new THREE.Vector3(0, 1, 0), kvQt = new THREE.Quaternion(), kvQy = new THREE.Quaternion();
 function kartVisual(k, dt) {
-  const v = k.vis; v.g.position.set(k.x, k.y, k.z);
+  const v = k.vis; v.g.position.set(k.x + k.ox, k.y, k.z + k.oz);
   const e = 0.6, hx = terrainH(k.x + e, k.z) - terrainH(k.x - e, k.z), hz = terrainH(k.x, k.z + e) - terrainH(k.x, k.z - e);
-  const n = new THREE.Vector3(-hx, 2 * e, -hz).normalize(); const qt = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n); const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), k.h);
+  const n = kvN.set(-hx, 2 * e, -hz).normalize(); const qt = kvQt.setFromUnitVectors(kvUp, n); const qy = kvQy.setFromAxisAngle(kvUp, k.h + k.oh);
   v.g.quaternion.copy(qt).multiply(qy);
   const sp = clamp(Math.abs(k.vf) / VMAX, 0, 1);
   k.steerVis = lerp(k.steerVis, k.steer, 1 - Math.exp(-10 * dt)); k.roll = lerp(k.roll, k.steerVis * 0.12 * sp, 1 - Math.exp(-6 * dt));
@@ -706,7 +765,7 @@ function kartVisual(k, dt) {
   if (k.boost > 0) for (const s of [-1, 1]) spawnP(k.x - fx * 1.7 + lx * s * 0.45, k.y + 0.7, k.z - fz * 1.7 + lz * s * 0.45, -fx * 8 + rr(-2, 2), rr(0.5, 2), -fz * 8 + rr(-2, 2), rr(0.2, 0.4), Math.random() < 0.5 ? 0xff8a20 : 0xffd040, 1.2);
   else if (Math.abs(k.vf) > 3 && Math.random() < 0.25) spawnP(k.x - fx * 1.8, k.y + 0.7, k.z - fz * 1.8, rr(-0.5, 0.5), rr(0.8, 1.5), rr(-0.5, 0.5), 0.5, 0x9aa3b8, 0.5);
   if (k.offroad && Math.abs(k.vf) > 6) for (const s of [-1, 1]) if (Math.random() < 0.6) spawnP(k.x - fx * 0.9 + lx * s, k.y + 0.3, k.z - fz * 0.9 + lz * s, lx * s * rr(2, 5) - fx * 3, rr(2, 5), lz * s * rr(2, 5) - fz * 3, rr(0.3, 0.6), 0xf4f8ff, 0.9, 10);
-  if (v.label) { v.label.visible = race.state !== 'intro'; v.label.position.set(k.x, k.y + 3.4, k.z); }
+  if (v.label) { v.label.visible = race.state !== 'intro'; v.label.position.set(k.x + k.ox, k.y + 3.4, k.z + k.oz); }
   if (k.bullet > 0) { // the kart becomes a bullet bill
     if (!v.bullet) { v.bullet = bulletMesh(); v.g.add(v.bullet); }
     v.bullet.visible = true; v.body.visible = false; v.bullet.rotation.z = Math.sin(timeU.value * 20) * 0.04; v.bullet.position.y = 1.0 + Math.sin(timeU.value * 9) * 0.06;
@@ -941,21 +1000,37 @@ function pickRedTarget(k) {
   if (!target) for (const o of active) if (o !== k && wrapHalf(o.dist - k.dist) > 0 && (!target || wrapHalf(o.dist - k.dist) < wrapHalf(target.dist - k.dist))) target = o;
   return target;
 }
-/* host only: create a hazard thrown by kart `owner` from the given pose; dir is +1 forward, -1 backward.
-   h.y is the road height under the hazard and h.air its height above it (thrown things arc through the air first). */
+/* build a hazard thrown by kart `owner` from the given pose; dir is +1 forward, -1 backward. h.y is the road height under
+   it and h.air its height above that (thrown things arc through the air first). Shared by the host's spawn and a client's
+   ghost of its own throw; returns null for a type that is not a hazard. */
 const spawnStats = { n: 0, last: '' }; // debug / test hook
-function spawnHazard(type, owner, x, z, h, vf, target, dir = 1) {
-  spawnStats.n++; spawnStats.last = type;
+let ghostN = 0;
+function makeHazard(type, owner, x, z, h, vf, target, dir = 1) {
+  if (!HAZ_TYPES.includes(type)) return null;
   const fx = Math.sin(h), fz = Math.cos(h); const idx = nearestSample(x, z, owner.idx, 80);
-  const base = { id: nextHazId++, type, owner: owner.id, x: x + fx * 2.6 * dir, z: z + fz * 2.6 * dir, y: 0, air: 0, vy: 0, vx: 0, vz: 0, fly: false, idx, age: 0, mesh: hazMesh(type) };
+  const base = { id: 0, type, owner: owner.id, x: x + fx * 2.6 * dir, z: z + fz * 2.6 * dir, y: 0, air: 0, vy: 0, vx: 0, vz: 0, fly: false, idx, age: 0, ox: 0, oz: 0, oh: 0, mesh: hazMesh(type) };
   base.y = terrainH(base.x, base.z) + ROAD_Y;
   const lob = { vx: fx * 22 + owner.vx * 0.3, vz: fz * 22 + owner.vz * 0.3, vy: 7, air: 1.0, fly: true };
-  if (type === 'green') { const sp = 52 + (dir > 0 ? Math.max(vf, 0) * 0.6 : 0); hazards.push({ ...base, vx: fx * sp * dir, vz: fz * sp * dir, life: 9, bounces: 0 }); }
-  else if (type === 'red') hazards.push({ ...base, target: dir > 0 ? target : null, h: dir > 0 ? h : h + Math.PI, dir, life: 11 });
-  else if (type === 'banana') hazards.push(dir > 0 ? { ...base, ...lob, life: 90 } : { ...base, life: 90 });
-  else if (type === 'bomb') hazards.push(dir > 0 ? { ...base, ...lob, fuse: 2.2, life: 30 } : { ...base, fuse: 2.2, life: 30 });
-  else if (type === 'fire') { const sp = 42; hazards.push({ ...base, vx: fx * sp * dir, vz: fz * sp * dir, life: 2.4, bounces: 0 }); }
-  else if (type === 'blue') { const tg = blueTarget(); hazards.push({ ...base, x: x + fx * 2.6, z: z + fz * 2.6, h, dir: 1, air: 2.5, life: 25, target: tg ? tg.id : -1 }); } // hunts the leader; target is re-read every tick
+  let hz;
+  if (type === 'green') { const sp = 52 + (dir > 0 ? Math.max(vf, 0) * 0.6 : 0); hz = { ...base, vx: fx * sp * dir, vz: fz * sp * dir, life: 9, bounces: 0 }; }
+  else if (type === 'red') hz = { ...base, target: dir > 0 ? target : null, h: dir > 0 ? h : h + Math.PI, dir, life: 11 };
+  else if (type === 'banana') hz = dir > 0 ? { ...base, ...lob, life: 90 } : { ...base, life: 90 };
+  else if (type === 'bomb') hz = dir > 0 ? { ...base, ...lob, fuse: 2.2, life: 30 } : { ...base, fuse: 2.2, life: 30 };
+  else if (type === 'fire') { const sp = 42; hz = { ...base, vx: fx * sp * dir, vz: fz * sp * dir, life: 2.4, bounces: 0 }; }
+  else { const tg = blueTarget(); hz = { ...base, x: x + fx * 2.6, z: z + fz * 2.6, h, dir: 1, air: 2.5, life: 25, target: tg ? tg.id : -1 }; } // blue: hunts the leader; target is re-read every tick
+  hz.mesh.position.set(hz.x, hz.y + 0.6 + hz.air, hz.z);
+  return hz;
+}
+/* host: put a new hazard into play */
+function spawnHazard(type, owner, x, z, h, vf, target, dir = 1) {
+  const hz = makeHazard(type, owner, x, z, h, vf, target, dir); if (!hz) return null;
+  spawnStats.n++; spawnStats.last = type; hz.id = nextHazId++; hazards.push(hz); return hz;
+}
+/* client: tell the host about a throw and show a ghost of it at once; the host's copy takes the ghost over when it arrives */
+function throwRemote(type, k, target, dir) {
+  send({ t: 'use', it: type, x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vf: +k.vf.toFixed(2), tg: target ? target.id : -1, dir });
+  const g = makeHazard(type, k, k.x, k.z, k.h, k.vf, target, dir); if (!g) return;
+  g.id = -(++ghostN); g.ghost = true; g.ghostT = 1.5; remoteHaz.set(g.id, g); netStats.ghosts++;
 }
 
 /* item key down: deploy a holdable item (it becomes a shield), or use anything else at once */
@@ -968,7 +1043,7 @@ function itemPress(k, dir = 1) {
     if (k.timed <= 0) { k.timed = ITEM_DEF.fire.timed; if (isMe(k)) toast('FIRE FLOWER!', 'orange'); }
     if (k.fireCd > 0) return; k.fireCd = 0.28;
     if (isHost) spawnHazard('fire', k, k.x, k.z, k.h, k.vf, null, dir);
-    else send({ t: 'use', it: 'fire', x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vf: +k.vf.toFixed(2), tg: -1, dir });
+    else throwRemote('fire', k, null, dir);
     if (isMe(k)) sfx.fire();
   }
   else useItem(k);
@@ -978,7 +1053,7 @@ function itemRelease(k, dir) {
   if (!k.held || !k.item || k.itemN <= 0) return;
   const t = k.item; const target = t === 'red' && dir > 0 ? pickRedTarget(k) : null;
   if (isHost) spawnHazard(t, k, k.x, k.z, k.h, k.vf, target, dir);
-  else send({ t: 'use', it: t, x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vf: +k.vf.toFixed(2), tg: target ? target.id : -1, dir });
+  else throwRemote(t, k, target, dir);
   if (isMe(k) && t !== 'banana') sfx.throwIt();
   takeOne(k);
 }
@@ -1003,7 +1078,7 @@ function useItem(k) {
   else if (t === 'bullet') { k.bullet = 6; k.held = false; if (isMe(k)) { toast('BULLET BILL!', 'gold'); flash('#ffffff', 0.3); } sfx.bullet(); }
   else if (t === 'blue') {
     if (isHost) spawnHazard('blue', k, k.x, k.z, k.h, k.vf, null, 1);
-    else send({ t: 'use', it: 'blue', x: +k.x.toFixed(2), z: +k.z.toFixed(2), h: +k.h.toFixed(3), vf: +k.vf.toFixed(2), tg: -1, dir: 1 });
+    else throwRemote('blue', k, null, 1);
     if (isMe(k)) { toast('BLUE SHELL!', 'blue'); sfx.throwIt(); }
   }
   else if (t === 'blooper') {
@@ -1076,39 +1151,46 @@ function hazWall(h, bounce) {
   if (vn * sg > 0) { if (bounce) { h.vx -= 2 * vn * s.lx; h.vz -= 2 * vn * s.lz; } else { h.vx = h.vz = 0; } return true; }
   return false;
 }
+/* one step of a hazard's own motion, no hits: thrown arcs, bouncing shells, homing, fuses. Shared by the host's hazards and
+   a client's ghosts. Returns false, true (spent) or 'boom' (a bomb's fuse ran out). */
+function moveHazard(h, dt) {
+  h.life -= dt; h.age += dt; let dead = h.life <= 0;
+  if (h.fly) { // thrown in an arc; it lands where it comes down
+    h.x += h.vx * dt; h.z += h.vz * dt; h.vy -= 22 * dt; h.air += h.vy * dt; hazWall(h, false); h.y = terrainH(h.x, h.z) + ROAD_Y;
+    if (h.air <= 0) { h.air = 0; h.vy = 0; h.vx = h.vz = 0; h.fly = false; }
+    h.mesh.rotation.y += dt * 6;
+  } else if (h.type === 'green' || h.type === 'fire') {
+    h.x += h.vx * dt; h.z += h.vz * dt;
+    if (hazWall(h, true)) { h.bounces++; for (let q = 0; q < 5; q++) spawnP(h.x, h.y + 0.5, h.z, rr(-3, 3), rr(2, 5), rr(-3, 3), 0.4, 0xfff0a0, 0.6, 12); if (h.bounces > (h.type === 'fire' ? 2 : 5)) dead = true; }
+    h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.rotation.y += dt * 12;
+    if (h.type === 'fire') spawnP(h.x, h.y + 0.6, h.z, rr(-1, 1), rr(0.5, 2), rr(-1, 1), 0.25, Math.random() < 0.5 ? 0xff7a1a : 0xffd040, 0.6);
+  } else if (h.type === 'blue') { // flies above the pack along the racing line, dives onto the leader
+    const sp = 68, tg = blueTarget(); h.target = tg ? tg.id : -1;
+    const tgd = tg ? Math.hypot(tg.x - h.x, tg.z - h.z) : 1e9; let want; h.tgd = tgd;
+    if (tg && tgd < 40) want = Math.atan2(tg.x - h.x, tg.z - h.z); else { const j = (h.idx + Math.round(18 / DS)) % N; want = Math.atan2(RLX[j] - h.x, RLZ[j] - h.z); }
+    h.h += clamp(wrapAngle(want - h.h), -1, 1) * 6 * dt; h.vx = Math.sin(h.h) * sp; h.vz = Math.cos(h.h) * sp; h.x += h.vx * dt; h.z += h.vz * dt;
+    hazWall(h, false); h.y = terrainH(h.x, h.z) + ROAD_Y; h.air = lerp(h.air, tgd < 12 ? 0.3 : 2.5, 1 - Math.exp(-4 * dt)); h.mesh.rotation.y += dt * 10;
+    spawnP(h.x, h.y + 0.6 + h.air, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.35, 0x4fa0ff, 0.6);
+  } else if (h.type === 'bomb') {
+    h.fuse -= dt; h.mesh.userData.spark.visible = Math.floor(h.fuse * (h.fuse < 0.8 ? 16 : 6)) % 2 === 0;
+    if (h.fuse <= 0) return 'boom';
+    h.mesh.rotation.y += dt * 0.5;
+  } else if (h.type === 'red') {
+    const sp = 50; let want;
+    const tg = h.target; const tgd = tg ? Math.hypot(tg.x - h.x, tg.z - h.z) : 1e9;
+    if (tg && tgd < 30 && !tg.finished) want = Math.atan2(tg.x - h.x, tg.z - h.z); else { const j = (h.idx + h.dir * Math.round(14 / DS) + N) % N; want = Math.atan2(RLX[j] - h.x, RLZ[j] - h.z); }
+    h.h += clamp(wrapAngle(want - h.h), -1, 1) * 5.5 * dt; h.vx = Math.sin(h.h) * sp; h.vz = Math.cos(h.h) * sp; h.x += h.vx * dt; h.z += h.vz * dt;
+    hazWall(h, false); h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.rotation.y += dt * 12;
+    if (Math.random() < 0.5) spawnP(h.x, h.y + 0.5, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.3, 0xff6040, 0.5);
+  } else { h.mesh.rotation.y += dt * 0.5; }
+  h.mesh.position.set(h.x + h.ox, h.y + 0.6 + h.air, h.z + h.oz);
+  return dead;
+}
 function updateHostHazards(dt) {
   for (let i = hazards.length - 1; i >= 0; i--) {
-    const h = hazards[i]; h.life -= dt; h.age += dt; let dead = h.life <= 0;
-    if (h.fly) { // thrown in an arc; it lands where it comes down
-      h.x += h.vx * dt; h.z += h.vz * dt; h.vy -= 22 * dt; h.air += h.vy * dt; hazWall(h, false); h.y = terrainH(h.x, h.z) + ROAD_Y;
-      if (h.air <= 0) { h.air = 0; h.vy = 0; h.vx = h.vz = 0; h.fly = false; }
-      h.mesh.rotation.y += dt * 6;
-    } else if (h.type === 'green' || h.type === 'fire') {
-      h.x += h.vx * dt; h.z += h.vz * dt;
-      if (hazWall(h, true)) { h.bounces++; for (let q = 0; q < 5; q++) spawnP(h.x, h.y + 0.5, h.z, rr(-3, 3), rr(2, 5), rr(-3, 3), 0.4, 0xfff0a0, 0.6, 12); if (h.bounces > (h.type === 'fire' ? 2 : 5)) dead = true; }
-      h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.rotation.y += dt * 12;
-      if (h.type === 'fire') spawnP(h.x, h.y + 0.6, h.z, rr(-1, 1), rr(0.5, 2), rr(-1, 1), 0.25, Math.random() < 0.5 ? 0xff7a1a : 0xffd040, 0.6);
-    } else if (h.type === 'blue') { // flies above the pack along the racing line, dives onto the leader
-      const sp = 68, tg = blueTarget(); h.target = tg ? tg.id : -1;
-      const tgd = tg ? Math.hypot(tg.x - h.x, tg.z - h.z) : 1e9; let want;
-      if (tg && tgd < 40) want = Math.atan2(tg.x - h.x, tg.z - h.z); else { const j = (h.idx + Math.round(18 / DS)) % N; want = Math.atan2(RLX[j] - h.x, RLZ[j] - h.z); }
-      h.h += clamp(wrapAngle(want - h.h), -1, 1) * 6 * dt; h.vx = Math.sin(h.h) * sp; h.vz = Math.cos(h.h) * sp; h.x += h.vx * dt; h.z += h.vz * dt;
-      hazWall(h, false); h.y = terrainH(h.x, h.z) + ROAD_Y; h.air = lerp(h.air, tgd < 12 ? 0.3 : 2.5, 1 - Math.exp(-4 * dt)); h.mesh.rotation.y += dt * 10;
-      spawnP(h.x, h.y + 0.6 + h.air, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.35, 0x4fa0ff, 0.6);
-      if (tg && owned(tg) && h.age > 0.6 && tgd < KART_R + 1.2) { explodeHazard(i); continue; } // a remote target reports its own hit
-    } else if (h.type === 'bomb') {
-      h.fuse -= dt; h.mesh.userData.spark.visible = Math.floor(h.fuse * (h.fuse < 0.8 ? 16 : 6)) % 2 === 0;
-      if (h.fuse <= 0) { explodeHazard(i); continue; }
-      h.mesh.rotation.y += dt * 0.5;
-    } else if (h.type === 'red') {
-      const sp = 50; let want;
-      const tg = h.target; const tgd = tg ? Math.hypot(tg.x - h.x, tg.z - h.z) : 1e9;
-      if (tg && tgd < 30 && !tg.finished) want = Math.atan2(tg.x - h.x, tg.z - h.z); else { const j = (h.idx + h.dir * Math.round(14 / DS) + N) % N; want = Math.atan2(RLX[j] - h.x, RLZ[j] - h.z); }
-      h.h += clamp(wrapAngle(want - h.h), -1, 1) * 5.5 * dt; h.vx = Math.sin(h.h) * sp; h.vz = Math.cos(h.h) * sp; h.x += h.vx * dt; h.z += h.vz * dt;
-      hazWall(h, false); h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.rotation.y += dt * 12;
-      if (Math.random() < 0.5) spawnP(h.x, h.y + 0.5, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.3, 0xff6040, 0.5);
-    } else { h.mesh.rotation.y += dt * 0.5; }
-    h.mesh.position.set(h.x, h.y + 0.6 + h.air, h.z);
+    const h = hazards[i]; let dead = moveHazard(h, dt);
+    if (dead === 'boom') { explodeHazard(i); continue; }
+    if (h.type === 'blue') { const tg = blueTarget(); if (tg && owned(tg) && h.age > 0.6 && h.tgd < KART_R + 1.2) { explodeHazard(i); continue; } } // a remote target reports its own hit
     // hits against the karts this machine owns; other players report their own hits
     if (!dead && !h.fly && h.type !== 'blue') for (const k of active) {
       if (!owned(k)) continue; if (k.id === h.owner && h.age < 0.6) continue;
@@ -1124,13 +1206,28 @@ function updateHostHazards(dt) {
 }
 function blueTarget() { let best = null; for (const k of active) if (!k.finished && (!best || k.score > best.score)) best = k; return best; }
 
+/* ---- client: the host's hazards, dead-reckoned like the karts (straight flight with wall bounces, plus the arc of a thrown one) */
+const hzA = { x: 0, z: 0, vx: 0, vz: 0, idx: 0, air: 0 }, hzB = { x: 0, z: 0, vx: 0, vz: 0, idx: 0, air: 0 };
+function reckonHaz(h, a, lead, out) {
+  out.x = a.x; out.z = a.z; out.vx = a.vx; out.vz = a.vz; out.idx = h.idx; out.air = a.a;
+  const n = lead > 0 ? Math.ceil(lead / DR_STEP) : 0;
+  if (n) { const dt = lead / n, bounce = h.type === 'green' || h.type === 'fire'; for (let i = 0; i < n; i++) { out.x += out.vx * dt; out.z += out.vz * dt; hazWall(out, bounce); } if (a.vy) out.air = Math.max(0, a.a + a.vy * lead - 11 * lead * lead); }
+  return out;
+}
+function dropRemote(h, burst) { if (burst) hazBurst(h); scene.remove(h.mesh); remoteHaz.delete(h.id); }
 function updateRemoteHazards(dt) {
-  const rt = nowSec() - INTERP;
+  const rt = nowSec() + (hostClock ? hostClock.transit - hostClock.D : 0);
   for (const h of remoteHaz.values()) {
-    h.age += dt; const smp = sampleSnaps(h.buf, rt); if (!smp) continue; const { a, b, f, prev: p } = smp;
-    if (b) { h.x = lerp(a.x, b.x, f); h.z = lerp(a.z, b.z, f); h.air = lerp(a.a, b.a, f); }
-    else { const ex = clamp(rt - a.t, 0, 0.2); if (p && h.type !== 'banana') { const it = Math.max(a.t - p.t, 1e-3); h.x = a.x + (a.x - p.x) / it * ex; h.z = a.z + (a.z - p.z) / it * ex; } else { h.x = a.x; h.z = a.z; } h.air = a.a; }
-    h.h = a.h; h.target = a.tg; h.fuse = a.f; h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.position.set(h.x, h.y + 0.6 + h.air, h.z); h.mesh.rotation.y += dt * (h.type === 'banana' || h.type === 'bomb' ? 0.5 : 12);
+    decayOffset(h, dt);
+    if (h.ghost) { h.ghostT -= dt; if (h.ghostT <= 0 || moveHazard(h, dt)) dropRemote(h, false); continue; } // my own throw, until the host's copy arrives
+    h.age += dt; const smp = sampleSnaps(h.buf, rt); if (!smp) continue; const { a, b, f } = smp;
+    let p;
+    if (b) { p = hzA; p.x = lerp(a.x, b.x, f); p.z = lerp(a.z, b.z, f); p.air = lerp(a.a, b.a, f); }
+    else { p = reckonHaz(h, a, clamp(rt - a.t, 0, MAX_LEAD), hzA); h.idx = p.idx; }
+    if (h.netA && !h.netB && (a !== h.netA || b)) { const c = reckonHaz(h, h.netA, clamp(rt - h.netA.t, 0, MAX_LEAD), hzB); absorbJump(h, c.x - p.x, c.z - p.z, 0); }
+    h.netA = a; h.netB = b;
+    h.x = p.x; h.z = p.z; h.air = p.air; h.h = a.h; h.target = a.tg; h.fuse = a.f; h.vx = a.vx; h.vz = a.vz;
+    h.y = terrainH(h.x, h.z) + ROAD_Y; h.mesh.position.set(h.x + h.ox, h.y + 0.6 + h.air, h.z + h.oz); h.mesh.rotation.y += dt * (h.type === 'banana' || h.type === 'bomb' ? 0.5 : 12);
     if (h.type === 'red' && Math.random() < 0.5) spawnP(h.x, h.y + 0.5, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.3, 0xff6040, 0.5);
     if (h.type === 'blue') spawnP(h.x, h.y + 0.6 + h.air, h.z, rr(-1, 1), rr(0, 1), rr(-1, 1), 0.35, 0x4fa0ff, 0.6);
     if (h.type === 'fire') spawnP(h.x, h.y + 0.6, h.z, rr(-1, 1), rr(0.5, 2), rr(-1, 1), 0.25, Math.random() < 0.5 ? 0xff7a1a : 0xffd040, 0.6);
@@ -1149,17 +1246,23 @@ function updateRemoteHazards(dt) {
     }
   }
 }
-/* client: mirror the host's hazard list */
-function syncHazards(list) {
+/* client: mirror the host's hazard list; `t` is the message's stamp in our clock, `ts` the sender's raw one (for ordering) */
+const oldestGhost = type => { let best = null; for (const h of remoteHaz.values()) if (h.ghost && h.type === type && (!best || h.age > best.age)) best = h; return best; };
+function syncHazards(list, t, ts) {
   const now = nowSec(); for (const [id, until] of ignoreHaz) if (until < now) ignoreHaz.delete(id);
   const seen = new Set();
-  for (const hs of list) {
-    if (ignoreHaz.has(hs.id)) continue; seen.add(hs.id);
+  for (const raw of list) {
+    const hs = unpackHaz(raw); if (ignoreHaz.has(hs.id)) continue; seen.add(hs.id);
     let h = remoteHaz.get(hs.id);
-    if (!h) { h = { id: hs.id, type: hs.ty, owner: hs.o, x: hs.x, z: hs.z, y: terrainH(hs.x, hs.z) + ROAD_Y, air: hs.a || 0, h: hs.h || 0, target: hs.tg ?? -1, fuse: hs.f || 0, age: 0, buf: [], mesh: hazMesh(hs.ty) }; h.mesh.position.set(h.x, h.y + 0.6 + h.air, h.z); remoteHaz.set(hs.id, h); }
-    pushSnap(h.buf, { x: hs.x, z: hs.z, h: hs.h || 0, a: hs.a || 0, tg: hs.tg ?? -1, f: hs.f || 0 }, now);
+    if (!h) {
+      h = { id: hs.id, type: hs.ty, owner: hs.o, x: hs.x, z: hs.z, y: terrainH(hs.x, hs.z) + ROAD_Y, air: hs.a, vx: hs.vx, vz: hs.vz, h: hs.h, target: hs.tg, fuse: hs.f, age: 0, buf: [], idx: nearestSample(hs.x, hs.z, -1), ox: 0, oz: 0, oh: 0, netA: null, netB: null, lastTs: -1, mesh: null };
+      const g = hs.o === me.id ? oldestGhost(hs.ty) : null; // my own throw: the host's copy takes over the ghost and glides from where the ghost is
+      if (g) { h.mesh = g.mesh; h.age = g.age; h.ox = g.x + g.ox - hs.x; h.oz = g.z + g.oz - hs.z; remoteHaz.delete(g.id); } else h.mesh = hazMesh(hs.ty);
+      h.mesh.position.set(h.x + h.ox, h.y + 0.6 + h.air, h.z + h.oz); remoteHaz.set(hs.id, h);
+    }
+    if (ts > h.lastTs) { h.lastTs = ts; pushSnap(h.buf, hs, t); }
   }
-  for (const [id, h] of remoteHaz) if (!seen.has(id)) { hazBurst(h); scene.remove(h.mesh); remoteHaz.delete(id); }
+  for (const [id, h] of remoteHaz) if (id > 0 && !seen.has(id)) dropRemote(h, true);
 }
 function syncBoxes(mask) {
   const now = nowSec();
@@ -1276,7 +1379,9 @@ const spCanvas = $('speedCanvas'); spCanvas.width = 520; spCanvas.height = 300; 
 function drawSpeedo(speed, boosting) {
   const c = spCtx; c.clearRect(0, 0, 260, 150); const cx = 130, cy = 98, R = 76, a0 = Math.PI * 0.8, a1 = Math.PI * 2.2; const f = clamp(speed / (VMAX * 1.45), 0, 1);
   c.lineCap = 'round'; c.lineWidth = 16; c.strokeStyle = 'rgba(6,10,28,.65)'; c.beginPath(); c.arc(cx, cy, R, a0, a1); c.stroke();
-  const col = boosting ? '#ff8c1a' : '#4fd1ff'; c.shadowColor = col; c.shadowBlur = boosting ? 24 : 10; c.strokeStyle = col; c.lineWidth = 12; c.beginPath(); c.arc(cx, cy, R, a0, a0 + (a1 - a0) * f); c.stroke(); c.shadowBlur = 0;
+  const col = boosting ? '#ff8c1a' : '#4fd1ff', a2 = a0 + (a1 - a0) * f; c.strokeStyle = col; // glow: a wide translucent stroke (shadowBlur costs a frame's worth of time on some GPUs)
+  c.globalAlpha = boosting ? 0.45 : 0.3; c.lineWidth = boosting ? 26 : 20; c.beginPath(); c.arc(cx, cy, R, a0, a2); c.stroke(); c.globalAlpha = 1;
+  c.lineWidth = 12; c.beginPath(); c.arc(cx, cy, R, a0, a2); c.stroke();
   c.strokeStyle = 'rgba(255,255,255,.5)'; c.lineWidth = 2; for (let i = 0; i <= 10; i++) { const a = a0 + (a1 - a0) * i / 10; c.beginPath(); c.moveTo(cx + Math.cos(a) * (R - 14), cy + Math.sin(a) * (R - 14)); c.lineTo(cx + Math.cos(a) * (R - 22), cy + Math.sin(a) * (R - 22)); c.stroke(); }
   const na = a0 + (a1 - a0) * f; c.strokeStyle = '#fff'; c.lineWidth = 4; c.beginPath(); c.moveTo(cx, cy); c.lineTo(cx + Math.cos(na) * (R - 26), cy + Math.sin(na) * (R - 26)); c.stroke(); c.fillStyle = '#fff'; c.beginPath(); c.arc(cx, cy, 6, 0, 7); c.fill();
   c.fillStyle = boosting ? '#ffb060' : '#fff'; c.font = 'italic 900 40px Trebuchet MS, Arial'; c.textAlign = 'center'; c.fillText(Math.round(Math.abs(speed) * 3.3), cx, cy + 4); c.font = 'bold 13px Trebuchet MS, Arial'; c.fillStyle = 'rgba(255,255,255,.75)'; c.fillText(boosting ? 'BOOST' : 'km/h', cx, cy + 22);
@@ -1290,9 +1395,9 @@ function drawMap() {
 const posEl = $('pos');
 function setPosHud(p) { posEl.innerHTML = `${p}<sup>${ordinal(p).slice(-2)}</sup>`; posEl.className = 'hud p' + p; posEl.classList.add('bump'); setTimeout(() => posEl.classList.remove('bump'), 160); }
 /* live standings column: every racer by place, refreshed a few times a second */
-const standEl = $('standings'); let standT = 0, standKey = '';
-function drawStandings(dt) {
-  standT -= dt; if (standT > 0) return; standT = 0.25;
+const standEl = $('standings'); let standN = 0, standKey = '';
+function drawStandings() {
+  standN = (standN + 1) % 5; if (standN) return;
   const sorted = active.slice().sort((a, b) => a.place - b.place);
   const key = sorted.map(k => k.id + (k.finished ? 'f' : '')).join(',') + me.id; if (key === standKey) return; standKey = key;
   standEl.innerHTML = sorted.map(k => `<div class="row${isMe(k) ? ' me' : ''}${k.finished ? ' done' : ''}"><b>${k.place}</b><i style="background:#${k.color.toString(16).padStart(6, '0')}"></i><span>${esc(k.name)}</span></div>`).join('');
@@ -1311,14 +1416,16 @@ const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'do
     if (e.code === 'KeyR') restartKey();
     if (e.code === 'Escape') hooks.onExit?.();
     if (e.code === 'KeyM') toast(audio.toggle() ? 'SOUND OFF' : 'SOUND ON', 'blue');
+    if (e.code === 'F3' || e.code === 'KeyI') { e.preventDefault(); showStats = !showStats; statsEl.hidden = !showStats; if (showStats) drawStats(); }
+    if (e.code === 'KeyL') cycleQuality();
   },
 });
 const input = kb.held; input.pressAt = -1;
 
 /* ============================================================ camera */
-const camState = { pos: new THREE.Vector3(0, 10, -30), look: new THREE.Vector3(), fov: 70, init: false };
+const camState = { pos: new THREE.Vector3(0, 10, -30), look: new THREE.Vector3(), fov: 70, init: false }, camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
 function updateCamera(dt) {
-  const k = me; const fx = Math.sin(k.h), fz = Math.cos(k.h); const want = new THREE.Vector3(), look = new THREE.Vector3();
+  const k = me; const fx = Math.sin(k.h), fz = Math.cos(k.h); const want = camWant, look = camLook;
   if (race.state === 'countdown') { const a = race.t * 0.45 + 2.2; want.set(k.x + Math.sin(a) * 13, k.y + 4.5 + race.t * 0.3, k.z + Math.cos(a) * 13); look.set(k.x, k.y + 1.2, k.z); }
   else if (race.state === 'finished') { const a = timeU.value * 0.4; want.set(k.x + Math.sin(a) * 15, k.y + 6, k.z + Math.cos(a) * 15); look.set(k.x, k.y + 1, k.z); }
   else { const sp = clamp(Math.abs(k.vf) / VMAX, 0, 1.4); const back = 8.5 + sp * 2.2, up = 3.6 + sp * 0.4; want.set(k.x - fx * back, k.y + up, k.z - fz * back); look.set(k.x + fx * 5, k.y + 1.4, k.z + fz * 5); }
@@ -1344,19 +1451,74 @@ function updateAmbient(dt) {
   smokeT -= dt; if (smokeT <= 0) { smokeT = 0.12; for (const c of chimneys) spawnP(c.x + rr(-0.3, 0.3), c.y, c.z + rr(-0.3, 0.3), rr(-0.4, 0.4), rr(1.5, 2.5), rr(-0.4, 0.4), rr(1.5, 2.5), 0xb8c0d0, 2.2, -0.5); }
 }
 
-/* ============================================================ networking glue */
-let netAcc = 0;
-function netTick(dt) {
-  if (!online) return; netAcc += dt; if (netAcc < 1 / 30) return; netAcc = 0;
-  const msg = { t: 's', k: [] }; for (const k of active) if (owned(k)) msg.k.push(packKart(k));
-  if (isHost) {
-    msg.r = { p: race.state === 'countdown' ? 'countdown' : 'race', t: +race.t.toFixed(3), tm: +race.time.toFixed(3), nx: series.on ? +series.nextT.toFixed(1) : -1 };
-    msg.z = hazards.map(h => { const o = { id: h.id, ty: h.type, o: h.owner, x: +h.x.toFixed(2), z: +h.z.toFixed(2), h: h.type === 'red' || h.type === 'blue' ? +h.h.toFixed(3) : 0, a: h.air > 0 ? +h.air.toFixed(2) : 0 }; if (h.type === 'blue') o.tg = h.target; if (h.type === 'bomb') o.f = +h.fuse.toFixed(2); return o; });
-    let m = 0; itemBoxes.forEach((b, i) => { if (b.active) m |= 1 << i; }); msg.b = m;
-    msg.c = []; coins.forEach((c, i) => { if (!c.active) msg.c.push(i); });
-  }
-  send(msg);
+/* ============================================================ stats + detail level */
+const QUALITY = [{ name: 'HIGH', pr: 2 }, { name: 'MEDIUM', pr: 1 }, { name: 'LOW', pr: 0.7 }];
+let quality = 0, autoQuality = true, lowFpsT = 0, showStats = false, fps = 60;
+const timing = { frame: 16, sim: 0, hud: 0, render: 0 };
+function setQuality(i, manual) {
+  quality = clamp(i | 0, 0, QUALITY.length - 1); if (manual) { autoQuality = false; try { localStorage.setItem('lan_kart_quality', String(quality)); } catch {} }
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, QUALITY[quality].pr)); renderer.setSize(innerWidth, innerHeight);
 }
+{ let saved = null; try { saved = localStorage.getItem('lan_kart_quality'); } catch {} if (saved !== null && QUALITY[+saved]) setQuality(+saved, true); }
+/* L: auto -> high -> medium -> low -> auto */
+function cycleQuality() {
+  if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; setQuality(0); try { localStorage.removeItem('lan_kart_quality'); } catch {} }
+  toast((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 'blue');
+}
+const cornerEl = $('corner'), statsEl = $('stats'), waitEl = $('netwait');
+const netStats = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, hostFps: 0, corr: 0, corrM: 0, snaps: 0, frozen: 0, ghosts: 0, lead: 0, lastT: 0 };
+/* the corner line always; the panel (F3 / I) with the frame breakdown, message rates, every sender's clock and the remote-object corrections */
+function drawStats() {
+  let line = `FPS ${Math.round(fps)}`;
+  if (online) line += isHost ? ' · HOST' : hostClock ? ` · PING ${Math.round(hostClock.rtt * 1000)} MS · JITTER ${Math.round(hostClock.jitter * 1000)} MS · HOST ${netStats.hostFps} FPS` : ' · WAITING FOR THE HOST';
+  cornerEl.textContent = line;
+  if (!showStats) return;
+  const lines = [
+    `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   HUD ${timing.hud.toFixed(1)}   RENDER ${timing.render.toFixed(1)}`,
+    `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}   (L CYCLES)`,
+  ];
+  if (!online) lines.push('SOLO · NO NETWORK');
+  else {
+    lines.push(`${isHost ? 'HOST  ' : 'CLIENT'}   MESSAGES IN ${netStats.rateIn.toFixed(0)}/S  ${netStats.kbIn.toFixed(1)} KB/S   OUT ${netStats.rateOut.toFixed(0)}/S  ${netStats.kbOut.toFixed(1)} KB/S${isHost ? '' : `   HOST ${netStats.hostFps} FPS`}`);
+    for (const [pid, c] of clocks) { const p = session && session.players.find(q => q.id === pid); lines.push(`${(p ? p.name : 'PLAYER ' + pid).toUpperCase().padEnd(12)} PING ${Math.round(c.rtt * 1000)} MS   SNAPSHOT EVERY ${Math.round(c.interval * 1000)} MS   JITTER ${Math.round(c.jitter * 1000)} MS (MAX ${Math.round(c.jitterMax * 1000)})   SHOWN ${Math.round((c.transit - c.D) * 1000)} MS AHEAD OF THE DATA`); }
+    lines.push(`REMOTE   DATA AGE ${Math.round(netStats.lead * 1000)} MS   CORRECTIONS ${netStats.corr} (AVG ${netStats.corr ? Math.round(netStats.corrM / netStats.corr * 100) : 0} CM)   SNAPS ${netStats.snaps}   STALLS ${netStats.frozen}   HAZARDS ${hazards.length + remoteHaz.size}   GHOSTS ${netStats.ghosts}`);
+  }
+  statsEl.textContent = lines.join('\n');
+}
+/* once a second: message rates */
+function netSample() { const now = nowSec(), dt = now - netStats.lastT; if (dt < 1) return; netStats.rateIn = netStats.inMsgs / dt; netStats.kbIn = netStats.inBytes / 1024 / dt; netStats.rateOut = netStats.outMsgs / dt; netStats.kbOut = netStats.outBytes / 1024 / dt; netStats.inMsgs = netStats.inBytes = netStats.outMsgs = netStats.outBytes = 0; netStats.lastT = now; }
+
+/* ============================================================ networking glue
+   Two streams (net.js): motion at NET_HZ from a steady worker timer, so a slow or hidden tab never bunches snapshots, and
+   status at STATUS_HZ or at once when something discrete changes. Every message carries the sender's clock; the receiver
+   maps it through a SnapClock per sender. */
+const clocks = new Map(); // player id -> SnapClock
+let hostClock = null, hostSeen = 0, simNow = 0, tickN = 0, lastSentTs = -1;
+const clockOf = pid => { let c = clocks.get(pid); if (!c) { c = createSnapClock(); clocks.set(pid, c); } return c; };
+function sendCounted(msg) { send(msg); netStats.outMsgs++; netStats.outBytes += JSON.stringify(msg).length; }
+function netTick() {
+  if (!online || race.state === 'intro') return;
+  tickN++; const ts = simNow;
+  if (ts !== lastSentTs) { // only when the simulation has moved on since the last tick
+    lastSentTs = ts;
+    const msg = { t: 's', ts, k: [] }; for (const k of active) if (owned(k)) msg.k.push(packMotion(k));
+    if (isHost) { msg.r = { p: race.state === 'countdown' ? 'countdown' : 'race', t: +race.t.toFixed(3), tm: +race.time.toFixed(3), nx: series.on ? +series.nextT.toFixed(1) : -1 }; msg.z = hazards.map(packHaz); }
+    if (msg.k.length || isHost) sendCounted(msg);
+  }
+  let due = tickN % Math.round(NET_HZ / STATUS_HZ) === 0;
+  if (!due) for (const k of active) if (owned(k) && statusKey(k) !== k.sentKey) { due = true; break; }
+  if (!due) return;
+  const u = { t: 'u', ts, k: [] }; for (const k of active) if (owned(k)) { u.k.push(packStatus(k)); k.sentKey = statusKey(k); }
+  if (isHost) { let m = 0; itemBoxes.forEach((b, i) => { if (b.active) m |= 1 << i; }); u.b = m; u.c = []; coins.forEach((c, i) => { if (!c.active) u.c.push(i); }); u.hf = Math.round(fps); }
+  if (u.k.length || isHost) sendCounted(u);
+  if (tickN % NET_HZ === 0 && session) for (const p of session.players) if (p.id !== session.myId) sendCounted({ t: 'pg', to: p.id, at: performance.now() }); // once a second: a round trip to every other player
+}
+/* advance the simulation to wall time `now` (ms). Called by the frame loop and, online, by the network ticker, so the state a
+   snapshot carries is fresh when it leaves whatever the frame rate is doing, and the race keeps going in a hidden tab. */
+function advanceSim(now) { const real = Math.min((now - simNow) / 1000, 0.25); if (real <= 0) return; timeU.value += real; fixedStep(real, SUB, simStep); simNow = now; }
+const ticker = createTicker(NET_HZ, () => { if (!loop.running) return; advanceSim(performance.now()); netTick(); });
+const onVisibility = () => { if (!document.hidden && loop.running) { loop.stop(); loop.start(); } }; // restart the frame clock so the first frame back is not a 250 ms jump
+document.addEventListener('visibilitychange', onVisibility);
 /* client: follow the host's clock */
 function syncRace(r) {
   if (race.state === 'countdown') { if (r.p === 'countdown' || r.t < 3.6) race.t = Math.max(race.t, r.t); else race.t = Math.max(race.t, 3.6); }
@@ -1409,22 +1571,40 @@ function simStep(dt) {
     if (me.place !== race.placeCand) { race.placeCand = me.place; race.placeCandT = 0; } else race.placeCandT += dt;
     if (race.placeCand !== race.shownPlace && race.placeCandT > 0.22) { const up = race.placeCand < race.shownPlace; race.shownPlace = race.placeCand; setPosHud(race.shownPlace); toast((up ? '▲ ' : '▼ ') + ordinal(race.shownPlace).toUpperCase(), up ? 'up' : 'down'); up ? sfx.up() : sfx.down(); }
   }
-  netTick(dt);
 }
-/* once per rendered frame */
+/* once per rendered frame: visuals every frame, the HUD at 20 Hz and only the parts that changed */
+let hudAcc = 0, statsAcc = 0, lapShown = '', inkShown = -1, wrongShown = false; const wrongEl = $('wrong');
 function present(dt) {
+  for (const c of clocks.values()) c.tick(dt);
   for (const k of active) kartVisual(k, dt);
-  updateCamera(dt); updateParticles(dt); updateAmbient(dt);
-  lapEl.innerHTML = `LAP <b>${clamp(me.lap, 1, race.laps)}</b>/${race.laps}`; timerEl.textContent = fmtT(race.time);
-  drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(dt); drawCoins(); drawCoinHud();
-  if (me.item && ITEM_DEF[me.item].timed && me.timed > 0) drawItemSlot(me.item, false, 1, me.timed / ITEM_DEF[me.item].timed);
-  inkEl.style.opacity = me.ink > 0 ? clamp(me.ink / 1.5, 0, 1) : 0;
-  $('wrong').style.display = me.wrongWay > 0.8 && race.state === 'race' ? 'block' : 'none';
+  updateCamera(dt); updateParticles(dt); updateAmbient(dt); drawCoins();
   if (race.flash > 0) { race.flash -= dt * 1.8; flashEl.style.opacity = Math.max(race.flash, 0); }
   sfx.engine(Math.abs(me.vf), me.boost > 0);
+  hudAcc += dt; if (hudAcc >= 0.05) { hudAcc = hudAcc > 0.5 ? 0 : hudAcc - 0.05; hudRefresh(); }
+}
+function hudRefresh() {
+  const lapTxt = `LAP <b>${clamp(me.lap, 1, race.laps)}</b>/${race.laps}`; if (lapTxt !== lapShown) { lapShown = lapTxt; lapEl.innerHTML = lapTxt; }
+  timerEl.textContent = fmtT(race.time);
+  drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(); drawCoinHud();
+  if (me.item && ITEM_DEF[me.item].timed && me.timed > 0) drawItemSlot(me.item, false, 1, me.timed / ITEM_DEF[me.item].timed);
+  const ink = me.ink > 0 ? clamp(me.ink / 1.5, 0, 1) : 0; if (ink !== inkShown) { inkShown = ink; inkEl.style.opacity = ink; }
+  const wrong = me.wrongWay > 0.8 && race.state === 'race'; if (wrong !== wrongShown) { wrongShown = wrong; wrongEl.style.display = wrong ? 'block' : 'none'; }
+  waitEl.hidden = !(online && !isHost && hostSeen > 0 && nowSec() - hostSeen > 0.8);
+  netSample(); statsAcc += 0.05; if (statsAcc >= 0.25) { statsAcc = 0; drawStats(); }
 }
 const SUB = 1 / 60;
-const loop = createLoop(real => { timeU.value += real; fixedStep(real, SUB, simStep); present(real); renderer.render(scene, camera); });
+const loop = createLoop((real, now) => {
+  const t0 = performance.now();
+  advanceSim(now);
+  const t1 = performance.now(); present(real);
+  const t2 = performance.now(); renderer.render(scene, camera);
+  const t3 = performance.now();
+  timing.sim = lerp(timing.sim, t1 - t0, 0.1); timing.hud = lerp(timing.hud, t2 - t1, 0.1); timing.render = lerp(timing.render, t3 - t2, 0.1); timing.frame = lerp(timing.frame, real * 1000, 0.1);
+  fps = lerp(fps, 1 / Math.max(real, 1e-3), 0.05);
+  if (autoQuality && race.state === 'race' && race.time > 3) { // detail steps down by itself when the frame rate stays low
+    if (fps < 40) { lowFpsT += real; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; toast('LOW FRAME RATE · ' + QUALITY[quality].name + ' DETAIL', 'blue'); } } else lowFpsT = 0;
+  }
+});
 karts.forEach((k, i) => resetKart(k, i)); karts.forEach(k => kartVisual(k, 0.016));
 drawItemSlot(null); setPosHud(8); setGantry(0);
 
@@ -1473,12 +1653,14 @@ function start(s) {
   gridOrder = active.filter(k => k.kind === 'ai').map(k => k.id).concat(active.filter(k => k.kind !== 'ai').map(k => k.id));
   for (const k of karts) if (k.kind === 'none') k.place = 99;
   resetRace();
-  hintEl.textContent = 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound';
+  hintEl.textContent = 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound · L detail · F3 stats';
   const cupline = $('cupline'); cupline.hidden = !series.on; cupline.textContent = series.on ? `RACE ${series.race + 1}/${series.total} · ${v.name}` : '';
   $('kcName').textContent = me.name; $('kcClass').textContent = me.w.label; $('kartcard').querySelectorAll('.bars s').forEach((el, i) => { el.style.width = me.w.bars[i] + '%'; }); $('kartcard').classList.add('show');
   if (series.on) { toast(`RACE ${series.race + 1} OF ${series.total}`, 'gold'); toast(v.name, 'blue'); }
   renderFoot(); drawNext();
-  audio.init(); kb.attach(); loop.start();
+  clocks.clear(); hostClock = null; hostSeen = nowSec(); simNow = performance.now(); tickN = 0; lastSentTs = -1; ghostN = 0;
+  Object.assign(netStats, { corr: 0, corrM: 0, snaps: 0, frozen: 0, ghosts: 0, lead: 0, hostFps: 0 });
+  audio.init(); kb.attach(); loop.start(); if (online) ticker.start(); else ticker.stop();
 }
 function stop() {
   session = null; race.state = 'intro'; clearHazards(); series.on = false; series.pending = null; series.nextT = -1;
@@ -1486,26 +1668,40 @@ function stop() {
   for (const k of karts) { setLabel(k, null); k.vis.g.visible = true; k.vis.bodyMat.color.set(k.color); k.vis.bodyMat.emissive.set(0); k.vis.bodyMat.emissiveIntensity = 0; }
   active = karts; karts.forEach((k, i) => resetKart(k, i)); for (const b of itemBoxes) { b.active = true; b.g.visible = true; } for (const c of coins) c.active = true;
   $('kartcard').classList.remove('show'); music.stop();
-  kb.detach(); loop.stop(); sfx.silence();
+  kb.detach(); loop.stop(); ticker.stop(); sfx.silence(); waitEl.hidden = true;
 }
 function destroy() {
-  stop(); sfx.dispose(); music.dispose(); removeEventListener('resize', onResize);
+  stop(); sfx.dispose(); music.dispose(); ticker.dispose(); removeEventListener('resize', onResize); document.removeEventListener('visibilitychange', onVisibility);
   disposeScene(scene); renderer.dispose(); renderer.forceContextLoss?.();
   mount.innerHTML = ''; unloadCss(); if (window.__kart === debug) delete window.__kart;
 }
 /* a player dropped out mid-race: the host drives that kart from now on */
 function playerLeft(pid) {
   const k = kartOf(pid); if (!k) return;
-  k.kind = 'ai'; k.pid = null; k.buf = []; k.name = SKINS[k.id].name; setLabel(k, null);
+  k.kind = 'ai'; k.pid = null; k.buf = []; k.status = null; k.netA = k.netB = null; k.clock = null; k.clockFrom = null; k.ox = k.oz = k.oh = 0; k.sentKey = ''; k.name = SKINS[k.id].name; setLabel(k, null);
   k.ai = freshAi(true); k.throttle = 0; k.steer = 0; k.roulette = 0;
 }
 function onNetMessage(msg) {
   if (race.state === 'intro') return;
+  netStats.inMsgs++; netStats.inBytes += msg._len || 0;
   switch (msg.t) {
-    case 's':
-      for (const ks of msg.k || []) { const k = karts[ks.i]; if (k && !owned(k) && k.kind !== 'none') pushSnap(k.buf, ks); }
-      if (!isHost && msg.r) { syncRace(msg.r); syncHazards(msg.z || []); if (msg.b !== undefined) syncBoxes(msg.b); if (msg.c) syncCoins(msg.c); }
-      break;
+    case 's': { // motion: everything the sender drives, plus the race clock and the hazards from the host
+      const from = msg.from, clock = clockOf(from), ts = +msg.ts || 0, t = clock.map(ts);
+      if (session && from === session.hostId) { hostClock = clock; hostSeen = nowSec(); }
+      for (const raw of msg.k || []) {
+        const m = unpackMotion(raw), k = karts[m.i]; if (!k || owned(k) || k.kind === 'none') continue;
+        if (k.clockFrom !== from) { k.clockFrom = from; k.clock = clock; k.buf = []; k.netA = k.netB = null; k.lastTs = -1; } // a new owner (the host took over a leaver's kart): fresh timeline
+        if (ts <= k.lastTs) continue; k.lastTs = ts; pushSnap(k.buf, m, t);
+      }
+      if (!isHost && msg.r) { syncRace(msg.r); syncHazards(msg.z || [], t, ts); }
+      break; }
+    case 'u': { // status: laps, items, effect timers; item boxes and coins from the host
+      const from = msg.from, t = clockOf(from).map(+msg.ts || 0);
+      for (const raw of msg.k || []) { const st = unpackStatus(raw), k = karts[st.i]; if (!k || owned(k) || k.kind === 'none' || (k.status && t < k.statusT)) continue; k.status = st; k.statusT = t; }
+      if (!isHost && session && from === session.hostId) { if (msg.b !== undefined) syncBoxes(msg.b); if (msg.c) syncCoins(msg.c); if (msg.hf !== undefined) netStats.hostFps = msg.hf | 0; }
+      break; }
+    case 'pg': sendCounted({ t: 'po', to: msg.from, at: msg.at }); break; // ping: answer with the sender's stamp
+    case 'po': clockOf(msg.from).ping(Math.max(0, (performance.now() - (+msg.at || 0)) / 1000)); break; // pong: that round trip belongs to their clock
     case 'pick': if (isHost) { const b = itemBoxes[msg.b]; if (b && b.active) { b.active = false; b.g.visible = false; b.respawn = 3.5; for (let i = 0; i < 10; i++) spawnP(b.x, b.y + 1.3, b.z, rr(-4, 4), rr(1, 6), rr(-4, 4), rr(0.3, 0.6), 0x9fe8ff, 0.8, 6); } } break;
     case 'coin': if (isHost) { const c = coins[msg.c]; if (c && c.active) { c.active = false; c.respawn = 5; for (let i = 0; i < 4; i++) spawnP(c.x, c.y + 1, c.z, rr(-2, 2), rr(2, 5), rr(-2, 2), 0.35, 0xffd23f, 0.6, 8); } } break;
     case 'use': if (isHost) { const k = kartOf(msg.from); if (k && ITEM_DEF[msg.it]) spawnHazard(msg.it, k, msg.x, msg.z, msg.h, msg.vf, msg.tg >= 0 ? karts[msg.tg] : null, msg.dir < 0 ? -1 : 1); } break;
@@ -1522,7 +1718,7 @@ function onNetMessage(msg) {
     } break;
   }
 }
-const debug = { karts, race, series, nextRace, awardCup, hazards, remoteHaz, VARIANTS, ITEM_DEF, giveItem, itemPress, itemRelease, useItem, rollItem, blast, inkFrom, debugSpawn: spawnHazard, spawnStats, get coins() { return coins; }, get itemBoxes() { return itemBoxes; }, get variant() { return variant; }, get S() { return S; }, get L() { return L; }, get N() { return N; }, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; },
+const debug = { karts, race, series, get net() { return netStats; }, clocks, timing, get fps() { return fps; }, get hostClock() { return hostClock; }, get simNow() { return simNow; }, nextRace, awardCup, hazards, remoteHaz, VARIANTS, ITEM_DEF, giveItem, itemPress, itemRelease, useItem, rollItem, blast, inkFrom, debugSpawn: spawnHazard, spawnStats, get coins() { return coins; }, get itemBoxes() { return itemBoxes; }, get variant() { return variant; }, get S() { return S; }, get L() { return L; }, get N() { return N; }, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; },
   get tune() { return { VMAX, ACC, TURN, cpu: cpuCfg }; },
   restartWith(opts) { if (session) start({ ...session, opts: { ...session.opts, ...opts } }); } };
 window.__kart = debug;
