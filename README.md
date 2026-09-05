@@ -1,8 +1,9 @@
 # LAN Party
 
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
-Ships with **Frostline Kart**, a snowy kart racer with items, CPU karts and up to 8 players, and **Dodgeball 3v3**,
-a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest.
+Ships with **Frostline Kart**, a snowy kart racer with items, CPU karts and up to 8 players, **Dodgeball 3v3**,
+a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest, and
+**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city.
 
 ## Run
 
@@ -14,7 +15,7 @@ npm start
 The server prints the addresses it is reachable on, for example:
 
 ```
-LAN party server running with 2 game(s): Frostline Kart, Dodgeball 3v3
+LAN party server running with 3 game(s): Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1
 Open one of these on every machine:
   http://localhost:3000   (this machine)
   http://192.168.8.112:3000
@@ -51,11 +52,15 @@ client/
     registry.js   the game manifest (see below)
     kart/         Frostline Kart: index.js (game module) + kart.css (its HUD)
     dodgeball/    Dodgeball 3v3: index.js (game module) + dodgeball.css (its HUD)
+    gta/          Fable Theft Auto 5.1: index.js (game module: lifecycle, input, HUD, netcode glue),
+                  world.js (the seeded city + instanced pools), entities.js (how peds and cars draw),
+                  sim.js (the host's simulation), remote.js (a client's copy), fx.js, font.js, gta.css
 ```
 
 The server never simulates a game. It keeps the lobby roster and relays in-game messages between the players in a room.
 Frostline Kart runs its simulation on the host's browser for CPU karts, items and the clock, and on each player's browser for their own kart.
 Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
+Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. The city itself is generated from a fixed seed, so it never travels over the network.
 
 ## Adding a game
 
@@ -110,3 +115,12 @@ Arrows / WASD to drive, Space to use an item, M to toggle sound. Hold the thrott
 Blue vs red, first to 2 (or 3) rounds. Arrows / WASD to move, Shift to sprint (watch the stamina bar), Space to throw at the nearest enemy once your arm is ready, M to toggle sound.
 Balls start on the centre line; a live ball that touches an enemy sends them to the bench, and after 45 seconds the line drops so either side can cross.
 Up to 6 players, 3 per side; empty slots are CPU bodies when the host leaves "fill empty slots with CPU" on. A player who drops out mid-match is taken over by a CPU.
+
+## Fable Theft Auto 5.1
+
+Los Pixeles, a procedurally generated voxel city, shared by up to 8 players. WASD to move or drive, mouse to look and aim, left click to shoot,
+1 / 2 / 3 or the wheel to switch weapon, R to reload, F to enter or exit a car, Shift to sprint, Space to jump or handbrake, M to toggle sound.
+Click once at the start of a round to grab the mouse; Esc releases it and opens the pause card (the city keeps running for everyone else).
+Everyone starts on Ender Ave with a sports car in their colour. The Downtown Hit mission is shared: the first player to reach Diamond Plaza flushes Vinny out,
+whoever whacks him collects the $5000 and the heat. Wanted levels are per player and the cops chase whoever they can see. Players can shoot and run each other over
+unless the host turns friendly fire off; a wasted player respawns at the hospital minus $300. Rounds are timed (5, 10, 15 minutes or unlimited) and end with a scoreboard ranked by cash, then kills.

@@ -29,6 +29,16 @@ export const GAMES = [
     ],
     load: () => import('./dodgeball/index.js'),
   },
+  {
+    id: 'gta', title: 'Fable Theft Auto 5.1', tagline: 'LOS PIXELES · VOXEL CRIME SANDBOX · UP TO 8',
+    minPlayers: 1, maxPlayers: 8,
+    options: [
+      { key: 'minutes', type: 'select', label: 'ROUND', default: 10, choices: [{ value: 5, label: '5 minutes' }, { value: 10, label: '10 minutes' }, { value: 15, label: '15 minutes' }, { value: 0, label: 'Unlimited' }] },
+      { key: 'friendlyFire', type: 'bool', label: 'PLAYERS CAN HURT EACH OTHER', default: true },
+      { key: 'time', type: 'select', label: 'TIME OF DAY', default: 'morning', choices: [{ value: 'morning', label: 'Morning' }, { value: 'sunset', label: 'Sunset' }, { value: 'night', label: 'Night' }] },
+    ],
+    load: () => import('./gta/index.js'),
+  },
 ];
 
 /* Message types owned by the lobby protocol. Games must not use these as their own `t` values;

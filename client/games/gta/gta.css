@@ -1,0 +1,21 @@
+/* Fable Theft Auto 5.1. Everything is scoped under .gta; the shell supplies .btn for the overlay buttons. */
+.gta { position: absolute; inset: 0; overflow: hidden; background: #000; cursor: crosshair; user-select: none; }
+.gta canvas.gl, .gta canvas.hud { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.gta canvas.hud { pointer-events: none; }
+/* click-to-play, pause and time's-up card */
+.gta .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(4,8,24,.55); cursor: default; }
+.gta .overlay .card { text-align: center; background: rgba(8,12,34,.9); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 26px 36px 28px; min-width: 460px; max-width: 92vw; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: gta-pop .4s ease-out; }
+.gta .overlay h1 { margin: 0 0 4px; font-size: 44px; font-style: italic; letter-spacing: 3px; color: #ffe14d; text-shadow: 0 6px 0 rgba(0,0,0,.4); }
+.gta .overlay h1 b { color: #ff4d4d; }
+.gta .overlay .sub { font-size: 14px; letter-spacing: 3px; color: #9fb4dc; margin-bottom: 16px; }
+.gta .controls { display: grid; grid-template-columns: auto auto; gap: 5px 16px; justify-content: center; align-items: center; text-align: left; font-size: 14px; letter-spacing: 1px; color: #dbe9ff; margin: 0 auto 18px; }
+.gta .controls kbd { font-family: inherit; background: #fff; color: #123; border-radius: 6px; padding: 2px 8px; font-weight: 900; font-size: 12px; display: inline-block; min-width: 44px; text-align: center; }
+.gta .score { width: 100%; border-collapse: collapse; font-size: 18px; margin-bottom: 14px; }
+.gta .score td { padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,.1); text-align: left; }
+.gta .score tr.me td { background: rgba(255,213,74,.15); font-weight: 900; }
+.gta .score .sw { display: inline-block; width: 16px; height: 16px; border-radius: 5px; vertical-align: middle; margin-right: 8px; border: 2px solid rgba(255,255,255,.5); }
+.gta .score .n { text-align: right; font-variant-numeric: tabular-nums; }
+.gta .score .cash { color: #3dff7a; } .gta .score .kills { color: #ff6060; }
+.gta .score .left { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+.gta .foot { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; font-size: 15px; color: #dbe9ff; letter-spacing: 2px; }
+@keyframes gta-pop { 0% { transform: scale(.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
