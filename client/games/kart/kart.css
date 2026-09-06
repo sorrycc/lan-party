@@ -71,6 +71,23 @@
 #count.go { color: #5cff8a; }
 @keyframes countPop { 0% { transform: translate(-50%,-50%) scale(1.6); opacity: 0; } 15% { transform: translate(-50%,-50%) scale(1); opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%,-50%) scale(.9); } }
 
+/* the rocket-start line, pinned a fixed distance above the countdown number (below it is the kart card's) */
+#startTip { top: 50%; left: 50%; transform: translate(-50%, -104px); font-size: 15px; font-weight: 900; letter-spacing: 3px; color: #cfe3ff; white-space: nowrap; }
+#startTip.ok { color: #5cff8a; animation: pop .25s ease-out; }
+#startTip.bad { color: #ff8a5c; }
+#startTip:empty { display: none; }
+
+/* how-to-play card: the first race on a touch screen, and the ☰ menu on demand. It sits under the ☰, clear of the countdown
+   number and the kart card, and only its button accepts touches, so a thumb resting on it still counts as a start hold. */
+#help { left: 50%; top: calc(46px + var(--sa-t)); transform: translateX(-50%); display: none; width: min(560px, calc(100vw - 24px)); padding: 10px 18px 12px; text-align: left; }
+#help.show { display: block; animation: pop .35s ease-out; }
+#help h2 { margin: 0 0 8px; font-size: 14px; letter-spacing: 4px; color: #ffd54a; text-align: center; font-weight: 900; }
+#help dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: baseline; }
+#help dt { font-size: 11px; font-weight: 900; letter-spacing: 2px; color: #ffd54a; white-space: nowrap; }
+#help dd { margin: 0; font-size: 12px; letter-spacing: .5px; color: #dbe9ff; }
+#help button { display: block; margin: 12px auto 0; pointer-events: auto; touch-action: manipulation; }
+#help.show ~ #hint { visibility: hidden; }   /* the card says it better than the one-line hint under the ☰ */
+
 /* kart card during the countdown */
 #kartcard { left: 50%; bottom: calc(175px + var(--sa-b)); transform: translateX(-50%); padding: 10px 18px; display: none; align-items: center; gap: 16px; }
 #kartcard.show { display: flex; animation: pop .35s ease-out; }
@@ -130,13 +147,13 @@
 .touch .ctl { display: block; }
 /* the pointer target is always the control itself, never a child that may be hidden mid-press (iOS Safari then drops the pointerup) */
 .ctl > *, .touch #item > * { pointer-events: none; }
-/* steering pad: the left part of the screen; a ring appears where the finger lands and the knob follows it sideways */
-#pad { left: 0; top: calc(60px + var(--sa-t)); bottom: 0; width: 45vw; z-index: 5; --ox: 50%; --oy: 50%; --px: 0px; }
+/* steering pad: the left part of the screen; a ring appears where the finger lands and the knob shows the steering the drag asks for */
+#pad { left: 0; top: calc(60px + var(--sa-t)); bottom: 0; width: 45vw; z-index: 5; --ox: 50%; --oy: 50%; --sx: 0; }
 #pad .ring { position: absolute; left: var(--ox); top: var(--oy); width: 132px; height: 132px; margin: -66px 0 0 -66px; border-radius: 50%; border: 3px solid rgba(255,255,255,.45); background: rgba(6,10,28,.35); opacity: 0; transition: opacity .2s; }
 #pad .ring::before, #pad .ring::after { position: absolute; top: 50%; transform: translateY(-50%); color: rgba(255,255,255,.55); font-size: 16px; }
 #pad .ring::before { content: '◀'; left: 8px; } #pad .ring::after { content: '▶'; right: 8px; }
 #pad.on .ring { opacity: 1; transition: none; }
-#pad .knob { position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px; border-radius: 50%; background: rgba(255,255,255,.92); box-shadow: 0 4px 12px rgba(0,0,0,.45); transform: translateX(var(--px)); }
+#pad .knob { position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px; border-radius: 50%; background: rgba(255,255,255,.92); box-shadow: 0 4px 12px rgba(0,0,0,.45); transform: translateX(calc(var(--sx) * 40px)); }
 #pad .lbl { position: absolute; left: 50%; bottom: calc(22px + var(--sa-b)); transform: translateX(-50%); font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,.35); font-weight: 700; white-space: nowrap; }
 #pad.on .lbl { opacity: 0; }
 /* BRAKE and ITEM under the right thumb */
@@ -199,6 +216,8 @@
   .toast { font-size: 28px; padding: 4px 16px; border-width: 2px; }
   #count { font-size: 110px; -webkit-text-stroke: 3px rgba(10,14,40,.9); }
   #kartcard { bottom: calc(118px + var(--sa-b)); padding: 8px 14px; gap: 12px; } #kartcard b { font-size: 18px; } #kartcard .bars u { width: 80px; } #kartcard .bars i { width: 54px; }
+  #startTip { transform: translate(-50%, -72px); font-size: 12px; letter-spacing: 2px; }
+  #help { width: min(460px, calc(100vw - 24px)); padding: 6px 12px 8px; } #help h2 { font-size: 11px; letter-spacing: 3px; margin-bottom: 4px; } #help dl { gap: 1px 10px; } #help dt { font-size: 9px; } #help dd { font-size: 10px; } #help button { margin-top: 6px; font-size: 11px; padding: 5px 12px; }
   #wrong { font-size: 28px; } #netwait { font-size: 20px; }
   #hint { font-size: 10px; }
   #results .card { padding: 14px 18px; border-radius: 16px; } #results h1 { font-size: 30px; } #results h2 { font-size: 12px; margin-bottom: 8px; letter-spacing: 2px; }

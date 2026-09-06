@@ -10,12 +10,20 @@
    snapshot as events, so every screen sees and hears the same match. The roster is derived from the session
    identically on every machine, which is what lets snapshots refer to players by index.
 
+   Touch screens (core/touch.js): the left part of the screen is a thumb stick, SPRINT and THROW sit under the right thumb
+   (THROW fires when the finger lifts, so dragging it first aims the throw instead of taking the nearest enemy), ☰ opens a
+   menu card, a phone held upright is asked to rotate, and on a phone in landscape the score and the status float over the
+   crowd so the court is as big as the screen allows. An online host keeps simulating from a worker timer while its tab is
+   hidden, so the match goes on for the others.
+
    Physics note: hand-rolled circle physics with fixed 240 Hz substeps, swept circle-vs-circle hit tests for
    thrown balls, exact reflection off the axis-aligned walls and a hard clamp so no ball ends a step outside. */
 import { clamp, lerp, wrapAngle } from '../../core/math.js';
 import { hex, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
+import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
+import { createTicker } from '../../core/ticker.js';
 import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
 import { AVATARS } from '../../core/avatars.js';
 
@@ -111,7 +119,7 @@ class Player {
     this.team = slot.team; this.idx = slot.idx; this.pid = slot.pid; this.isHuman = slot.pid !== null; this.name = slot.name; this.avatar = slot.avatar;
     this.pi = 0; this.x = 0; this.y = 0; this.vx = 0; this.vy = 0; this.r = CFG.player.r;
     this.alive = true; this.stamina = 1; this.sprinting = false; this.regenT = 0;
-    this.ball = null; this.state = 'GRAB'; this.armT = 0; this.readyT = 0; this.throwQueued = false;
+    this.ball = null; this.state = 'GRAB'; this.armT = 0; this.readyT = 0; this.throwQueued = false; this.throwDir = null;
     this.face = this.team === 'blue' ? 0 : Math.PI;
     this.input = { x: 0, y: 0, sprint: false };  // what the simulation uses this frame
     this.want = { x: 0, y: 0, sprint: false };   // latest wish of the human driving this body (local keys or the network)
@@ -432,6 +440,7 @@ class Game {
     this.stats = { hits: 0, throws: 0 }; this.events = []; this.seq = 0; this.lastSeq = -1;
     this.score = { blue: 0, red: 0 }; this.round = 0; this.matchWinner = null; this.roundWinner = null;
     this.phase = 'intro'; this.phaseT = 0; this.lineDown = false; this.lineCount = null;
+    this.aim = null; // a touch player's drag on THROW (unit vector), drawn as an arrow from their body
     if (this.isHost) this.startRound(); else { this.round = 1; this.resetRound(); }
   }
 
@@ -450,7 +459,7 @@ class Game {
       const side = TEAM[p.team].dir, home = side > 0 ? C.left : C.right;
       p.x = home + side * 46; p.y = C.top + (C.bottom - C.top) * (p.idx + 1) / (this.count[p.team] + 1);
       p.vx = p.vy = 0; p.alive = true; p.knocked = null; p.ball = null; p.state = 'GRAB'; p.armT = 0; p.readyT = 0;
-      p.stamina = 1; p.sprinting = false; p.throwQueued = false; p.face = side > 0 ? 0 : Math.PI; p.benchSlot = -1; p.stillT = 0; p.buf = [];
+      p.stamina = 1; p.sprinting = false; p.throwQueued = false; p.throwDir = null; p.face = side > 0 ? 0 : Math.PI; p.benchSlot = -1; p.stillT = 0; p.buf = [];
       p.input = { x: 0, y: 0, sprint: false };
       if (p.brain) Object.assign(p.brain, { target: null, ballTarget: null, dodgeUntil: -1, threatBall: null, rush: true, thinkT: rand(0.05, 0.2), goalX: p.x, goalY: p.y, sprintWish: false });
     }
@@ -459,7 +468,7 @@ class Game {
   ballsInPlay() { let n = 0; for (const b of this.balls) if (b.state !== 'drain') n++; return n; }
   playerOf(pid) { return this.players.find(p => p.pid === pid) || null; }
   /* a human dropped out: their body plays on as a CPU */
-  toAI(p) { if (!p.isHuman) return; p.isHuman = false; p.pid = null; p.avatar = -1; p.name = AI_NAMES[p.team][p.idx] || p.name; p.brain = Player.newBrain(); Object.assign(p.brain, { goalX: p.x, goalY: p.y, rush: false }); p.throwQueued = false; if (p === this.me) this.me = null; }
+  toAI(p) { if (!p.isHuman) return; p.isHuman = false; p.pid = null; p.avatar = -1; p.name = AI_NAMES[p.team][p.idx] || p.name; p.brain = Player.newBrain(); Object.assign(p.brain, { goalX: p.x, goalY: p.y, rush: false }); p.throwQueued = false; p.throwDir = null; if (p === this.me) this.me = null; }
 
   /* ---------- visual helpers */
   showBanner(text, color, dur, opts = {}) { this.banner = { text, color, t: 0, dur, sub: opts.sub || null, size: opts.size || 64 }; }
@@ -539,16 +548,18 @@ class Game {
     ball.x = clamp(p.x + dx * (p.r + ball.r + 2), C.left + ball.r, C.right - ball.r);
     ball.y = clamp(p.y + dy * (p.r + ball.r + 2), C.top + ball.r, C.bottom - ball.r);
     ball.vx = dx * speed; ball.vy = dy * speed; ball.state = 'live'; ball.team = p.team; ball.thrower = p; ball.holder = null; ball.liveT = 0; ball.trail = [];
-    p.ball = null; p.state = 'GRAB'; p.armT = 0; p.readyT = 0; p.throwQueued = false; p.face = Math.atan2(dy, dx);
+    p.ball = null; p.state = 'GRAB'; p.armT = 0; p.readyT = 0; p.throwQueued = false; p.throwDir = null; p.face = Math.atan2(dy, dx);
     p.vx += -dx * 40; p.vy += -dy * 40;
     this.stats.throws++;
     this.emit('throw', r1(ball.x), r1(ball.y), TEAM[p.team].code);
   }
   nearestEnemy(p) { let best = null, bd = 1e9; for (const e of this.players) if (e.team !== p.team && e.active) { const d = hyp(e.x - p.x, e.y - p.y); if (d < bd) { bd = d; best = e; } } return best ? { e: best, d: bd } : null; }
-  /* a human pressed throw: fires at once when armed, otherwise as soon as the arm is ready */
-  requestThrow(p) {
+  /* a human pressed throw: fires at once when armed, otherwise as soon as the arm is ready. `dir` is a unit vector to throw
+     along (a touch player who dragged THROW to aim); without one the throw leads the nearest enemy. */
+  requestThrow(p, dir = null) {
     if (!p || !p.active || !p.ball || this.phase !== 'play') return;
-    if (p.state !== 'READY') { p.throwQueued = true; return; }
+    if (p.state !== 'READY') { p.throwQueued = true; p.throwDir = dir; return; }
+    if (dir) { this.throwBall(p, p.x + dir.x * 100, p.y + dir.y * 100, CFG.throwSpeed); return; }
     const n = this.nearestEnemy(p); if (!n) return;
     const tf = n.d / CFG.throwSpeed;
     this.throwBall(p, n.e.x + n.e.vx * tf * 0.6, n.e.y + n.e.vy * tf * 0.6, CFG.throwSpeed);
@@ -589,7 +600,7 @@ class Game {
       else { p.input.x = p.want.x; p.input.y = p.want.y; p.input.sprint = p.want.sprint; }
       if (p.ball) {
         if (p.state === 'ARMING') { p.armT += dt; if (p.armT >= CFG.armTime) { p.state = 'READY'; p.readyT = 0; this.emit('ready', p.pi); } }
-        else if (p.state === 'READY') { p.readyT += dt; if (p.isHuman && p.throwQueued) this.requestThrow(p); }
+        else if (p.state === 'READY') { p.readyT += dt; if (p.isHuman && p.throwQueued) this.requestThrow(p, p.throwDir); }
       }
       // an armed human standing still squares up to the nearest enemy
       if (p.isHuman && p.ball && p.state === 'READY' && hyp(p.vx, p.vy) < 30) { const n = this.nearestEnemy(p); if (n) p.face = Math.atan2(n.e.y - p.y, n.e.x - p.x); }
@@ -704,23 +715,23 @@ class Game {
   }
 
   /* ---------- status bar text */
-  status(canRestart) {
+  status(canRestart, touch) {
     const me = this.me, sc = `${this.score.blue}–${this.score.red}`;
-    if (this.matchWinner) return { cls: 'info', text: `${TEAM[this.matchWinner].name} wins the match ${sc}`, hint: canRestart ? 'R to play again · Esc to leave' : 'waiting for the host to play again' };
+    if (this.matchWinner) return { cls: 'info', text: `${TEAM[this.matchWinner].name} wins the match ${sc}`, hint: canRestart ? (touch ? 'play again or leave from the ☰ menu' : 'R to play again · Esc to leave') : 'waiting for the host to play again' };
     if (this.phase === 'roundEnd') return { cls: 'info', text: this.roundWinner ? `${TEAM[this.roundWinner].name} takes the round` : 'Round over', hint: `${sc} · next round in a moment` };
-    if (this.phase === 'intro') return { cls: 'info', text: `Round ${this.round} — get ready…`, hint: me ? `you are on ${TEAM[me.team].name} · rush a ball on the line at the whistle` : 'spectating' };
+    if (this.phase === 'intro') return { cls: 'info', text: `Round ${this.round} — get ready…`, hint: me ? `you are on ${TEAM[me.team].name} · ${touch ? 'drag the left side to move · rush a ball at the whistle' : 'rush a ball on the line at the whistle'}` : 'spectating' };
     if (!me) return { cls: 'info', text: 'SPECTATING', hint: '' };
     if (!me.alive) return { cls: 'out', text: 'OUT!', hint: 'watching the round finish' };
-    if (!me.ball) return { cls: 'grab', text: 'GRAB A BALL', hint: 'touch a loose ball to pick it up' };
+    if (!me.ball) return { cls: 'grab', text: 'GRAB A BALL', hint: 'run over a loose ball to pick it up' };
     if (me.state === 'ARMING') return { cls: 'arming', text: 'ARMING…', charge: me.armT / CFG.armTime, hint: '' };
-    return { cls: 'ready', text: 'THROW READY', hint: 'Space throws at the nearest enemy' };
+    return { cls: 'ready', text: 'THROW READY', hint: touch ? 'THROW takes the nearest enemy · drag it to aim' : 'Space throws at the nearest enemy' };
   }
 }
 
 /* ============================================================ renderer */
 class Renderer {
   constructor(canvas) {
-    this.cv = canvas; this.ctx = canvas.getContext('2d'); this.dpr = 1; this.floor = null; this.crowd = [];
+    this.cv = canvas; this.ctx = canvas.getContext('2d'); this.scale = 0; this.ui = 1; this.floor = null; this.crowd = [];
     const C = CFG.court, cx = (C.left + C.right) / 2;
     const bluish = ['#3d8bff', '#5aa0ff', '#2f6fd6', '#7fb4ff', '#e8ecf1', '#c7d2e0', '#9aa7b8'];
     const reddish = ['#ff4d5a', '#ff7a84', '#d63a45', '#ffb3b8', '#e8ecf1', '#c7d2e0', '#9aa7b8'];
@@ -730,13 +741,18 @@ class Renderer {
           phase: rand(Math.PI * 2), freq: rand(3, 6), size: rand(5.5, 7.5), row: row.r });
       }
     }
-    this.resize();
+    this.resize(0);
   }
-  resize() {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    if (this.floor && dpr === this.dpr) return;
-    this.dpr = dpr; this.cv.width = CFG.W * dpr; this.cv.height = CFG.H * dpr;
-    this.floor = this.makeFloor(dpr);
+  /* `cssW` is the width the canvas is shown at (0: not known yet). The backing store is that size times the pixel ratio
+     (capped at 2), so a phone showing the court 580 pixels wide is not asked to fill 2080; the floor is repainted when the
+     scale changes. `ui` scales the labels drawn on the court, so names stay readable when the court is small. */
+  resize(cssW) {
+    const dpr = Math.min(2, window.devicePixelRatio || 1), view = cssW > 0 ? clamp(cssW / CFG.W, 0.35, 1) : 1;
+    this.ui = clamp(1 / view, 1, 1.7);
+    const s = Math.round(dpr * view * 100) / 100;
+    if (this.floor && s === this.scale) return;
+    this.scale = s; this.cv.width = Math.round(CFG.W * s); this.cv.height = Math.round(CFG.H * s);
+    this.floor = this.makeFloor(s);
   }
   makeFloor(dpr) {
     const W = CFG.W, H = CFG.H, C = CFG.court, cx = (C.left + C.right) / 2;
@@ -779,8 +795,8 @@ class Renderer {
   }
 
   draw(g, now) {
-    const x = this.ctx, C = CFG.court, cx = (C.left + C.right) / 2, tm = now / 1000;
-    x.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const x = this.ctx, C = CFG.court, cx = (C.left + C.right) / 2, tm = now / 1000, ui = this.ui;
+    x.setTransform(this.scale, 0, 0, this.scale, 0, 0);
     if (g.shake > 0) { const s = g.shake * g.shake * 9; x.translate(rand(-s, s), rand(-s, s)); }
     x.drawImage(this.floor, 0, 0, CFG.W, CFG.H);
 
@@ -809,7 +825,7 @@ class Renderer {
         const by = C.top + 40 + i * 44;
         x.globalAlpha = 0.75; x.fillStyle = TEAM[team].deep; x.beginPath(); x.arc(bx, by, 12, 0, Math.PI * 2); x.fill();
         x.strokeStyle = 'rgba(255,255,255,0.5)'; x.lineWidth = 2; x.beginPath(); x.moveTo(bx - 5, by - 5); x.lineTo(bx + 5, by + 5); x.moveTo(bx + 5, by - 5); x.lineTo(bx - 5, by + 5); x.stroke();
-        x.globalAlpha = 0.6; x.fillStyle = '#fff'; x.font = '700 9px system-ui, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'top'; x.fillText(p.name, bx, by + 15);
+        x.globalAlpha = 0.6; x.fillStyle = '#fff'; x.font = `700 ${9 * ui}px system-ui, sans-serif`; x.textAlign = 'center'; x.textBaseline = 'top'; x.fillText(p.name, bx, by + 15);
         x.globalAlpha = 1;
       });
     }
@@ -831,13 +847,22 @@ class Renderer {
       }
     }
 
-    // aim guide for my armed body
+    // aim guide for my armed body: the arrow a touch player is dragging out, else the enemy the throw will take
     const h = g.me;
     if (h && g.phase === 'play' && h.active && h.ball && h.state === 'READY') {
-      const n = g.nearestEnemy(h);
-      if (n) { const best = n.e; x.save(); x.setLineDash([4, 8]); x.lineDashOffset = -tm * 40; x.strokeStyle = 'rgba(71,224,122,0.45)'; x.lineWidth = 2;
-        x.beginPath(); x.moveTo(h.x, h.y); x.lineTo(best.x, best.y); x.stroke(); x.setLineDash([]);
-        x.strokeStyle = 'rgba(71,224,122,0.8)'; x.beginPath(); x.arc(best.x, best.y, best.r + 9 + Math.sin(tm * 6) * 2, 0, Math.PI * 2); x.stroke(); x.restore(); }
+      x.save(); x.setLineDash([4, 8]); x.lineDashOffset = -tm * 40; x.lineWidth = 2 * ui;
+      if (g.aim) {
+        const L = 150, ex = h.x + g.aim.x * L, ey = h.y + g.aim.y * L, a = Math.atan2(g.aim.y, g.aim.x), s = 11 * ui;
+        x.strokeStyle = 'rgba(255,210,63,0.8)'; x.beginPath(); x.moveTo(h.x, h.y); x.lineTo(ex, ey); x.stroke(); x.setLineDash([]);
+        x.fillStyle = '#ffd23f'; x.beginPath(); x.moveTo(ex + Math.cos(a) * s, ey + Math.sin(a) * s);
+        x.lineTo(ex + Math.cos(a + 2.4) * s, ey + Math.sin(a + 2.4) * s); x.lineTo(ex + Math.cos(a - 2.4) * s, ey + Math.sin(a - 2.4) * s); x.closePath(); x.fill();
+      } else {
+        const n = g.nearestEnemy(h);
+        if (n) { const best = n.e; x.strokeStyle = 'rgba(71,224,122,0.45)';
+          x.beginPath(); x.moveTo(h.x, h.y); x.lineTo(best.x, best.y); x.stroke(); x.setLineDash([]);
+          x.strokeStyle = 'rgba(71,224,122,0.8)'; x.beginPath(); x.arc(best.x, best.y, best.r + 9 + Math.sin(tm * 6) * 2, 0, Math.PI * 2); x.stroke(); }
+      }
+      x.restore();
     }
 
     // loose balls, then players, then held balls on top (in the hand)
@@ -858,7 +883,7 @@ class Renderer {
 
     // floating text
     x.textAlign = 'center'; x.textBaseline = 'middle';
-    for (const f of g.floats) { const k = clamp(f.life / f.max, 0, 1); x.globalAlpha = Math.min(1, k * 2); x.font = `900 ${f.size}px ${FONT}`;
+    for (const f of g.floats) { const k = clamp(f.life / f.max, 0, 1); x.globalAlpha = Math.min(1, k * 2); x.font = `900 ${f.size * ui}px ${FONT}`;
       x.lineWidth = 4; x.strokeStyle = 'rgba(0,0,0,0.6)'; x.strokeText(f.text, f.x, f.y); x.fillStyle = f.color; x.fillText(f.text, f.x, f.y); }
     x.globalAlpha = 1;
 
@@ -873,20 +898,20 @@ class Renderer {
       x.font = `900 120px ${FONT}`; x.globalAlpha = 0.85; x.lineWidth = 8; x.strokeStyle = 'rgba(0,0,0,0.55)'; x.strokeText(g.lineCount, 0, 0);
       x.fillStyle = '#ffd23f'; x.fillText(g.lineCount, 0, 0); x.restore();
     }
-    if (g.subBanner) { x.font = `800 20px ${FONT}`; x.fillStyle = 'rgba(0,0,0,0.55)'; const w = 360; x.beginPath(); x.roundRect(cx - w / 2, C.top + 12, w, 36, 8); x.fill();
-      x.fillStyle = '#ffd23f'; x.fillText(g.subBanner.text.toUpperCase(), cx, C.top + 30); }
+    if (g.subBanner) { const w = 360 * ui, hh = 36 * ui; x.font = `800 ${20 * ui}px ${FONT}`; x.fillStyle = 'rgba(0,0,0,0.55)'; x.beginPath(); x.roundRect(cx - w / 2, C.top + 12, w, hh, 8); x.fill();
+      x.fillStyle = '#ffd23f'; x.fillText(g.subBanner.text.toUpperCase(), cx, C.top + 12 + hh / 2); }
 
     // banner
     const bn = g.banner;
     if (bn) {
-      const tin = clamp(bn.t / 0.28, 0, 1), tout = clamp((bn.dur - bn.t) / 0.3, 0, 1), a = Math.min(tin, tout), sc = easeOutBack(tin);
-      const y = (C.top + C.bottom) / 2 - (bn.sub ? 12 : 0);
-      x.save(); x.globalAlpha = a * 0.75; x.fillStyle = 'rgba(8,10,14,0.9)'; x.fillRect(C.left, y - 62, C.right - C.left, bn.sub ? 130 : 110);
-      x.globalAlpha = a; x.fillStyle = bn.color; x.fillRect(C.left, y - 62, C.right - C.left, 3); x.fillRect(C.left, y + (bn.sub ? 66 : 46), C.right - C.left, 3);
+      const tin = clamp(bn.t / 0.28, 0, 1), tout = clamp((bn.dur - bn.t) / 0.3, 0, 1), a = Math.min(tin, tout), sc = easeOutBack(tin), bs = 1 + (ui - 1) * 0.5;
+      const y = (C.top + C.bottom) / 2 - (bn.sub ? 12 : 0) * bs;
+      x.save(); x.globalAlpha = a * 0.75; x.fillStyle = 'rgba(8,10,14,0.9)'; x.fillRect(C.left, y - 62 * bs, C.right - C.left, (bn.sub ? 130 : 110) * bs);
+      x.globalAlpha = a; x.fillStyle = bn.color; x.fillRect(C.left, y - 62 * bs, C.right - C.left, 3); x.fillRect(C.left, y + (bn.sub ? 66 : 46) * bs, C.right - C.left, 3);
       x.translate(cx, y); x.scale(sc, sc);
-      x.font = `900 ${bn.size}px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.font = `900 ${bn.size * bs}px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'middle';
       x.shadowColor = bn.color; x.shadowBlur = 24; x.fillStyle = bn.color; x.fillText(bn.text, 0, 0); x.shadowBlur = 0;
-      if (bn.sub) { x.font = `600 18px ${FONT}`; x.fillStyle = 'rgba(255,255,255,0.85)'; x.fillText(bn.sub, 0, 50); }
+      if (bn.sub) { x.font = `600 ${18 * bs}px ${FONT}`; x.fillStyle = 'rgba(255,255,255,0.85)'; x.fillText(bn.sub, 0, 50 * bs); }
       x.restore();
     }
   }
@@ -908,7 +933,7 @@ class Renderer {
   }
 
   drawPlayer(p, g, tm) {
-    const x = this.ctx, T = TEAM[p.team], k = p.knocked, isMe = p === g.me, accent = p.isHuman && AVATARS[p.avatar] ? hex(AVATARS[p.avatar].color) : null;
+    const x = this.ctx, T = TEAM[p.team], k = p.knocked, isMe = p === g.me, accent = p.isHuman && AVATARS[p.avatar] ? hex(AVATARS[p.avatar].color) : null, ui = this.ui;
     x.save(); x.translate(p.x, p.y);
     if (k) { x.globalAlpha = clamp(1 - (k.t - 0.35) / 0.5, 0, 1); x.rotate(k.spin); }
     // feet
@@ -943,14 +968,15 @@ class Renderer {
     x.restore();
 
     // stamina bar
-    const bw = 32, bh = 4, by = p.y + p.r + 12;
+    const bw = 32 * ui, bh = 4 * ui, by = p.y + p.r + 12;
     x.fillStyle = 'rgba(0,0,0,0.55)'; x.beginPath(); x.roundRect(p.x - bw / 2 - 1, by - 1, bw + 2, bh + 2, 2); x.fill();
     const st = p.stamina; x.fillStyle = st > 0.5 ? '#47e07a' : st > 0.2 ? '#ffd23f' : '#ff4d5a'; if (p.sprinting) x.fillStyle = '#9dffbd';
     x.fillRect(p.x - bw / 2, by, bw * st, bh);
     // name (humans a little bolder than CPUs, mine white with a marker)
-    x.font = `${isMe ? 800 : p.isHuman ? 700 : 600} 11px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'bottom';
-    x.fillStyle = 'rgba(0,0,0,0.6)'; x.fillText(p.name, p.x + 1, p.y - p.r - 9 + 1); x.fillStyle = isMe ? '#fff' : p.isHuman ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.75)'; x.fillText(p.name, p.x, p.y - p.r - 9);
-    if (isMe) { const yy = p.y - p.r - 24 + Math.sin(tm * 5) * 2; x.fillStyle = '#fff'; x.beginPath(); x.moveTo(p.x - 5, yy - 6); x.lineTo(p.x + 5, yy - 6); x.lineTo(p.x, yy); x.closePath(); x.fill(); }
+    const ny = p.y - p.r - 6 - 3 * ui;
+    x.font = `${isMe ? 800 : p.isHuman ? 700 : 600} ${Math.round(11 * ui)}px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'bottom';
+    x.fillStyle = 'rgba(0,0,0,0.6)'; x.fillText(p.name, p.x + 1, ny + 1); x.fillStyle = isMe ? '#fff' : p.isHuman ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.75)'; x.fillText(p.name, p.x, ny);
+    if (isMe) { const yy = ny - 15 * ui + Math.sin(tm * 5) * 2, m = 5 * ui; x.fillStyle = '#fff'; x.beginPath(); x.moveTo(p.x - m, yy - m * 1.2); x.lineTo(p.x + m, yy - m * 1.2); x.lineTo(p.x, yy); x.closePath(); x.fill(); }
     // sprint dust
     if (p.sprinting && p.moving > 0.5) { p.dustT -= 1 / 60; if (p.dustT <= 0) { p.dustT = 0.06; g.particles.push({ x: p.x - Math.cos(p.face) * 10 + rand(-4, 4), y: p.y + 8 + rand(-3, 3), vx: -Math.cos(p.face) * 30 + rand(-20, 20), vy: rand(-25, -5), life: 0.45, max: 0.45, size: 4, color: 'rgba(230,210,180,0.5)', type: 'dot' }); } }
   }
@@ -963,6 +989,7 @@ const HUD = `
     <div class="team blue"><span class="name">BLUE</span><span class="pips" data-pips="blue"></span><span class="score" data-score="blue">0</span></div>
     <div class="mid"><div class="count" data-count><span class="b">3</span><span class="v">v</span><span class="r">3</span></div><div class="sub" data-sub>Round 1 · 0:00</div></div>
     <div class="team red"><span class="score" data-score="red">0</span><span class="pips" data-pips="red"></span><span class="name">RED</span></div>
+    <div class="menu-btn ctl" data-menu>☰</div>
   </header>
   <div class="court">
     <canvas width="1040" height="640"></canvas>
@@ -973,28 +1000,43 @@ const HUD = `
     <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>Shift</kbd> sprint &nbsp; <kbd>Space</kbd> throw at nearest enemy &nbsp; <kbd>M</kbd> sound <span data-keys></span></div>
     <div class="right"><span class="snd" data-snd>🔊 sound on</span><span data-role></span><span class="fps" data-fps>— fps</span></div>
   </footer>
-</div>`;
+</div>
+<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl">DRAG HERE TO MOVE</div></div>
+<div class="tbtn ctl sprint" data-sprint>SPRINT</div>
+<div class="tbtn ctl throw" data-throw><b>THROW</b><small>➜</small></div>
+<div class="overlay pause" data-pause><div class="card"><h1>MENU</h1><div data-pause-btns></div></div></div>
+<div class="overlay rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>DODGEBALL PLAYS IN LANDSCAPE</small></div></div>`;
 
 export async function create({ mount, audio, send, hooks }) {
   const unloadCss = await loadStylesheet('/games/dodgeball/dodgeball.css');
-  const root = document.createElement('div'); root.className = 'db'; root.innerHTML = HUD; mount.appendChild(root);
+  const touch = isCoarse(); // phones and tablets: the thumb stick, SPRINT, THROW and ☰ appear and the keyboard footer goes
+  const root = document.createElement('div'); root.className = 'db' + (touch ? ' touch' : ''); root.innerHTML = HUD; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
   const dom = { count: $('[data-count]'), sub: $('[data-sub]'), score: { blue: $('[data-score="blue"]'), red: $('[data-score="red"]') }, pips: { blue: $('[data-pips="blue"]'), red: $('[data-pips="red"]') },
     status: $('.status'), stext: $('[data-stext]'), shint: $('[data-shint]'), charge: $('.charge > i'), fps: $('[data-fps]'), snd: $('[data-snd]'), keys: $('[data-keys]'), role: $('[data-role]'),
-    result: $('.result'), resTitle: $('[data-res-title]'), resSub: $('[data-res-sub]'), resFoot: $('[data-res-foot]') };
+    result: $('.result'), resTitle: $('[data-res-title]'), resSub: $('[data-res-sub]'), resFoot: $('[data-res-foot]'),
+    throwBtn: $('[data-throw]'), menuBtn: $('[data-menu]'), pause: $('[data-pause]'), pauseBtns: $('[data-pause-btns]') };
   const sfx = createSfx(audio);
-  const R = new Renderer($('canvas'));
-  const onResize = () => R.resize(); addEventListener('resize', onResize);
+  const canvas = $('canvas'), R = new Renderer(canvas);
+  /* the backing store follows the size the canvas is shown at, and the court's labels grow when it is small */
+  const fit = () => R.resize(canvas.clientWidth);
+  addEventListener('resize', fit);
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null; ro?.observe(canvas);
 
   let game = null, session = null, isHost = false, online = false, hostId = null, myId = null;
   const canRestart = () => !online || isHost;
 
-  /* ---- input */
+  /* ---- input: the keyboard, plus the touch controls on a coarse-pointer screen */
   const setSnd = () => { dom.snd.textContent = audio.muted ? '🔇 sound off' : '🔊 sound on'; };
-  const throwPressed = () => { if (!game || game.phase !== 'play') return; if (isHost) game.requestThrow(game.me); else if (game.me) send({ t: 'th', to: hostId }); };
+  /* `dir` is a unit vector to throw along (a touch player who dragged THROW to aim); without one the host takes the nearest enemy */
+  const throwPressed = dir => {
+    if (!game || game.phase !== 'play') return;
+    if (isHost) game.requestThrow(game.me, dir);
+    else if (game.me) send(dir ? { t: 'th', to: hostId, dx: r2(dir.x), dy: r2(dir.y) } : { t: 'th', to: hostId });
+  };
   const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', ShiftLeft: 'sprint', ShiftRight: 'sprint' }, {
     onKey: e => {
-      if (e.code === 'Space') { e.preventDefault(); throwPressed(); }
+      if (e.code === 'Space') { e.preventDefault(); throwPressed(null); }
       else if (e.code === 'KeyM') { audio.toggle(); setSnd(); }
       else if (e.code === 'KeyR') hooks.onRestart?.();
       else if (e.code === 'Escape') hooks.onExit?.();
@@ -1003,11 +1045,54 @@ export async function create({ mount, audio, send, hooks }) {
   const held = kb.held;
   dom.snd.addEventListener('click', () => { audio.toggle(); setSnd(); });
 
+  /* touch: the left part of the screen is a thumb stick; SPRINT (hold) and THROW sit under the right thumb. THROW fires
+     when the finger lifts so that a drag can aim it: past AIM_PX the throw goes the way the finger went instead of at the
+     nearest enemy, and an arrow from the body shows where. A press with nothing to throw shakes the button, so a tap is
+     never silent. */
+  const tc = createTouch();
+  const AIM_PX = 28;
+  const shake = el => { el.classList.remove('nope'); void el.offsetWidth; el.classList.add('nope'); };
+  dom.throwBtn.addEventListener('animationend', () => dom.throwBtn.classList.remove('nope'));
+  const aimOf = st => { const d = hyp(st.dx, st.dy); return d > AIM_PX ? { x: st.dx / d, y: st.dy / d } : null; };
+  const canThrow = () => !!(game && game.phase === 'play' && game.me && game.me.active && game.me.ball);
+  const stickS = touch ? tc.pad($('[data-pad]'), { range: 60, dead: 6, axes: 2, onDown: () => audio.init() }) : null;
+  const sprintS = touch ? tc.button($('[data-sprint]'), { onDown: () => audio.init() }) : null;
+  const throwS = touch ? tc.button(dom.throwBtn, {
+    onDown: () => { audio.init(); if (!canThrow()) shake(dom.throwBtn); },
+    onUp: st => throwPressed(aimOf(st)), // the host decides whether there is a ball to throw: a client's own view can lag a pickup
+  }) : null;
+  /* what my body is told to do this frame: the keys, or the stick and the buttons */
+  function readWant() {
+    let x = (held.right ? 1 : 0) - (held.left ? 1 : 0), y = (held.down ? 1 : 0) - (held.up ? 1 : 0), sprint = !!held.sprint;
+    if (touch) { if (!x && !y && stickS.held) { x = r1(stickS.x); y = r1(stickS.y); } sprint = sprint || sprintS.held; }
+    return { x, y, sprint };
+  }
+  let aimShown = false;
+  function syncTouch() {
+    if (!touch) return;
+    const aim = throwS.held && canThrow() ? aimOf(throwS) : null; game.aim = aim;
+    if (!!aim !== aimShown) { aimShown = !!aim; dom.throwBtn.classList.toggle('aim', aimShown); }
+    if (aim) dom.throwBtn.style.setProperty('--aim', `${Math.round(Math.atan2(aim.y, aim.x) * 180 / Math.PI)}deg`);
+    const me = game.me, armed = !!(me && me.active && me.ball && game.phase === 'play');
+    dom.throwBtn.classList.toggle('has', armed); dom.throwBtn.classList.toggle('ready', armed && me.state === 'READY');
+  }
+
+  /* ☰: a card with what M, R and Esc do on a keyboard; the match keeps running underneath */
+  function renderMenu() {
+    const f = dom.pauseBtns; f.innerHTML = '';
+    const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
+    btn('RESUME', 'primary', () => showMenu(false));
+    btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); setSnd(); renderMenu(); });
+    if (canRestart()) { btn(!online ? 'RESTART' : 'PLAY AGAIN', '', () => { showMenu(false); hooks.onRestart?.(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
+  }
+  function showMenu(on) { dom.pause.classList.toggle('show', on); if (on) { tc.releaseAll(); renderMenu(); } }
+  if (touch) { dom.menuBtn.addEventListener('click', () => { audio.init(); showMenu(!dom.pause.classList.contains('show')); }); dom.pause.addEventListener('click', e => { if (e.target === dom.pause) showMenu(false); }); }
+
   /* ---- networking glue */
   let netAcc = 0, lastSent = null, sinceSent = 0;
   function hostNetTick(dt) {
     if (!online) { game.events.length = 0; return; }
-    netAcc += dt; if (netAcc < 1 / CFG.netHz) return; netAcc = 0;
+    netAcc += dt; if (netAcc < 1 / CFG.netHz - 0.002) return; netAcc = Math.max(0, netAcc - 1 / CFG.netHz); // carry the remainder: a 30 Hz ticker's 33 ms steps must not skip every other send
     send(game.packSnapshot());
   }
   function clientSendInput(want, dt) {
@@ -1025,8 +1110,9 @@ export async function create({ mount, audio, send, hooks }) {
     dom.resTitle.textContent = `${TEAM[w].name} WINS`; dom.resTitle.style.color = TEAM[w].color; dom.resSub.textContent = `${game.score.blue} – ${game.score.red}`;
     const f = dom.resFoot; f.innerHTML = '';
     const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
-    if (!online) { btn('PLAY AGAIN  (R)', 'primary', () => hooks.onRestart?.()); btn('MENU  (ESC)', '', () => hooks.onExit?.()); }
-    else if (isHost) { btn('PLAY AGAIN  (R)', 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY  (ESC)', '', () => hooks.onExit?.()); }
+    const key = k => touch ? '' : `  (${k})`;
+    if (!online) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('MENU' + key('ESC'), '', () => hooks.onExit?.()); }
+    else if (isHost) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY' + key('ESC'), '', () => hooks.onExit?.()); }
     else f.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
   }
   function syncDom() {
@@ -1039,24 +1125,31 @@ export async function create({ mount, audio, send, hooks }) {
     let sub = `Round ${game.round} · ${fmtClock(game.time)} · ${game.ballsInPlay()} balls`;
     if (game.lineDown) sub += ' · <span class="down">LINE DOWN</span>'; else if (game.lineCount !== null) sub += ` · <span class="warn">LINE DROPS IN ${game.lineCount}</span>`;
     if (cache.sub !== sub) { cache.sub = sub; dom.sub.innerHTML = sub; }
-    const st = game.status(canRestart());
+    const st = game.status(canRestart(), touch);
     if (cache.cls !== st.cls) { cache.cls = st.cls; dom.status.className = 'status ' + st.cls; }
     setText('stext', dom.stext, st.text); setText('shint', dom.shint, st.hint || '');
     if (st.charge !== undefined) dom.charge.style.width = `${Math.round(st.charge * 100)}%`;
-    const showRes = !!game.matchWinner && game.phaseT > 1.2;
+    const over = !!game.matchWinner; if (cache.over !== over) { cache.over = over; root.classList.toggle('over', over); } // hides the touch controls
+    const showRes = over && game.phaseT > 1.2;
     if (showRes !== !dom.result.hidden) { dom.result.hidden = !showRes; if (showRes) renderResult(); }
   }
 
-  /* ---- main loop */
-  let fpsAcc = 0, fpsN = 0, fpsAt = 0;
-  const loop = createLoop((real, now) => {
-    if (!game) return;
-    const dt = Math.min(0.05, real);
-    const me = game.me;
-    const want = { x: (held.right ? 1 : 0) - (held.left ? 1 : 0), y: (held.down ? 1 : 0) - (held.up ? 1 : 0), sprint: !!held.sprint };
+  /* ---- main loop. The simulation advances by the wall clock (`simAt`): from the frame loop while the tab is visible and,
+     for an online host, from a worker timer while it is hidden (requestAnimationFrame stops there), so the match goes on
+     for everyone else while the host glances at another app. */
+  let simAt = 0, fpsAcc = 0, fpsN = 0, fpsAt = 0;
+  function step(now) {
+    const dt = clamp((now - simAt) / 1000, 0, 0.05); simAt = now;
+    const me = game.me, want = readWant();
     if (isHost) { if (me) me.want = want; game.update(dt); hostNetTick(dt); }
     else { if (me) clientSendInput(want, dt); game.updateClient(dt); }
-    R.draw(game, now); syncDom();
+    return dt;
+  }
+  const ticker = createTicker(CFG.netHz, () => { if (game && online && isHost && document.hidden) step(performance.now()); });
+  const loop = createLoop((real, now) => {
+    if (!game) return;
+    const dt = step(now);
+    syncTouch(); R.draw(game, now); syncDom();
     fpsAcc += dt; fpsN++;
     if (now - fpsAt > 500) { dom.fps.textContent = `${Math.round(fpsN / Math.max(fpsAcc, 1e-3))} fps`; fpsAcc = 0; fpsN = 0; fpsAt = now; }
   });
@@ -1065,24 +1158,24 @@ export async function create({ mount, audio, send, hooks }) {
   function start(s) {
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId;
     game = new Game(buildRoster(s), { opts: s.opts || {}, sfx, isHost, online, myId });
-    for (const k of Object.keys(cache)) delete cache[k]; netAcc = 0; lastSent = null; sinceSent = 1;
-    buildPips(); dom.result.hidden = true; setSnd();
+    for (const k of Object.keys(cache)) delete cache[k]; netAcc = 0; lastSent = null; sinceSent = 1; simAt = performance.now();
+    buildPips(); dom.result.hidden = true; root.classList.remove('over'); setSnd(); showMenu(false);
     dom.keys.innerHTML = !online ? '&nbsp; <kbd>R</kbd> restart &nbsp; <kbd>Esc</kbd> menu' : isHost ? '&nbsp; <kbd>R</kbd> again &nbsp; <kbd>Esc</kbd> lobby' : '';
     dom.role.textContent = !online ? 'solo' : isHost ? 'hosting' : `${session.players.length} players`;
-    audio.init(); kb.attach(); loop.start();
+    audio.init(); kb.attach(); if (touch) tc.attach(); loop.start(); if (online && isHost) ticker.start(); else ticker.stop(); fit();
   }
-  function stop() { session = null; game = null; kb.detach(); loop.stop(); dom.result.hidden = true; }
-  function destroy() { stop(); removeEventListener('resize', onResize); root.remove(); mount.innerHTML = ''; unloadCss(); }
+  function stop() { session = null; game = null; kb.detach(); tc.detach(); ticker.stop(); loop.stop(); showMenu(false); dom.result.hidden = true; }
+  function destroy() { stop(); ticker.dispose(); ro?.disconnect(); removeEventListener('resize', fit); root.remove(); mount.innerHTML = ''; unloadCss(); if (window.__dodgeball === debug) delete window.__dodgeball; }
   function playerLeft(pid) { if (game && isHost) { const p = game.playerOf(pid); if (p) game.toAI(p); } } // clients learn it from the next snapshot
   function onNetMessage(msg) {
     if (!game) return;
     switch (msg.t) {
       case 's': if (!isHost && msg.from === hostId) game.applySnapshot(msg); break;
       case 'in': if (isHost) { const p = game.playerOf(msg.from); if (p) p.want = { x: clamp(Number(msg.x) || 0, -1, 1), y: clamp(Number(msg.y) || 0, -1, 1), sprint: !!msg.s }; } break;
-      case 'th': if (isHost) game.requestThrow(game.playerOf(msg.from)); break;
+      case 'th': if (isHost) { const dx = Number(msg.dx), dy = Number(msg.dy), d = hyp(dx, dy); game.requestThrow(game.playerOf(msg.from), d > 0.5 && d < 2 ? { x: dx / d, y: dy / d } : null); } break;
     }
   }
-  const debug = { get game() { return game; }, get session() { return session; }, CFG };
+  const debug = { get game() { return game; }, get session() { return session; }, CFG, renderer: R, loop, touch: { on: touch, stick: stickS, sprint: sprintS, throw: throwS, showMenu } };
   window.__dodgeball = debug;
   return { start, stop, destroy, onNetMessage, playerLeft, debug };
 }

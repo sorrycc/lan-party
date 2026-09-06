@@ -139,17 +139,33 @@ async function ensureGame(game) {
 function destroyGame() { gen++; if (S.game) { try { S.game.destroy(); } catch (e) { console.error(e); } } S.game = null; S.gameMeta = null; S.loading = null; $('stage').innerHTML = ''; }
 const loadError = (game, e) => { console.error(e); return `Could not load ${game.title}: ${e.message}`; };
 
+/* ---------------------------------------------------------------- screen wake lock
+   A race can go a long stretch with no touch at all (Frostline Kart drives itself on a phone), so the screen dims and
+   locks mid-game. The lock is dropped by the browser whenever the page hides, so it is taken again on the way back, and
+   Safari refuses one outside a user gesture, so a refusal is retried on the next tap. */
+let wakeLock = null, wakeWanted = false;
+async function wakeAcquire() {
+  if (!wakeWanted || wakeLock || !navigator.wakeLock || document.hidden) return;
+  try { const l = await navigator.wakeLock.request('screen'); if (!wakeWanted) { l.release().catch(() => {}); return; } wakeLock = l; l.addEventListener('release', () => { if (wakeLock === l) wakeLock = null; }); }
+  catch {}
+}
+function wakeKeep(on) {
+  wakeWanted = on;
+  if (on) wakeAcquire();
+  else if (wakeLock) { const l = wakeLock; wakeLock = null; l.release().catch(() => {}); }
+}
+
 /* ---------------------------------------------------------------- solo */
 const newSeed = () => (Math.random() * 0x100000000) >>> 0;
 const soloSession = () => { const g = curGame(); return { players: [{ id: 'me', name: S.name, avatar: S.avatar, team: g.teams ? g.teams[0].id : undefined }], myId: 'me', hostId: 'me', isHost: true, online: false, opts: cleanOpts(g, soloOpts(), defaultOpts(g)), seed: newSeed() }; };
 async function startSolo() {
   readName(); const game = curGame(); if (game.minPlayers > 1) { setStatus(`${game.title} needs at least ${game.minPlayers} players`); return; }
   S.mode = 'solo'; setStatus('Loading…', true); audio.init();
-  try { const inst = await ensureGame(game); if (!inst || S.mode !== 'solo') return; S.playing = true; inst.start(soloSession()); show(null); }
+  try { const inst = await ensureGame(game); if (!inst || S.mode !== 'solo') return; S.playing = true; wakeKeep(true); inst.start(soloSession()); show(null); }
   catch (e) { S.mode = 'menu'; setStatus(loadError(game, e)); }
 }
 function leaveToMenu(msg) {
-  S.playing = false; S.mode = 'menu'; destroyGame();
+  S.playing = false; wakeKeep(false); S.mode = 'menu'; destroyGame();
   if (S.net) { S.net.close(); S.net = null; } S.id = null; S.room = null; S.hostId = null; S.players = []; S.opts = {};
   renderStart(); show('start', msg);
 }
@@ -166,12 +182,12 @@ async function connect() {
   });
   net.on('lobby', m => { S.players = m.players; S.hostId = m.hostId; S.opts = m.opts || {}; S.room = m.room; if (gameById(m.game)) S.gameId = m.game; const me = meP(); if (me) { S.avatar = me.avatar; savePrefsNow(); } renderLobby(); });
   net.on('start', async m => {
-    S.hostId = m.hostId; S.playing = true; audio.init(); const game = curGame();
+    S.hostId = m.hostId; S.playing = true; wakeKeep(true); audio.init(); const game = curGame();
     const session = { players: m.players, myId: S.id, hostId: m.hostId, isHost: isHost(), online: true, opts: m.opts || {}, seed: (m.seed >>> 0) || newSeed() };
     try { const inst = await ensureGame(game); if (!inst || !S.playing || S.mode !== 'online') return; inst.start(session); show(null); }
     catch (e) { $('lobbyStatus').textContent = loadError(game, e); }
   });
-  net.on('end', () => { S.playing = false; if (S.game) S.game.stop(); renderLobby(); show('lobby'); });
+  net.on('end', () => { S.playing = false; wakeKeep(false); if (S.game) S.game.stop(); renderLobby(); show('lobby'); });
   net.on('left', m => { if (S.playing && S.game) S.game.playerLeft(m.id); });
   net.on('closed', m => leaveToMenu(m.reason || 'The room was closed'));
   net.on('error', m => { setStatus(m.msg || 'Error'); $('lobbyStatus').textContent = m.msg || ''; });
@@ -196,11 +212,11 @@ $('btnReady').onclick = () => { const me = meP(); S.net.send({ t: 'lobby', ready
 $('btnStart').onclick = () => S.net.send({ t: 'start' });
 $('btnLeave').onclick = () => { S.net.send({ t: 'leave' }); leaveToMenu(); };
 /* browsers only unlock audio inside a user gesture; iOS counts touchend and click but not always the pointerdown before them */
-document.addEventListener('pointerdown', () => audio.init());
+document.addEventListener('pointerdown', () => { audio.init(); wakeAcquire(); }); // a tap is also the gesture Safari wants for the wake lock
 document.addEventListener('touchend', () => audio.init(), { passive: true });
 document.addEventListener('click', () => audio.init());
 document.addEventListener('keydown', () => audio.init());
-document.addEventListener('visibilitychange', () => { if (!document.hidden) audio.init(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { audio.init(); wakeAcquire(); } }); // the browser drops the wake lock while hidden
 renderStart(); show('start');
 if (/^#[A-Za-z]{4}$/.test(location.hash)) { // arrived by a scanned lobby code: fill it in and point at JOIN
   $('codeIn').value = location.hash.slice(1).toUpperCase(); $('btnJoin').classList.add('hot'); setStatus('Room code filled in from the link. Press JOIN ROOM.', true);

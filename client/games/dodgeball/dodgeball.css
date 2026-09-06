@@ -1,14 +1,25 @@
 /* Dodgeball 3v3 HUD. Loaded by the game module while it is mounted; everything is scoped under .db so the
-   shell's own #status / .players styles are untouched. The shell supplies .btn for the result buttons. */
+   shell's own #status / .players styles are untouched. The shell supplies .btn for the result buttons.
+   `.db.touch` is set by the game on coarse-pointer devices (phones and tablets): the thumb stick, SPRINT, THROW and the
+   ☰ menu appear and the keyboard footer goes. Every edge offset adds the device's safe-area inset (notch, home indicator).
+   A short viewport (a phone in landscape) gets the compact layout at the end of this file: the score and the status float
+   over the court's crowd strips, so the court itself is as big as the screen allows. */
 .db { --bg: #0e1116; --panel: #151a22; --ink: #e8ecf1; --muted: #8a94a6; --blue: #3d8bff; --red: #ff4d5a; --yellow: #ffd23f; --green: #47e07a;
+  --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px);
+  /* the thumb buttons stay clear of Safari's edge-swipe zones even where the safe-area insets are zero (an iPad in a browser tab) */
+  --edge-r: max(22px + var(--sa-r), 40px); --edge-b: max(22px + var(--sa-b), 40px);
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--bg); color: var(--ink);
-  font-family: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif; user-select: none; }
-/* the court keeps its 1040x640 aspect: cap the width by the viewport height as well as its width */
-.db .app { width: min(100vw - 24px, 1040px, calc((100vh - 200px) * 1.625)); display: flex; flex-direction: column; gap: 8px; }
+  font-family: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.db.touch { touch-action: none; }
+/* the court keeps its 1040x640 aspect: cap the width by the viewport height as well as its width. The dynamic viewport height,
+   where the browser has it, is what Safari's toolbar leaves visible. */
+.db .app { position: relative; width: min(100vw - 24px, 1040px, calc((100vh - 200px) * 1.625)); display: flex; flex-direction: column; gap: 8px; }
+@supports (height: 100dvh) { .db .app { width: min(100vw - 24px, 1040px, calc((100dvh - 200px) * 1.625)); } }
 
-.db header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+.db header { position: relative; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
   background: linear-gradient(180deg, #1b212b, #12171f); border: 1px solid #262e3a; border-radius: 12px;
   padding: 8px 18px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+.db.touch header { padding-left: 64px; padding-right: 64px; } /* room for ☰ on the right; the same on the left keeps the middle centred */
 .db .team { display: flex; align-items: center; gap: 12px; }
 .db .team.red { justify-content: flex-end; }
 .db .team .name { font-weight: 800; letter-spacing: .12em; font-size: 20px; white-space: nowrap; }
@@ -28,16 +39,19 @@
 .db .mid .sub { font-size: 12px; color: var(--muted); letter-spacing: .18em; margin-top: 4px; text-transform: uppercase; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .db .mid .sub .warn { color: var(--yellow); }
 .db .mid .sub .down { color: var(--red); }
+/* ☰ (touch only): sound, play again, leave */
+.db .menu-btn { right: 10px; top: 50%; transform: translateY(-50%); width: 44px; height: 32px; border-radius: 9px; border: 2px solid rgba(255,255,255,.3); background: rgba(255,255,255,.06); color: #fff; font-size: 16px; line-height: 28px; text-align: center; z-index: 7; }
 
 .db .court { position: relative; }
 .db canvas { width: 100%; height: auto; display: block; border-radius: 14px; box-shadow: 0 16px 50px rgba(0,0,0,.55), 0 0 0 1px #262e3a; background: #0b0d11; }
 
-/* match result card, over the lower half of the court */
-.db .result { position: absolute; left: 50%; bottom: 10%; transform: translateX(-50%); min-width: 320px; text-align: center; padding: 16px 26px 18px;
+/* match result card, over the lower half of the court (above the thumb stick's zone) */
+.db .result { position: absolute; z-index: 8; left: 50%; bottom: 10%; transform: translateX(-50%); min-width: 320px; text-align: center; padding: 16px 26px 18px;
   background: rgba(8,10,14,.92); border: 1px solid #2c3542; border-radius: 16px; box-shadow: 0 16px 50px rgba(0,0,0,.6); animation: db-pop .35s ease-out; }
 .db .result h1 { margin: 0; font-size: 30px; font-weight: 900; letter-spacing: .1em; }
 .db .result h2 { margin: 4px 0 12px; font-size: 22px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
 .db .result .foot { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); letter-spacing: .08em; }
+.db .result .foot .btn { touch-action: manipulation; }
 @keyframes db-pop { 0% { transform: translateX(-50%) scale(.85); opacity: 0; } 100% { transform: translateX(-50%) scale(1); opacity: 1; } }
 
 .db .status { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 44px; padding: 0 14px; white-space: nowrap; overflow: hidden;
@@ -52,6 +66,8 @@
 .db .charge { width: 120px; height: 8px; background: #2a2a1f; border-radius: 4px; overflow: hidden; display: none; }
 .db .charge > i { display: block; height: 100%; width: 0%; background: var(--yellow); box-shadow: 0 0 10px var(--yellow); }
 .db .status.arming .charge { display: block; }
+/* on a tablet in landscape SPRINT and THROW sit over the right end of the status bar: keep its text left of them */
+@media (orientation: landscape) { .db.touch .status { padding: 0 26% 0 3%; } }
 
 .db footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; line-height: 20px; color: var(--muted); padding: 0 6px; letter-spacing: .04em; white-space: nowrap; }
 .db footer > div:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -59,3 +75,78 @@
 .db footer .right { display: flex; gap: 14px; font-variant-numeric: tabular-nums; flex: none; }
 .db footer .fps { min-width: 52px; text-align: right; }
 .db footer .snd { cursor: pointer; }
+.db.touch footer { display: none; } /* the keys mean nothing here; sound lives in the ☰ menu */
+
+/* ---------------------------------------------------------------- touch controls (hidden unless .db has .touch) */
+.db .ctl { display: none; position: absolute; z-index: 6; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.db.touch .ctl { display: block; }
+/* the pointer target is always the control itself, never a child that may change mid-press (iOS Safari then drops the pointerup) */
+.db .ctl > * { pointer-events: none; }
+/* match over: nothing left to control, and the result card wants the space */
+.db.touch.over .pad, .db.touch.over .tbtn { display: none; }
+/* thumb stick: the left part of the screen; a ring appears where the finger lands and the knob follows it */
+.db .pad { left: 0; top: 0; bottom: 0; width: 45%; z-index: 5; --ox: 50%; --oy: 50%; --sx: 0; --sy: 0; }
+.db .pad .ring { position: absolute; left: var(--ox); top: var(--oy); width: 124px; height: 124px; margin: -62px 0 0 -62px; border-radius: 50%; border: 3px solid rgba(255,255,255,.4); background: rgba(6,10,28,.3); opacity: 0; transition: opacity .2s; }
+.db .pad.on .ring { opacity: 1; transition: none; }
+.db .pad .knob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; margin: -27px 0 0 -27px; border-radius: 50%; background: rgba(255,255,255,.92); box-shadow: 0 4px 12px rgba(0,0,0,.45); transform: translate(calc(var(--sx) * 36px), calc(var(--sy) * 36px)); }
+.db .pad .lbl { position: absolute; left: 50%; bottom: calc(24px + var(--sa-b)); transform: translateX(-50%); font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,.3); font-weight: 700; white-space: nowrap; }
+.db .pad.on .lbl { opacity: 0; }
+/* SPRINT (hold) and THROW (tap; drag to aim) under the right thumb */
+.db .tbtn { width: 92px; height: 92px; border-radius: 50%; border: 3px solid rgba(255,255,255,.4); background: rgba(6,10,28,.55); color: #fff; font-weight: 900; font-size: 14px; letter-spacing: 1px;
+  text-shadow: 0 2px 0 rgba(0,0,0,.45); align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
+.db.touch .tbtn { display: flex; }
+.db .tbtn.on { transform: scale(.94); }
+.db .sprint { right: calc(var(--edge-r) + 118px); bottom: var(--edge-b); }
+.db .sprint.on { background: rgba(157,255,189,.4); border-color: #9dffbd; }
+.db .throw { right: var(--edge-r); bottom: var(--edge-b); width: 104px; height: 104px; }
+.db .throw b { letter-spacing: 2px; }
+.db .throw.has { border-color: rgba(255,210,63,.7); }
+.db .throw.ready { border-color: var(--green); box-shadow: 0 0 18px rgba(71,224,122,.55), 0 4px 14px rgba(0,0,0,.35); }
+.db .throw.on { background: rgba(71,224,122,.4); }
+/* the aim arrow orbits the button's centre, pointing the way the finger went */
+.db .throw small { position: absolute; left: 50%; top: 50%; width: 24px; height: 24px; margin: -12px 0 0 -12px; font-size: 22px; line-height: 24px; text-align: center; color: var(--yellow); visibility: hidden; transform: rotate(var(--aim, 0deg)) translateX(34px); }
+.db .throw.aim { background: rgba(255,210,63,.35); border-color: var(--yellow); }
+.db .throw.aim small { visibility: visible; }
+/* a press with nothing to throw: a short shake instead of silence */
+@keyframes db-nope { 0%, 100% { transform: translateX(0); } 30% { transform: translateX(-6px); } 70% { transform: translateX(6px); } }
+.db .tbtn.nope { animation: db-nope .25s ease-in-out; }
+
+/* overlays: the ☰ menu card and the rotate prompt */
+.db .overlay { position: absolute; inset: 0; z-index: 25; display: none; align-items: center; justify-content: center; background: rgba(4,8,24,.6); padding: 12px; }
+.db .overlay.show { display: flex; }
+.db .overlay .card { background: rgba(8,12,34,.94); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 18px 22px 22px; min-width: 240px; max-width: 100%; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: db-card .3s ease-out; }
+.db .overlay .card h1 { margin: 0 0 12px; font-size: 24px; font-style: italic; letter-spacing: 4px; color: #ffd54a; }
+.db .overlay .card div { display: flex; flex-direction: column; gap: 8px; }
+.db .overlay .card .btn { font-size: 15px; padding: 10px 18px; touch-action: manipulation; }
+@keyframes db-card { 0% { transform: scale(.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+.db .rotate { z-index: 30; background: var(--bg); text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 3px; color: #fff; }
+.db .rotate .phone { font-size: 64px; margin-bottom: 14px; animation: db-rot 1.6s ease-in-out infinite alternate; }
+.db .rotate small { display: block; font-size: 11px; color: var(--muted); letter-spacing: 2px; margin-top: 10px; font-weight: 700; }
+@keyframes db-rot { from { transform: rotate(0); } to { transform: rotate(-90deg); } }
+@media (orientation: portrait) and (max-width: 760px) { .db.touch .rotate { display: flex; } } /* phones only; a tablet held upright still fits */
+
+/* ---------------------------------------------------------------- short viewports: a phone in landscape.
+   The header and the status float over the court's top and bottom crowd strips, the footer goes and the court takes the
+   whole height (less the home indicator). SPRINT stacks above THROW along the right edge so neither covers the court floor. */
+@media (max-height: 560px) {
+  .db { --edge-r: max(10px + var(--sa-r), 28px); --edge-b: max(10px + var(--sa-b), 22px); padding: var(--sa-t) 0 var(--sa-b); }
+  .db .app { width: min(100vw - 16px, calc((100vh - var(--sa-b) - var(--sa-t) - 10px) * 1.625)); gap: 0; }
+  @supports (height: 100dvh) { .db .app { width: min(100vw - 16px, calc((100dvh - var(--sa-b) - var(--sa-t) - 10px) * 1.625)); } }
+  .db header { position: absolute; top: 0; left: 0; right: 0; z-index: 7; padding: 3px 12px; background: linear-gradient(180deg, rgba(14,17,22,.88), rgba(14,17,22,.35)); border: 0; border-radius: 10px 10px 0 0; box-shadow: none; }
+  .db.touch header { padding-left: 50px; padding-right: 50px; }
+  .db .team { gap: 8px; } .db .team .name { font-size: 13px; letter-spacing: .08em; } .db .team .pips { gap: 3px; } .db .pip { width: 9px; height: 9px; } .db .team .score { font-size: 20px; min-width: 22px; }
+  .db .mid { padding: 0 12px; } .db .mid .count { font-size: 19px; } .db .mid .count .v { font-size: 12px; } .db .mid .sub { font-size: 9px; letter-spacing: .12em; margin-top: 1px; }
+  .db .menu-btn { width: 36px; height: 26px; line-height: 22px; font-size: 14px; right: 6px; }
+  .db .status, .db.touch .status { position: absolute; z-index: 7; left: 50%; bottom: 5px; transform: translateX(-50%); max-width: 62%; min-height: 26px; padding: 0 12px; gap: 8px; font-size: 12px; letter-spacing: .1em; background: rgba(14,17,22,.82); }
+  .db .status .hint { font-size: 10px; }
+  .db .charge { width: 60px; height: 5px; }
+  .db footer { display: none; }
+  .db canvas { border-radius: 10px; }
+  .db .result { min-width: 240px; padding: 10px 16px 12px; bottom: 16%; } .db .result h1 { font-size: 20px; } .db .result h2 { font-size: 15px; margin: 2px 0 8px; } .db .result .foot .btn.small { font-size: 12px; padding: 6px 10px; }
+  .db .pad { width: 40%; } .db .pad .ring { width: 108px; height: 108px; margin: -54px 0 0 -54px; } .db .pad .knob { width: 46px; height: 46px; margin: -23px 0 0 -23px; transform: translate(calc(var(--sx) * 30px), calc(var(--sy) * 30px)); } .db .pad .lbl { display: none; }
+  .db .tbtn { width: 70px; height: 70px; font-size: 12px; border-width: 2px; }
+  .db .throw { width: 84px; height: 84px; } .db .throw small { font-size: 20px; transform: rotate(var(--aim, 0deg)) translateX(28px); }
+  .db .sprint { right: calc(var(--edge-r) + 7px); bottom: calc(var(--edge-b) + 96px); }
+  .db .overlay .card { padding: 12px 16px 14px; border-radius: 16px; min-width: 200px; } .db .overlay .card h1 { font-size: 18px; margin-bottom: 8px; } .db .overlay .card .btn { font-size: 13px; padding: 8px 14px; }
+  .db .rotate .phone { font-size: 48px; }
+}

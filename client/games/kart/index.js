@@ -19,9 +19,10 @@
    the correction a fresh snapshot brings is hidden in a decaying visual offset. A client shows a ghost of its own throw
    until the host's copy arrives. Hits are decided by the victim's machine. F3 / I shows frame and network stats.
 
-   Touch screens (core/touch.js): the left side is a steering pad, gas is automatic, BRAKE and ITEM sit under the right thumb and the
-   item slot at the top left is a second ITEM button, ☰ opens a menu card, a phone held upright is asked to rotate, and rendering
-   starts a detail tier lower. */
+   Touch screens (core/touch.js): the left side is a steering pad (dead zone, curve and a sensitivity setting), gas is automatic,
+   BRAKE and ITEM sit under the right thumb and the item slot at the top left is a second ITEM button, holding anywhere else through
+   GO is the rocket start, ☰ opens a menu card, the first race explains itself, a phone held upright is asked to rotate, and
+   rendering starts a detail tier lower. The shell holds a screen wake lock while a game is running. */
 import * as THREE from 'three';
 import { clamp, lerp, wrapAngle, ordinal, makeRng } from '../../core/math.js';
 import { createToasts, esc, fmtTime, loadStylesheet } from '../../core/ui.js';
@@ -56,7 +57,9 @@ const HUD = `
 <div id="map" class="hud panel"><canvas id="mapCanvas" width="380" height="380"></canvas></div>
 <div id="toasts" class="hud"></div>
 <div id="count" class="hud"></div>
+<div id="startTip" class="hud"></div>
 <div id="kartcard" class="hud panel"><b id="kcName"></b><span id="kcClass"></span><div class="bars"><div><i>SPEED</i><u><s></s></u></div><div><i>ACCEL</i><u><s></s></u></div><div><i>HANDLING</i><u><s></s></u></div></div></div>
+<div id="help" class="hud panel"><h2>HOW TO PLAY</h2><dl></dl><button class="btn small" type="button">GOT IT</button></div>
 <div id="wrong" class="hud">⟲ WRONG WAY</div>
 <div id="hint" class="hud"></div>
 <div id="corner" class="hud"></div>
@@ -1369,7 +1372,9 @@ function resetRace() {
   for (const b of itemBoxes) { b.active = true; b.g.visible = true; b.hideUntil = 0; }
   for (const c of coins) { c.active = true; c.hideUntil = 0; }
   Object.assign(race, { state: 'countdown', t: 0, time: 0, stage: 0, shake: 0, placeCand: active.length, placeCandT: 0, shownPlace: active.length, resultsT: 0, humanScore: 0, zapCd: 0 });
-  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length); input.pressAt = -1; input.padAt = -1; input.up = input.down = input.left = input.right = false; tc.releaseAll();
+  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length);
+  holds.clear(); brakeMuted = false; input.up = input.down = input.left = input.right = false; tc.releaseAll(); drawStartTip();
+  showHelp(touch && !helpSeen);                                 // the very first race on this device explains the controls
   music.stop(); music.setTempo(1);
   karts.forEach(k => { k.startDelay = k.kind === 'ai' ? rr(0.05, 0.45) : 0; });
   camState.pos.copy(trackPoint(L - 40, 0)).add(new THREE.Vector3(0, 8, 0)); camState.init = true;
@@ -1444,9 +1449,23 @@ function drawStandings() {
 const canAct = () => race.state === 'race' && me.kind === 'local' && !me.finished;
 /* +1 throws forward, -1 backward; bananas default backward. `flip` is the brake key, the BRAKE button, or ITEM dragged down */
 const throwDir = (k, flip) => { const def = k.item === 'banana' ? -1 : 1; return flip ? -def : def; };
+/* The rocket start: a throttle hold that began while the "1" was on screen (the last second of the countdown) and is
+   still down when the lights go green. Every source that counts as holding the throttle stamps both clocks here, and a
+   press is young enough if either one says so: race time alone would age a press out when a client jumps its clock
+   forward to follow the host, and real time alone would age one out on a machine so slow that game time falls behind.
+   The freshest press is the one the boost is judged on, so a player who held too early can lift and press again inside
+   the window. On a touch screen the gas is automatic, so a finger held anywhere that is not an ITEM button or the menu
+   counts: the steering pad, BRAKE, or the bare screen. */
+const ROCKET_WINDOW = 1.0;
+const holds = new Map();
+const holdOn = src => { if (!holds.has(src)) holds.set(src, { real: nowSec(), race: race.t }); };
+const holdOff = src => holds.delete(src);
+const holdAge = () => { let a = Infinity; for (const h of holds.values()) a = Math.min(a, Math.max(0, Math.min(nowSec() - h.real, race.t - h.race))); return a; };
+const rocketHeld = () => holdAge() < ROCKET_WINDOW;
+const rocketEarly = () => holds.size > 0 && !rocketHeld();
 const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'item', Enter: 'item', KeyE: 'item' }, {
-  onDown: (name, e, wasHeld) => { audio.init(); if (name === 'up' && !wasHeld) input.pressAt = race.t; if (name === 'item' && !wasHeld && canAct()) itemPress(me); },
-  onUp: name => { if (name === 'up') input.pressAt = -1; if (name === 'item' && canAct()) itemRelease(me, throwDir(me, input.down)); },
+  onDown: (name, e, wasHeld) => { audio.init(); if (name === 'up' && !wasHeld) holdOn('key'); if (name === 'item' && !wasHeld && canAct()) itemPress(me); },
+  onUp: name => { if (name === 'up') holdOff('key'); if (name === 'item' && canAct()) itemRelease(me, throwDir(me, input.down)); },
   onKey: e => {
     audio.init();
     if (e.code === 'KeyR') restartKey();
@@ -1456,32 +1475,47 @@ const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'do
     if (e.code === 'KeyL') cycleQuality();
   },
 });
-const input = kb.held; input.pressAt = -1; input.padAt = -1;
+const input = kb.held;
 /* touch: the left side of the screen is a steering pad, the kart accelerates by itself, and BRAKE and ITEM sit under the right thumb.
    The item slot at the top left is a second ITEM button. Both work like the key: touch to deploy, lift to throw; drag down (or hold
    BRAKE) before lifting to throw the other way. A press with nothing to use (empty slot, roulette still spinning) shakes the button,
-   so a tap is never silent. A finger resting on the pad as the countdown hits GO is the rocket start. */
+   so a tap is never silent. */
 const tc = createTouch();
 const ITEM_FLIP_PX = 36;
-const padS = touch ? tc.pad($('pad'), { range: 80, onDown: () => { audio.init(); input.padAt = race.t; }, onUp: () => { input.padAt = -1; } }) : null;
-const brakeS = touch ? tc.button($('btnBrake'), { onDown: () => audio.init() }) : null;
+/* how far the thumb travels for full lock; a smaller range steers harder. The pad's dead zone swallows the wobble of a
+   thumb landing and its curve keeps the first few degrees fine, so a small correction stays small. */
+const STEER = [{ name: 'LOW', range: 112 }, { name: 'NORMAL', range: 78 }, { name: 'HIGH', range: 56 }];
+let steerLevel = 1;
+{ let saved = null; try { saved = localStorage.getItem('lan_kart_steer'); } catch {} if (saved !== null && STEER[+saved]) steerLevel = +saved; }
+const padS = touch ? tc.pad($('pad'), { range: STEER[steerLevel].range, dead: 5, curve: 1.6, onDown: () => { audio.init(); holdOn('pad'); }, onUp: () => holdOff('pad') }) : null;
+function cycleSteer() {
+  steerLevel = (steerLevel + 1) % STEER.length; try { localStorage.setItem('lan_kart_steer', String(steerLevel)); } catch {}
+  if (padS) padS.range = STEER[steerLevel].range;
+  toast('STEERING: ' + STEER[steerLevel].name, 'blue');
+}
+const steerLabel = () => 'STEERING: ' + STEER[steerLevel].name;
+/* a thumb resting on BRAKE for the start hold must not brake the instant the lights go green: that press is ignored until it lifts */
+let brakeMuted = false;
+const brakeS = touch ? tc.button($('btnBrake'), { onDown: () => { audio.init(); holdOn('brake'); }, onUp: () => { holdOff('brake'); brakeMuted = false; } }) : null;
+const braking = () => !!(brakeS && brakeS.held && !brakeMuted);
+/* the bare screen - whatever the pad and the buttons do not cover - is a start hold and nothing else */
+const screenS = touch ? tc.button(canvas, { onDown: () => { audio.init(); holdOn('screen'); }, onUp: () => holdOff('screen') }) : null;
 const shake = el => { el.classList.remove('nope'); void el.offsetWidth; el.classList.add('nope'); };
 function bindItemControl(el) {
   const s = tc.button(el, {
     onDown: () => { audio.init(); if (!canAct()) return; if (me.item && me.roulette <= 0) itemPress(me); else shake(el); },
-    onUp: st => { if (canAct()) itemRelease(me, throwDir(me, brakeS.held || st.dy > ITEM_FLIP_PX)); },
+    onUp: st => { if (canAct()) itemRelease(me, throwDir(me, braking() || st.dy > ITEM_FLIP_PX)); },
   });
   s.el = el; s.arrow = el.querySelector('small'); return s;
 }
 const itemCtls = touch ? [$('btnItem'), $('item')].map(bindItemControl) : [];
-const itemFlip = () => !!(touch && (brakeS.held || itemCtls.some(s => s.held && s.dy > ITEM_FLIP_PX)));
+const itemFlip = () => !!(touch && (braking() || itemCtls.some(s => s.held && s.dy > ITEM_FLIP_PX)));
 /* what the local kart is told to do this step: keyboard, touch, or both at once */
 function readControls(k) {
   let th = input.up ? 1 : input.down ? -1 : 0, st = (input.left ? 1 : 0) - (input.right ? 1 : 0);
-  if (touch) { if (brakeS.held) th = -1; else if (!input.down) th = 1; if (!st && padS.held) st = -padS.x; }
+  if (touch) { if (braking()) th = -1; else if (!input.down) th = 1; if (!st && padS.held) st = -padS.x; }
   k.throttle = th; k.steer = clamp(st, -1, 1);
 }
-const rocketHeld = () => (input.up && input.pressAt >= 0 && race.t - input.pressAt < 1.0) || (touch && padS.held && input.padAt >= 0 && race.t - input.padAt < 1.0);
 const btnItemCtx = touch ? $('btnItemCanvas').getContext('2d') : null;
 let touchHudKey = '';
 function drawTouchHud() {
@@ -1490,6 +1524,33 @@ function drawTouchHud() {
   if (key === touchHudKey) return; touchHudKey = key;
   for (const s of itemCtls) { s.el.classList.toggle('has', has); s.el.classList.toggle('arm', has && HOLDABLE(me.item)); s.el.classList.toggle('back', has && back); s.arrow.textContent = dir > 0 ? '▲' : '▼'; }
 }
+/* the line above the countdown number: what to hold for the rocket start, and whether the hold in progress will fire it */
+const tipEl = $('startTip'); let tipShown = '';
+function drawStartTip() {
+  let txt = '', cls = 'hud';
+  if (race.state === 'countdown' && race.stage >= 3 && me.kind === 'local' && !helpEl.classList.contains('show')) { // the help card says the same thing, in its place
+    if (rocketHeld()) { txt = 'BOOST READY'; cls = 'hud ok'; }
+    else if (rocketEarly()) { txt = 'TOO EARLY · LIFT AND HOLD AGAIN'; cls = 'hud bad'; }
+    else txt = touch ? 'HOLD ANYWHERE TO BOOST' : 'HOLD ↑ TO BOOST';
+  }
+  const key = cls + txt; if (key === tipShown) return; tipShown = key;
+  tipEl.textContent = txt; tipEl.className = cls;
+}
+/* the first race on a touch screen opens with a card explaining the controls, which steps aside at the "1" so the line
+   above has the screen; ☰ brings it back later. Only its button takes touches, so a thumb resting on the card is still a hold. */
+const helpEl = $('help');
+helpEl.querySelector('dl').innerHTML = [
+  ['STEER', 'Drag the left half of the screen. The gas is automatic.'],
+  ['BRAKE', 'The BRAKE button. Held, it also flips a throw.'],
+  ['ITEM', 'Touch to carry, lift to throw, drag down to throw back.'],
+  ['ROCKET START', 'Hold anywhere while the 1 shows, through GO.'],
+].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+let helpSeen = false; try { helpSeen = localStorage.getItem('lan_kart_help') === '1'; } catch {}
+function showHelp(on) {
+  helpEl.classList.toggle('show', on);
+  if (on) { helpSeen = true; try { localStorage.setItem('lan_kart_help', '1'); } catch {} }
+}
+helpEl.querySelector('button').addEventListener('click', () => showHelp(false));
 
 /* ============================================================ camera */
 const camState = { pos: new THREE.Vector3(0, 10, -30), look: new THREE.Vector3(), fov: 70, init: false }, camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
@@ -1538,7 +1599,12 @@ function drawStats() {
     `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   HUD ${timing.hud.toFixed(1)}   RENDER ${timing.render.toFixed(1)}`,
     `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}   (L CYCLES)`,
   ];
-  if (touch) lines.push(`TOUCH    PAD ${ctlWord(padS)}   BRAKE ${ctlWord(brakeS)}   ITEM ${ctlWord(itemCtls[0])}   SLOT ${ctlWord(itemCtls[1])}`); // a control that stays HELD after the finger left is the bug this line is for
+  if (touch) { // a control that stays HELD after the finger left is the bug these lines are for
+    lines.push(`TOUCH    PAD ${ctlWord(padS)}   BRAKE ${ctlWord(brakeS)}${brakeMuted ? ' (MUTED)' : ''}   SCREEN ${ctlWord(screenS)}`);
+    lines.push(`         ITEM ${ctlWord(itemCtls[0])}   SLOT ${ctlWord(itemCtls[1])}`);
+    lines.push(`STEER    ${STEER[steerLevel].name} · LOCK AT ${padS.range}PX · DEAD ${padS.dead}PX · CURVE ${padS.curve}   X ${padS.x.toFixed(2)} FROM ${padS.raw.toFixed(0)}PX`);
+  }
+  { const a = holdAge(); lines.push(`HOLD     ${holds.size ? a.toFixed(2) + 'S AGO · ' + [...holds.keys()].join(',') : 'NONE'}   ROCKET ${rocketHeld() ? 'READY' : rocketEarly() ? 'TOO EARLY' : 'NO'}`); }
   if (!online) lines.push('SOLO · NO NETWORK');
   else {
     lines.push(`${isHost ? 'HOST  ' : 'CLIENT'}   MESSAGES IN ${netStats.rateIn.toFixed(0)}/S  ${netStats.kbIn.toFixed(1)} KB/S   OUT ${netStats.rateOut.toFixed(0)}/S  ${netStats.kbOut.toFixed(1)} KB/S${isHost ? '' : `   HOST ${netStats.hostFps} FPS`}`);
@@ -1597,9 +1663,11 @@ function simStep(dt) {
   if (race.state === 'countdown') {
     const stage = race.t < 0.6 ? 0 : race.t < 1.6 ? 1 : race.t < 2.6 ? 2 : race.t < 3.6 ? 3 : 4;
     if (stage !== race.stage) { race.stage = stage; setGantry(stage);
+      if (stage >= 3) showHelp(false);                           // the "1": the rocket-start line takes over from here
       countEl.className = 'hud'; void countEl.offsetWidth;
       if (stage < 4) { countEl.textContent = 4 - stage; countEl.className = 'hud show'; sfx.count(); }
-      else { countEl.textContent = 'GO!'; countEl.className = 'hud show go'; sfx.go(); race.state = 'race'; race.time = 0; $('kartcard').classList.remove('show'); music.start();
+      else { countEl.textContent = 'GO!'; countEl.className = 'hud show go'; sfx.go(); race.state = 'race'; race.time = 0; $('kartcard').classList.remove('show'); showHelp(false); music.start();
+        if (brakeS && brakeS.held) brakeMuted = true;            // that thumb was the start hold, not a brake
         if (me.kind === 'local' && rocketHeld()) { me.boost = 1.6; toast('ROCKET START!', 'orange'); sfx.boost(); }
         for (const k of active) if (k.kind === 'ai' && owned(k) && Math.random() < 0.45) k.boost = rr(0.6, 1.1); } }
   }
@@ -1647,7 +1715,7 @@ function present(dt) {
 function hudRefresh() {
   const lapTxt = `LAP <b>${clamp(me.lap, 1, race.laps)}</b>/${race.laps}`; if (lapTxt !== lapShown) { lapShown = lapTxt; lapEl.innerHTML = lapTxt; }
   timerEl.textContent = fmtT(race.time);
-  drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(); drawCoinHud(); drawTouchHud();
+  drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(); drawCoinHud(); drawTouchHud(); drawStartTip();
   if (me.item && ITEM_DEF[me.item].timed && me.timed > 0) drawItemSlot(me.item, false, 1, me.timed / ITEM_DEF[me.item].timed);
   const ink = me.ink > 0 ? clamp(me.ink / 1.5, 0, 1) : 0; if (ink !== inkShown) { inkShown = ink; inkEl.style.opacity = ink; }
   const wrong = me.wrongWay > 0.8 && race.state === 'race'; if (wrong !== wrongShown) { wrongShown = wrong; wrongEl.style.display = wrong ? 'block' : 'none'; }
@@ -1695,6 +1763,7 @@ function renderMenu() {
   btn('RESUME', 'primary', () => showMenu(false));
   btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); renderMenu(); });
   btn(qualityLabel(), '', () => { cycleQuality(); renderMenu(); });
+  if (touch) { btn(steerLabel(), '', () => { cycleSteer(); renderMenu(); }); btn('HOW TO PLAY', '', () => { showMenu(false); showHelp(true); }); }
   btn(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { toggleStats(); renderMenu(); });
   if (!online || isHost) { btn(series.on ? (series.done ? 'NEW CUP' : 'NEXT RACE') : 'RESTART', '', () => { showMenu(false); restartKey(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
 }
@@ -1728,7 +1797,7 @@ function start(s) {
   gridOrder = active.filter(k => k.kind === 'ai').map(k => k.id).concat(active.filter(k => k.kind !== 'ai').map(k => k.id));
   for (const k of karts) if (k.kind === 'none') k.place = 99;
   resetRace();
-  hintEl.textContent = touch ? 'DRAG THE LEFT SIDE TO STEER · GAS IS AUTOMATIC · ITEM or the item icon: touch to carry, lift to throw, drag down to throw back'
+  hintEl.textContent = touch ? '☰  MENU · HOW TO PLAY'
     : 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound · L detail · F3 stats';
   const cupline = $('cupline'); cupline.hidden = !series.on; cupline.textContent = series.on ? `RACE ${series.race + 1}/${series.total} · ${v.name}` : '';
   $('kcName').textContent = me.name; $('kcClass').textContent = me.w.label; $('kartcard').querySelectorAll('.bars s').forEach((el, i) => { el.style.width = me.w.bars[i] + '%'; }); $('kartcard').classList.add('show');
@@ -1744,7 +1813,7 @@ function stop() {
   for (const k of karts) { setLabel(k, null); k.vis.g.visible = true; k.vis.bodyMat.color.set(k.color); k.vis.bodyMat.emissive.set(0); k.vis.bodyMat.emissiveIntensity = 0; }
   active = karts; karts.forEach((k, i) => resetKart(k, i)); for (const b of itemBoxes) { b.active = true; b.g.visible = true; } for (const c of coins) c.active = true;
   $('kartcard').classList.remove('show'); music.stop();
-  kb.detach(); tc.detach(); showMenu(false); loop.stop(); ticker.stop(); sfx.silence(); waitEl.hidden = true;
+  kb.detach(); tc.detach(); showMenu(false); showHelp(false); holds.clear(); brakeMuted = false; drawStartTip(); loop.stop(); ticker.stop(); sfx.silence(); waitEl.hidden = true;
 }
 function destroy() {
   stop(); sfx.dispose(); music.dispose(); ticker.dispose(); removeEventListener('resize', onResize); document.removeEventListener('visibilitychange', onVisibility);
@@ -1797,7 +1866,8 @@ function onNetMessage(msg) {
 const debug = { karts, race, series, get net() { return netStats; }, clocks, timing, get fps() { return fps; }, get hostClock() { return hostClock; }, get simNow() { return simNow; }, nextRace, awardCup, hazards, remoteHaz, VARIANTS, ITEM_DEF, giveItem, itemPress, itemRelease, useItem, rollItem, blast, inkFrom, debugSpawn: spawnHazard, spawnStats, get coins() { return coins; }, get itemBoxes() { return itemBoxes; }, get variant() { return variant; }, get S() { return S; }, get L() { return L; }, get N() { return N; }, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; },
   get tune() { return { VMAX, ACC, TURN, cpu: cpuCfg }; },
   get detail() { return { tier: QUALITY[quality].name, auto: autoQuality, fps: Math.round(fps), pixelRatio: renderer.getPixelRatio() }; }, setQuality, cycleQuality,
-  touch: { on: touch, pad: padS, brake: brakeS, items: itemCtls, showMenu, toggleStats },
+  touch: { on: touch, pad: padS, brake: brakeS, screen: screenS, items: itemCtls, showMenu, toggleStats, showHelp, cycleSteer, get steer() { return STEER[steerLevel]; } },
+  get holds() { return holds; }, rocketHeld,
   restartWith(opts) { if (session) start({ ...session, opts: { ...session.opts, ...opts } }); } };
 window.__kart = debug;
 return { start, stop, destroy, onNetMessage, playerLeft, debug };

@@ -79,6 +79,40 @@ test('the pad tracks a sideways drag against where the finger landed and centres
   el.fire('pointerdown', { pointerId: 5, clientX: 200, clientY: 100 }); assert.equal(s.held, true); assert.equal(s.x, 0);
   el.fire('pointermove', { pointerId: 5, clientX: 250, clientY: 100 }); assert.equal(s.x, 0.5);
   el.fire('pointermove', { pointerId: 5, clientX: 0, clientY: 100 }); assert.equal(s.x, -1, 'clamped at full lock');
+  assert.equal(s.raw, -200, 'the raw drag is kept for a stats readout');
   el.fire('pointerup', { pointerId: 5, clientX: 0, clientY: 100 }); assert.equal(s.x, 0); assert.equal(s.held, false); assert.deepEqual(log, ['down', 'up']);
   el.fire('pointerdown', { pointerId: 6, clientX: 0 }); el.fire('touchend', { touches: [] }); assert.equal(s.held, false, 'the pad has the same iOS fallback');
+});
+
+test('the pad ignores the dead zone and shapes the rest by the curve, full lock still at range', () => {
+  const { el, s } = setup('pad', { range: 100, dead: 10, curve: 2 });
+  el.fire('pointerdown', { pointerId: 1, clientX: 100, clientY: 0 });
+  el.fire('pointermove', { pointerId: 1, clientX: 110 }); assert.equal(s.x, 0, 'a thumb settling does not steer');
+  el.fire('pointermove', { pointerId: 1, clientX: 90 }); assert.equal(s.x, 0, 'the dead zone is symmetric');
+  el.fire('pointermove', { pointerId: 1, clientX: 155 }); assert.equal(s.x.toFixed(4), '0.2500', 'half the live travel is a quarter lock');
+  el.fire('pointermove', { pointerId: 1, clientX: 45 }); assert.equal(s.x.toFixed(4), '-0.2500');
+  el.fire('pointermove', { pointerId: 1, clientX: 200 }); assert.equal(s.x, 1, 'full lock is still reached at range');
+  el.fire('pointermove', { pointerId: 1, clientX: 400 }); assert.equal(s.x, 1, 'and clamped past it');
+});
+
+test('writing the pad range changes the sensitivity from the next move on', () => {
+  const { el, s } = setup('pad', { range: 100 });
+  el.fire('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 });
+  el.fire('pointermove', { pointerId: 1, clientX: 50 }); assert.equal(s.x, 0.5);
+  s.range = 50;
+  el.fire('pointermove', { pointerId: 1, clientX: 25 }); assert.equal(s.x, 0.5, 'the same steering now takes half the travel');
+  el.fire('pointermove', { pointerId: 1, clientX: 50 }); assert.equal(s.x, 1);
+});
+
+test('a two-axis stick shapes the distance by dead zone, curve and range and keeps the direction', () => {
+  const { el, s, log } = setup('pad', { range: 100, dead: 10, axes: 2 });
+  el.fire('pointerdown', { pointerId: 7, clientX: 100, clientY: 100 }); assert.equal(s.held, true);
+  el.fire('pointermove', { pointerId: 7, clientX: 105, clientY: 104 }); assert.equal(s.x, 0); assert.equal(s.y, 0, 'inside the dead zone nothing moves');
+  el.fire('pointermove', { pointerId: 7, clientX: 100, clientY: 155 }); assert.equal(s.x, 0); assert.ok(Math.abs(s.y - 0.5) < 1e-9, 'half the live travel, straight down'); assert.equal(s.rawY, 55);
+  el.fire('pointermove', { pointerId: 7, clientX: 400, clientY: 400 }); assert.ok(Math.abs(Math.hypot(s.x, s.y) - 1) < 1e-9, 'a diagonal is clamped to the unit circle'); assert.ok(s.x > 0.7 && s.y > 0.7);
+  el.fire('pointermove', { pointerId: 7, clientX: 40, clientY: 100 }); assert.ok(Math.abs(s.x + 5 / 9) < 1e-9); assert.equal(s.y, 0);
+  el.fire('pointerup', { pointerId: 7 }); assert.equal(s.x, 0); assert.equal(s.y, 0); assert.deepEqual(log, ['down', 'up']);
+  const one = setup('pad', { range: 100 });
+  one.el.fire('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }); one.el.fire('pointermove', { pointerId: 1, clientX: 50, clientY: 300 });
+  assert.equal(one.s.x, 0.5); assert.equal(one.s.y, 0, 'a one-axis pad ignores the vertical drag');
 });

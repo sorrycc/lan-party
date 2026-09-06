@@ -31,11 +31,13 @@ Open one of these on every machine:
 **PLAY SOLO** runs the selected game without a room, if the game allows a single player; the game's options appear under the game list as **SOLO OPTIONS** and apply to every solo restart.
 
 **Phones and tablets.** The lobby shows the join link as a QR code: scan it with the phone's camera and the start screen opens with the room
-code filled in. Frostline Kart and Crossy Farm Car have touch controls. For the best experience on an iPhone or iPad, open the LAN address in
+code filled in. Frostline Kart, Dodgeball 3v3 and Crossy Farm Car have touch controls. For the best experience on an iPhone or iPad, open the LAN address in
 Safari once and use Share → **Add to Home Screen**: launched from there the game runs full screen in landscape with no browser bar and no
-back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) The phone's ring/silent switch mutes the game's sound, as it does all web audio.
+back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) While a game is running the page holds a screen wake lock, so the phone
+does not dim or lock mid-game (iOS 16.4 and later; it is taken again when the page comes back from the background), and it asks for its sound to be
+played as media, so the game is heard with the ring/silent switch on silent (iOS 17 and later).
 
-Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart wire format and the QR encoder). `npm run icons` redraws the home-screen icons.
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart wire format, the QR encoder and the touch controls). `npm run icons` redraws the home-screen icons.
 `FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
@@ -52,7 +54,7 @@ client/
   manifest.webmanifest, icons/   home-screen install (icons are drawn by scripts/make-icons.js)
   core/           shared by shell and games
     net.js        WebSocket client          audio.js   WebAudio synth (unlocked once by the shell)
-    input.js      keyboard state            touch.js   multi-touch pad and hold buttons (Pointer Events)
+    input.js      keyboard state            touch.js   multi-touch steering pad / thumb stick and hold buttons (Pointer Events)
     qr.js         QR encoder for the lobby's join link    loop.js    rAF loop + fixed-step helper
     interp.js     snapshot buffers + the per-sender clock (sender timestamps, jitter, adaptive delay)
     ticker.js     a worker-driven timer that keeps ticking in a hidden tab    math.js    clamp / lerp / seeded rng
@@ -67,7 +69,7 @@ client/
                   motion.js (walking and driving, shared by host and prediction), sim.js (the host's simulation),
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
     crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
-test/             node --test: the snapshot clock, the Kart wire format and the QR encoder
+test/             node --test: the snapshot clock, the Kart wire format, the QR encoder and the touch controls
 scripts/          make-icons.js draws client/icons/*.png with no dependencies
 ```
 
@@ -132,19 +134,26 @@ Rules of the road:
 
 ## Frostline Kart
 
-Arrows / WASD to drive, M to toggle sound, R for the next race (host), Esc to leave. Hold the throttle as the countdown hits GO for a rocket start.
+Arrows / WASD to drive, M to toggle sound, R for the next race (host), Esc to leave. Press the throttle once the **1** is on screen and keep
+holding it through GO for a rocket start: a line under the number asks for the hold, turns green while one that will fire is in progress, and
+says so when a press came too early, which lifting and pressing again inside that last second puts right.
 F3 (or I) opens a stats panel: frame time breakdown, message rates, every sender's snapshot spacing and jitter, and how many corrections the remote karts
 needed; the top of the screen always shows FPS and, on a client, how old the host's data is, the jitter and the host's frame rate. L cycles the detail
 level (auto, high, medium, low): each step lowers the pixel ratio, medium thins the pines and the snow, low also turns the point lights off; auto
 lowers the level by itself when the frame rate stays under 40. Phones and tablets start on medium, without antialiasing and without the HUD blur.
 
 On a touch screen (iPad, iPhone, any tablet) the kart accelerates by itself and the left part of the screen is a steering pad: touch anywhere
-there and drag left or right; steering is proportional to how far the finger moved from where it landed, and centres when it lifts. **BRAKE**
-and **ITEM** sit under the right thumb, and the item slot at the top left is a second ITEM button. Both work like the key: touch to deploy,
-lift to throw; drag downward (or hold BRAKE) before lifting to throw the other way, and the arrow on the button shows which way the throw will
-go. A press with nothing to use shakes the button. A finger resting on the pad as the countdown hits GO is the rocket start. The ☰ button at
-the top opens a card with sound, detail level, the stats panel and, for the host, restart and leave. A phone held upright is asked to rotate;
-the HUD is laid out for landscape and everything is a size smaller on a phone-height screen.
+there and drag left or right. The first few millimetres of a drag do nothing, so a thumb settling on the glass does not twitch the kart, and
+the steering is finest near the centre while full lock is still one thumb's travel away; **STEERING** in the ☰ menu sets how long that travel
+is (low, normal, high) and is remembered per browser. **BRAKE** and **ITEM** sit under the right thumb, and the item slot at the top left is a
+second ITEM button. Both work like the key: touch to deploy, lift to throw; drag downward (or hold BRAKE) before lifting to throw the other
+way, and the arrow on the button shows which way the throw will go. A press with nothing to use shakes the button.
+
+For the rocket start, hold a finger anywhere except an ITEM button or the ☰ once the **1** appears, and keep it there through GO: the steering
+pad, BRAKE and the bare screen all count, and a thumb parked on BRAKE for it does not brake when the race starts, only when it is lifted and
+pressed again. The very first race on a device opens with a **HOW TO PLAY** card that covers all of this and steps aside when the 1 comes up;
+the ☰ button brings it back, along with sound, detail level, steering, the stats panel and, for the host, restart and leave. A phone held
+upright is asked to rotate; the HUD is laid out for landscape and everything is a size smaller on a phone-height screen.
 
 Space (or Enter / E) works the item slot. Shells, bananas and bob-ombs are carried: press to deploy one so it trails behind the kart
 (a triple orbits it) where it blocks incoming shells, release to throw it. Hold the brake (↓ / S) while releasing to throw the other way:
@@ -168,6 +177,13 @@ countdown card: light karts launch and turn better, heavy karts are faster on th
 Blue vs red, first to 2 (or 3) rounds. Arrows / WASD to move, Shift to sprint (watch the stamina bar), Space to throw at the nearest enemy once your arm is ready, M to toggle sound.
 Balls start on the centre line; a live ball that touches an enemy sends them to the bench, and after 45 seconds the line drops so either side can cross.
 Up to 6 players, 3 per side; empty slots are CPU bodies when the host leaves "fill empty slots with CPU" on. A player who drops out mid-match is taken over by a CPU.
+
+On a touch screen (iPhone, iPad, any tablet) the left part of the screen is a thumb stick: touch anywhere there and drag; how far the finger
+moves sets the speed, and it centres when it lifts. **SPRINT** (hold) and **THROW** sit under the right thumb. A tap on THROW throws at the
+nearest enemy, like Space; drag it before lifting and the throw goes the way the finger went instead, with an arrow from your body showing where.
+A press with no ball in hand shakes the button. The ☰ button opens a card with sound and, for the host, play again and leave. A phone held
+upright is asked to rotate; in landscape on a phone the score and the status float over the crowd so the court fills the screen, and the
+names on the court are drawn larger. An online host keeps the match running from a worker timer while its tab is hidden.
 
 ## Fable Theft Auto 5.1
 
