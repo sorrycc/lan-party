@@ -140,10 +140,11 @@ lowers the level by itself when the frame rate stays under 40. Phones and tablet
 
 On a touch screen (iPad, iPhone, any tablet) the kart accelerates by itself and the left part of the screen is a steering pad: touch anywhere
 there and drag left or right; steering is proportional to how far the finger moved from where it landed, and centres when it lifts. **BRAKE**
-and **ITEM** sit under the right thumb. ITEM works like the key: touch to deploy, lift to throw; drag it downward (or hold BRAKE) before lifting
-to throw the other way, and the arrow on the button shows which way the throw will go. A finger resting on the pad as the countdown hits GO is
-the rocket start. The ☰ button at the top opens a card with sound, detail level and, for the host, restart and leave. A phone held upright is
-asked to rotate; the HUD is laid out for landscape and everything is a size smaller on a phone-height screen.
+and **ITEM** sit under the right thumb, and the item slot at the top left is a second ITEM button. Both work like the key: touch to deploy,
+lift to throw; drag downward (or hold BRAKE) before lifting to throw the other way, and the arrow on the button shows which way the throw will
+go. A press with nothing to use shakes the button. A finger resting on the pad as the countdown hits GO is the rocket start. The ☰ button at
+the top opens a card with sound, detail level, the stats panel and, for the host, restart and leave. A phone held upright is asked to rotate;
+the HUD is laid out for landscape and everything is a size smaller on a phone-height screen.
 
 Space (or Enter / E) works the item slot. Shells, bananas and bob-ombs are carried: press to deploy one so it trails behind the kart
 (a triple orbits it) where it blocks incoming shells, release to throw it. Hold the brake (↓ / S) while releasing to throw the other way:

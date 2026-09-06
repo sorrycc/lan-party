@@ -19,8 +19,9 @@
    the correction a fresh snapshot brings is hidden in a decaying visual offset. A client shows a ghost of its own throw
    until the host's copy arrives. Hits are decided by the victim's machine. F3 / I shows frame and network stats.
 
-   Touch screens (core/touch.js): the left side is a steering pad, gas is automatic, BRAKE and ITEM sit under the right thumb,
-   ☰ opens a menu card, a phone held upright is asked to rotate, and rendering starts a detail tier lower. */
+   Touch screens (core/touch.js): the left side is a steering pad, gas is automatic, BRAKE and ITEM sit under the right thumb and the
+   item slot at the top left is a second ITEM button, ☰ opens a menu card, a phone held upright is asked to rotate, and rendering
+   starts a detail tier lower. */
 import * as THREE from 'three';
 import { clamp, lerp, wrapAngle, ordinal, makeRng } from '../../core/math.js';
 import { createToasts, esc, fmtTime, loadStylesheet } from '../../core/ui.js';
@@ -46,7 +47,7 @@ const WEIGHT = {
 
 const HUD = `
 <canvas id="c"></canvas>
-<div id="item" class="hud panel"><canvas id="itemCanvas" width="168" height="168"></canvas><div id="itemLabel"></div></div>
+<div id="item" class="hud panel"><canvas id="itemCanvas" width="168" height="168"></canvas><small>▲</small><div id="itemLabel"></div></div>
 <div id="standings" class="hud panel"></div>
 <div id="rightcol" class="hud"><div id="lapbox" class="panel"><div id="cupline" hidden></div><div id="lap">LAP <b>1</b>/3</div><div id="timer">0:00.00</div></div>
 <div id="coinbox" class="panel"><i></i><b id="coinN">0</b></div></div>
@@ -1451,20 +1452,29 @@ const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'do
     if (e.code === 'KeyR') restartKey();
     if (e.code === 'Escape') hooks.onExit?.();
     if (e.code === 'KeyM') toast(audio.toggle() ? 'SOUND OFF' : 'SOUND ON', 'blue');
-    if (e.code === 'F3' || e.code === 'KeyI') { e.preventDefault(); showStats = !showStats; statsEl.hidden = !showStats; if (showStats) drawStats(); }
+    if (e.code === 'F3' || e.code === 'KeyI') { e.preventDefault(); toggleStats(); }
     if (e.code === 'KeyL') cycleQuality();
   },
 });
 const input = kb.held; input.pressAt = -1; input.padAt = -1;
 /* touch: the left side of the screen is a steering pad, the kart accelerates by itself, and BRAKE and ITEM sit under the right thumb.
-   ITEM works like the key: touch to deploy, lift to throw; drag it down (or hold BRAKE) before lifting to throw the other way.
-   A finger resting on the pad as the countdown hits GO is the rocket start. */
+   The item slot at the top left is a second ITEM button. Both work like the key: touch to deploy, lift to throw; drag down (or hold
+   BRAKE) before lifting to throw the other way. A press with nothing to use (empty slot, roulette still spinning) shakes the button,
+   so a tap is never silent. A finger resting on the pad as the countdown hits GO is the rocket start. */
 const tc = createTouch();
 const ITEM_FLIP_PX = 36;
 const padS = touch ? tc.pad($('pad'), { range: 80, onDown: () => { audio.init(); input.padAt = race.t; }, onUp: () => { input.padAt = -1; } }) : null;
 const brakeS = touch ? tc.button($('btnBrake'), { onDown: () => audio.init() }) : null;
-const itemS = touch ? tc.button($('btnItem'), { onDown: () => { audio.init(); if (canAct()) itemPress(me); }, onUp: s => { if (canAct()) itemRelease(me, throwDir(me, brakeS.held || s.dy > ITEM_FLIP_PX)); } }) : null;
-const itemFlip = () => !!(touch && (brakeS.held || (itemS.held && itemS.dy > ITEM_FLIP_PX)));
+const shake = el => { el.classList.remove('nope'); void el.offsetWidth; el.classList.add('nope'); };
+function bindItemControl(el) {
+  const s = tc.button(el, {
+    onDown: () => { audio.init(); if (!canAct()) return; if (me.item && me.roulette <= 0) itemPress(me); else shake(el); },
+    onUp: st => { if (canAct()) itemRelease(me, throwDir(me, brakeS.held || st.dy > ITEM_FLIP_PX)); },
+  });
+  s.el = el; s.arrow = el.querySelector('small'); return s;
+}
+const itemCtls = touch ? [$('btnItem'), $('item')].map(bindItemControl) : [];
+const itemFlip = () => !!(touch && (brakeS.held || itemCtls.some(s => s.held && s.dy > ITEM_FLIP_PX)));
 /* what the local kart is told to do this step: keyboard, touch, or both at once */
 function readControls(k) {
   let th = input.up ? 1 : input.down ? -1 : 0, st = (input.left ? 1 : 0) - (input.right ? 1 : 0);
@@ -1472,14 +1482,13 @@ function readControls(k) {
   k.throttle = th; k.steer = clamp(st, -1, 1);
 }
 const rocketHeld = () => (input.up && input.pressAt >= 0 && race.t - input.pressAt < 1.0) || (touch && padS.held && input.padAt >= 0 && race.t - input.padAt < 1.0);
-const btnItemEl = touch ? $('btnItem') : null, btnItemCtx = touch ? $('btnItemCanvas').getContext('2d') : null, btnItemArrow = touch ? btnItemEl.querySelector('small') : null;
+const btnItemCtx = touch ? $('btnItemCanvas').getContext('2d') : null;
 let touchHudKey = '';
 function drawTouchHud() {
   if (!touch) return;
   const has = !!me.item, back = itemFlip(), dir = has ? throwDir(me, back) : 0, key = `${has}${has && HOLDABLE(me.item)}${back}${dir}`;
   if (key === touchHudKey) return; touchHudKey = key;
-  btnItemEl.classList.toggle('has', has); btnItemEl.classList.toggle('arm', has && HOLDABLE(me.item)); btnItemEl.classList.toggle('back', has && back);
-  btnItemArrow.textContent = dir > 0 ? '▲' : '▼';
+  for (const s of itemCtls) { s.el.classList.toggle('has', has); s.el.classList.toggle('arm', has && HOLDABLE(me.item)); s.el.classList.toggle('back', has && back); s.arrow.textContent = dir > 0 ? '▲' : '▼'; }
 }
 
 /* ============================================================ camera */
@@ -1513,10 +1522,13 @@ function updateAmbient(dt) {
 
 /* ============================================================ stats (the detail ladder itself sits next to the renderer) */
 let showStats = false;
+function toggleStats() { showStats = !showStats; statsEl.hidden = !showStats; if (showStats) drawStats(); }
 const timing = { frame: 16, sim: 0, hud: 0, render: 0 };
 const cornerEl = $('corner'), statsEl = $('stats'), waitEl = $('netwait');
 const netStats = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, hostFps: 0, corr: 0, corrM: 0, snaps: 0, frozen: 0, ghosts: 0, lead: 0, lastT: 0 };
-/* the corner line always; the panel (F3 / I) with the frame breakdown, message rates, every sender's clock and the remote-object corrections */
+const ctlWord = s => (s.held ? 'HELD #' + s.pid : 'FREE') + (s.last ? ' · LAST ' + s.last.toUpperCase() : ''); // one touch control's state
+/* the corner line always; the panel (F3 / I, or STATS in the ☰ menu) with the frame breakdown, the touch controls, message rates,
+   every sender's clock and the remote-object corrections */
 function drawStats() {
   let line = `FPS ${Math.round(fps)}`;
   if (online) line += isHost ? ' · HOST' : hostClock ? ` · PING ${Math.round(hostClock.rtt * 1000)} MS · JITTER ${Math.round(hostClock.jitter * 1000)} MS · HOST ${netStats.hostFps} FPS` : ' · WAITING FOR THE HOST';
@@ -1526,6 +1538,7 @@ function drawStats() {
     `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   HUD ${timing.hud.toFixed(1)}   RENDER ${timing.render.toFixed(1)}`,
     `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}   (L CYCLES)`,
   ];
+  if (touch) lines.push(`TOUCH    PAD ${ctlWord(padS)}   BRAKE ${ctlWord(brakeS)}   ITEM ${ctlWord(itemCtls[0])}   SLOT ${ctlWord(itemCtls[1])}`); // a control that stays HELD after the finger left is the bug this line is for
   if (!online) lines.push('SOLO · NO NETWORK');
   else {
     lines.push(`${isHost ? 'HOST  ' : 'CLIENT'}   MESSAGES IN ${netStats.rateIn.toFixed(0)}/S  ${netStats.kbIn.toFixed(1)} KB/S   OUT ${netStats.rateOut.toFixed(0)}/S  ${netStats.kbOut.toFixed(1)} KB/S${isHost ? '' : `   HOST ${netStats.hostFps} FPS`}`);
@@ -1682,6 +1695,7 @@ function renderMenu() {
   btn('RESUME', 'primary', () => showMenu(false));
   btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); renderMenu(); });
   btn(qualityLabel(), '', () => { cycleQuality(); renderMenu(); });
+  btn(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { toggleStats(); renderMenu(); });
   if (!online || isHost) { btn(series.on ? (series.done ? 'NEW CUP' : 'NEXT RACE') : 'RESTART', '', () => { showMenu(false); restartKey(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
 }
 function showMenu(on) { pauseEl.classList.toggle('show', on); if (on) renderMenu(); }
@@ -1714,7 +1728,7 @@ function start(s) {
   gridOrder = active.filter(k => k.kind === 'ai').map(k => k.id).concat(active.filter(k => k.kind !== 'ai').map(k => k.id));
   for (const k of karts) if (k.kind === 'none') k.place = 99;
   resetRace();
-  hintEl.textContent = touch ? 'DRAG THE LEFT SIDE TO STEER · GAS IS AUTOMATIC · ITEM: touch to carry, lift to throw, drag down to throw back'
+  hintEl.textContent = touch ? 'DRAG THE LEFT SIDE TO STEER · GAS IS AUTOMATIC · ITEM or the item icon: touch to carry, lift to throw, drag down to throw back'
     : 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound · L detail · F3 stats';
   const cupline = $('cupline'); cupline.hidden = !series.on; cupline.textContent = series.on ? `RACE ${series.race + 1}/${series.total} · ${v.name}` : '';
   $('kcName').textContent = me.name; $('kcClass').textContent = me.w.label; $('kartcard').querySelectorAll('.bars s').forEach((el, i) => { el.style.width = me.w.bars[i] + '%'; }); $('kartcard').classList.add('show');
@@ -1783,7 +1797,7 @@ function onNetMessage(msg) {
 const debug = { karts, race, series, get net() { return netStats; }, clocks, timing, get fps() { return fps; }, get hostClock() { return hostClock; }, get simNow() { return simNow; }, nextRace, awardCup, hazards, remoteHaz, VARIANTS, ITEM_DEF, giveItem, itemPress, itemRelease, useItem, rollItem, blast, inkFrom, debugSpawn: spawnHazard, spawnStats, get coins() { return coins; }, get itemBoxes() { return itemBoxes; }, get variant() { return variant; }, get S() { return S; }, get L() { return L; }, get N() { return N; }, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; },
   get tune() { return { VMAX, ACC, TURN, cpu: cpuCfg }; },
   get detail() { return { tier: QUALITY[quality].name, auto: autoQuality, fps: Math.round(fps), pixelRatio: renderer.getPixelRatio() }; }, setQuality, cycleQuality,
-  touch: { on: touch, pad: padS, brake: brakeS, item: itemS, showMenu },
+  touch: { on: touch, pad: padS, brake: brakeS, items: itemCtls, showMenu, toggleStats },
   restartWith(opts) { if (session) start({ ...session, opts: { ...session.opts, ...opts } }); } };
 window.__kart = debug;
 return { start, stop, destroy, onNetMessage, playerLeft, debug };

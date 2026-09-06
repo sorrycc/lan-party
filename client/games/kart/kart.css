@@ -1,8 +1,11 @@
 /* Frostline Kart HUD. Loaded by the game module while it is mounted; the shell supplies the body font and .btn.
    Every edge offset adds the device's safe-area inset (notch, home indicator). `#stage.touch` is set by the game on
-   coarse-pointer devices: the on-screen controls appear, the minimap moves under the lap box and the blur goes away. */
+   coarse-pointer devices: the on-screen controls appear, the item slot becomes a button too, the minimap moves under the lap box
+   and the blur goes away. */
 :root { --hud: rgba(6,10,28,.62); --line: rgba(255,255,255,.18);
-  --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px); }
+  --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px);
+  /* the thumb buttons stay clear of Safari's edge-swipe zones even where the safe-area insets are zero (an iPad in a browser tab) */
+  --edge-r: max(22px + var(--sa-r), 40px); --edge-b: max(22px + var(--sa-b), 40px); }
 #c { position: fixed; inset: 0; display: block; touch-action: none; }
 .hud { position: fixed; pointer-events: none; text-shadow: 0 2px 0 rgba(0,0,0,.45); }
 .panel { background: var(--hud); border: 2px solid var(--line); border-radius: 14px; backdrop-filter: blur(4px); }
@@ -13,6 +16,7 @@
 #item { top: calc(18px + var(--sa-t)); left: calc(18px + var(--sa-l)); width: 108px; height: 108px; display: flex; align-items: center; justify-content: center; border-width: 3px; }
 #item.pulse { animation: pop .3s ease-out; border-color: #ffd54a; }
 #item canvas { width: 84px; height: 84px; }
+#item small { display: none; } /* the throw-direction arrow: touch screens only, see below */
 #itemLabel { position: absolute; bottom: -22px; left: 0; width: 100%; text-align: center; font-size: 13px; letter-spacing: 2px; color: #cfe3ff; font-weight: 700; }
 
 /* standings column */
@@ -124,6 +128,8 @@
 /* ---------------------------------------------------------------- touch controls (hidden unless #stage has .touch) */
 .ctl { display: none; position: fixed; z-index: 6; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .touch .ctl { display: block; }
+/* the pointer target is always the control itself, never a child that may be hidden mid-press (iOS Safari then drops the pointerup) */
+.ctl > *, .touch #item > * { pointer-events: none; }
 /* steering pad: the left part of the screen; a ring appears where the finger lands and the knob follows it sideways */
 #pad { left: 0; top: calc(60px + var(--sa-t)); bottom: 0; width: 45vw; z-index: 5; --ox: 50%; --oy: 50%; --px: 0px; }
 #pad .ring { position: absolute; left: var(--ox); top: var(--oy); width: 132px; height: 132px; margin: -66px 0 0 -66px; border-radius: 50%; border: 3px solid rgba(255,255,255,.45); background: rgba(6,10,28,.35); opacity: 0; transition: opacity .2s; }
@@ -137,8 +143,8 @@
 .btn-ctl { width: 92px; height: 92px; border-radius: 50%; border: 3px solid rgba(255,255,255,.4); background: rgba(6,10,28,.55); color: #fff; font-weight: 900; font-size: 14px; letter-spacing: 1px; text-shadow: 0 2px 0 rgba(0,0,0,.45); flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
 .touch .btn-ctl { display: flex; }
 .btn-ctl.on { background: rgba(255,213,74,.55); border-color: #ffd54a; transform: scale(.94); }
-#btnBrake { right: calc(140px + var(--sa-r)); bottom: calc(22px + var(--sa-b)); }
-#btnItem { right: calc(22px + var(--sa-r)); bottom: calc(22px + var(--sa-b)); width: 104px; height: 104px; }
+#btnBrake { right: calc(var(--edge-r) + 118px); bottom: var(--edge-b); }
+#btnItem { right: var(--edge-r); bottom: var(--edge-b); width: 104px; height: 104px; }
 #btnItem b { font-size: 13px; letter-spacing: 2px; color: rgba(255,255,255,.7); }
 #btnItem canvas { display: none; width: 52px; height: 52px; }
 #btnItem small { font-size: 16px; line-height: 1; color: #ffd54a; visibility: hidden; }
@@ -146,6 +152,17 @@
 #btnItem.arm small { visibility: visible; }
 #btnItem.back { background: rgba(255,138,92,.5); border-color: #ff8a5c; }
 #btnItem.back small { color: #ff8a5c; }
+/* a press with nothing to use (empty slot, roulette still spinning): a short shake instead of silence */
+@keyframes nope { 0%, 100% { transform: translateX(0); } 30% { transform: translateX(-6px); } 70% { transform: translateX(6px); } }
+.btn-ctl.nope, .touch #item.nope { animation: nope .25s ease-in-out; }
+/* the item slot doubles as an ITEM button: raised above the steering pad it overlaps, with a hit box larger than the panel */
+.touch #item { pointer-events: auto; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; z-index: 7; }
+.touch #item::before { content: ''; position: absolute; inset: -14px; border-radius: 24px; }
+.touch #item.on { background: rgba(255,213,74,.45); border-color: #ffd54a; transform: scale(.94); }
+.touch #item small { display: block; position: absolute; right: 5px; bottom: 3px; font-size: 16px; line-height: 1; color: #ffd54a; visibility: hidden; }
+.touch #item.arm small { visibility: visible; }
+.touch #item.back { background: rgba(255,138,92,.45); border-color: #ff8a5c; }
+.touch #item.back small { color: #ff8a5c; }
 /* ☰: sound, detail, restart, leave */
 #btnMenu { top: calc(6px + var(--sa-t)); left: 50%; transform: translateX(-50%); width: 46px; height: 32px; border-radius: 10px; border: 2px solid rgba(255,255,255,.35); background: rgba(6,10,28,.55); color: #fff; font-size: 16px; text-align: center; line-height: 28px; z-index: 7; }
 .touch #corner { left: calc(50% + 34px); transform: none; top: calc(14px + var(--sa-t)); }
