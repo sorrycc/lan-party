@@ -8,7 +8,8 @@
    players send their input to the host (`in` / `th`, addressed with `to`) and render the host's 30 Hz `s`
    snapshots interpolated a little in the past. Effects (hits, throws, bounces, banners) ride inside the
    snapshot as events, so every screen sees and hears the same match. The roster is derived from the session
-   identically on every machine, which is what lets snapshots refer to players by index.
+   identically on every machine, which is what lets snapshots refer to players by index. Every snapshot carries the round's
+   seed as a match id, so the tail of a finished match cannot be mistaken for the start of the next one after PLAY AGAIN.
 
    Touch screens (core/touch.js): the left part of the screen is a thumb stick, SPRINT and THROW sit under the right thumb
    (THROW fires when the finger lifts, so dragging it first aims the throw instead of taking the nearest enemy), ☰ opens a
@@ -138,7 +139,7 @@ class Player {
 }
 
 /* Build the same roster on every machine: humans by side (sorted by id), then CPU fill. */
-function buildRoster(session) {
+export function buildRoster(session) {
   const opts = session.opts || {}, fill = opts.fillAI !== false;
   const humans = { blue: [], red: [] };
   const sorted = [...session.players].sort((a, b) => (a.id > b.id ? 1 : a.id < b.id ? -1 : 0));
@@ -427,9 +428,10 @@ function aiAim(p, e) {
 /* ============================================================ game - rounds, rules, events, effects
    The host runs update(); everyone else runs applySnapshot() + updateClient(). Anything visible or audible
    goes through emit() -> applyEvent(), so both paths produce the same effects. */
-class Game {
-  constructor(roster, { opts, sfx, isHost, online, myId }) {
+export class Game {
+  constructor(roster, { opts, sfx, isHost, online, myId, matchId }) {
     this.sfx = sfx; this.isHost = isHost; this.online = online; this.myId = myId;
+    this.matchId = matchId >>> 0; // the round's shared id (the shell's seed): stamped on every snapshot so a straggler from the previous match is ignored
     this.winScore = Number(opts && opts.winScore) || CFG.winScore;
     this.players = roster.map((slot, i) => { const p = new Player(slot); p.pi = i; return p; });
     this.me = this.players.find(p => p.pid === myId) || null;
@@ -657,7 +659,7 @@ class Game {
   /* ---------- networking: host packs, clients apply + interpolate */
   packSnapshot() {
     const msg = {
-      t: 's', q: ++this.seq, ph: PHASES.indexOf(this.phase), pt: r2(this.phaseT), tm: r2(this.time), rd: this.round, sb: this.score.blue, sr: this.score.red,
+      t: 's', mid: this.matchId, q: ++this.seq, ph: PHASES.indexOf(this.phase), pt: r2(this.phaseT), tm: r2(this.time), rd: this.round, sb: this.score.blue, sr: this.score.red,
       ld: this.lineDown ? 1 : 0, lc: this.lineCount === null ? -1 : this.lineCount, rw: this.roundWinner ? TEAM[this.roundWinner].code : -1, mw: this.matchWinner ? TEAM[this.matchWinner].code : -1,
       p: this.players.map(p => [r1(p.x), r1(p.y), r1(p.vx), r1(p.vy), r2(p.face), p.alive ? 1 : 0, p.knocked ? r2(p.knocked.t) : -1, p.knocked ? r2(p.knocked.spin) : 0,
         PSTATES.indexOf(p.state), r2(p.armT), r2(p.stamina), p.sprinting ? 1 : 0, p.ball ? p.ball.id : -1, p.isHuman ? 1 : 0]),
@@ -668,6 +670,11 @@ class Game {
     return msg;
   }
   applySnapshot(m) {
+    /* PLAY AGAIN restarts the numbering at 1 on the host while the last snapshots of the old match are still in flight. One of
+       those arriving after the restart would put the old result screen back up and, being far ahead, make the sequence guard
+       below drop the whole new match - for as long as the last one took. So a snapshot from another match goes first, and an
+       unstamped one (an older build) is followed rather than frozen out. */
+    if (m.mid !== undefined && (m.mid >>> 0) !== this.matchId) return;
     if (typeof m.q !== 'number' || m.q <= this.lastSeq) return; this.lastSeq = m.q;
     const now = nowSec();
     this.phase = PHASES[m.ph] || 'intro'; this.phaseT = m.pt; this.time = m.tm; this.round = m.rd; this.score.blue = m.sb; this.score.red = m.sr;
@@ -1157,7 +1164,7 @@ export async function create({ mount, audio, send, hooks }) {
   /* ---- session API */
   function start(s) {
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId;
-    game = new Game(buildRoster(s), { opts: s.opts || {}, sfx, isHost, online, myId });
+    game = new Game(buildRoster(s), { opts: s.opts || {}, sfx, isHost, online, myId, matchId: s.seed >>> 0 });
     for (const k of Object.keys(cache)) delete cache[k]; netAcc = 0; lastSent = null; sinceSent = 1; simAt = performance.now();
     buildPips(); dom.result.hidden = true; root.classList.remove('over'); setSnd(); showMenu(false);
     dom.keys.innerHTML = !online ? '&nbsp; <kbd>R</kbd> restart &nbsp; <kbd>Esc</kbd> menu' : isHost ? '&nbsp; <kbd>R</kbd> again &nbsp; <kbd>Esc</kbd> lobby' : '';

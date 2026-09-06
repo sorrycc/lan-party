@@ -181,9 +181,9 @@ async function connect() {
     ensureGame(curGame()).catch(e => { $('lobbyStatus').textContent = loadError(curGame(), e); }); // build the game while people gather so START is instant
   });
   net.on('lobby', m => { S.players = m.players; S.hostId = m.hostId; S.opts = m.opts || {}; S.room = m.room; if (gameById(m.game)) S.gameId = m.game; const me = meP(); if (me) { S.avatar = me.avatar; savePrefsNow(); } renderLobby(); });
-  net.on('start', async m => {
+  net.on('start', async m => { // the seed is the round's shared id: every machine must land on the same number, so only a missing one is replaced
     S.hostId = m.hostId; S.playing = true; wakeKeep(true); audio.init(); const game = curGame();
-    const session = { players: m.players, myId: S.id, hostId: m.hostId, isHost: isHost(), online: true, opts: m.opts || {}, seed: (m.seed >>> 0) || newSeed() };
+    const session = { players: m.players, myId: S.id, hostId: m.hostId, isHost: isHost(), online: true, opts: m.opts || {}, seed: Number.isFinite(m.seed) ? (m.seed >>> 0) : newSeed() };
     try { const inst = await ensureGame(game); if (!inst || !S.playing || S.mode !== 'online') return; inst.start(session); show(null); }
     catch (e) { $('lobbyStatus').textContent = loadError(game, e); }
   });
