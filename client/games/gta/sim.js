@@ -1,7 +1,8 @@
 /* The host's simulation of Los Pixeles: every pedestrian, car, cop, pickup, the mission and the clock, for N
    players at once. Solo play runs the same code with one player and no network.
 
-   Players feed it input bits + camera angles (setInput) and one-shot actions (action). Everything the other
+   Players feed it input bits + camera angles + an optional thumb-stick pair (setInput) and one-shot actions
+   (action). Everything the other
    machines need to see or hear leaves through two channels:
      - `emit(ev, x, z)` queues a one-shot event ([type, ...args]) and fires the local onEvent immediately;
      - `prepareNet()` / `snapshotFor(client)` / `endNet()` build per-client delta snapshots (entities within
@@ -23,6 +24,9 @@ export const HINT = ['', 'F  EXIT CAR      SPACE  HANDBRAKE', 'F  JACK CAR', 'F 
 export const MISSION_STATES = ['intro', 'goto', 'hit', 'passed', 'escape', 'done'];
 export const OBJECTIVES = { intro: 'Get to Diamond Plaza, downtown.', goto: 'Get to Diamond Plaza, downtown.', hit: "Whack Vinny 'Snitch' Voxel. Watch the bodyguards.", passed: 'Mission passed. Lose the cops.', escape: "Lose the wanted level: hide out, find a bribe, hit the Pay 'n' Spray or turn yourself in.", done: 'Free roam. Cause chaos in Los Pixeles.' };
 export const INTRO_T = 5.5;
+/* the soft lock: a shot that misses still takes the nearest pedestrian this close (radians) to the crosshair;
+   a touch player aiming with a thumb gets a wider cone. The HUD uses the same rule to colour the crosshair. */
+export const aimTol = (d, assist) => assist ? Math.max(0.1, Math.atan(1.7 / d)) : Math.max(0.05, Math.atan(0.8 / d));
 export const START_CLOCK = { morning: 9.4, sunset: 18.2, night: 23.5 };
 const NET_RANGE2 = 320 * 320, EV_RANGE2 = 360 * 360, MAX_COPS = 24, MAX_COP_CARS = 8;
 const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared']);
@@ -46,7 +50,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   class Player {
     constructor(info, idx) {
       this.id = info.id; this.idx = idx; this.name = info.name || 'Player'; this.avatar = info.avatar | 0; this.ped = null; this.gone = false;
-      this.camYaw = 0; this.camPitch = 0.22; this.bits = 0; this.clicks = 0; this.clicksSeen = null; this.seq = 0; this.seqApplied = 0;
+      this.camYaw = 0; this.camPitch = 0.22; this.bits = 0; this.sx = 0; this.sz = 0; this.assist = false; this.clicks = 0; this.clicksSeen = null; this.seq = 0; this.seqApplied = 0;
       this.wanted = 0; this.heat = 0; this.crimeT = 0; this.seenT = 0; this.copSpawnT = 0; this.cash = 250; this.kills = 0;
       this.weapons = WEAPONS.map(w => ({ ...w })); this.curW = 0; this.reloadT = 0; this.fireT = 0; this.armTimer = 0; this.godT = 0; this.noDmgT = 0; this.wastedT = 0; this.hint = 0; this.jumpLatch = false;
       this.msgT = 0; // cooldown on the "can't afford it" reminder
@@ -387,7 +391,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       let best = 1e9, bp = null;
       for (const p of peds) { if (p === P || p.dead || p.inCar || p.released || (!friendly && p.kind === 'player')) continue;
         for (const hy of [0.3, 1.0, 1.6]) { const dx = p.x - o.x, dy = p.y + hy - o.y, dz = p.z - o.z, d = Math.hypot(dx, dy, dz); if (d > w.range || d < 1.5 || d > aim.t + 1.5) continue;
-          const ang = Math.acos(clamp((dx * vx + dy * vy + dz * vz) / d, -1, 1)); const tol = Math.max(0.05, Math.atan(0.8 / d));
+          const ang = Math.acos(clamp((dx * vx + dy * vy + dz * vz) / d, -1, 1)); const tol = aimTol(d, pl.assist);
           if (ang < tol && ang < best) { best = ang; bp = p; } } }
       if (bp && W.hasLOS(P.x, P.z, bp.x, bp.z)) aim = { x: bp.x, y: bp.y + 1.0, z: bp.z, t: Math.hypot(bp.x - o.x, bp.z - o.z) };
     }
@@ -597,19 +601,19 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (P.dead) { P.deadT += dt; pl.wastedT -= dt; if (pl.wastedT <= 0 && live) respawn(pl); P.gun = null; P.draw(dt); return; }
     if (pl.noDmgT > 8 && P.health < 100) P.health = Math.min(100, P.health + 3 * dt);
     if (pl.reloadT > 0) { pl.reloadT -= dt; if (pl.reloadT <= 0) { const w = pl.weapons[pl.curW]; const take = Math.min(w.mag - w.ammo, w.reserve); w.ammo += take; w.reserve -= take; } }
-    const b = live ? pl.bits : 0; pl.seqApplied = pl.seq;
+    const b = live ? pl.bits : 0, sx = live ? pl.sx : 0, sz = live ? pl.sz : 0; pl.seqApplied = pl.seq;
     if (pl.clicksSeen === null) pl.clicksSeen = pl.clicks;
     let clicks = Math.min(3, pl.clicks - pl.clicksSeen); pl.clicksSeen = pl.clicks;
     if (live) { const w = pl.weapons[pl.curW]; if (w.auto) { if (b & IN.FIRE) fireWeapon(pl); } else while (clicks-- > 0) fireWeapon(pl); }
     pl.hint = 0;
     if (P.inCar) {
-      const c = P.inCar; driveInput(c, b, dt);
+      const c = P.inCar; driveInput(c, b, dt, sx, sz);
       P.x = c.x; P.z = c.z; P.y = c.y; P.yaw = c.yaw; P.moving = 0;
       pl.hint = 1;
       if (c.dead) leaveCar(pl, false);
       else if (live && pl.wanted > 0 && dist2(c.x, c.z, SPRAY.x, SPRAY.z) < 22 * 22) { pl.hint = 4; if (c.speed < 1.5 && inSprayBay(c)) trySpray(pl, c); }
     } else {
-      stepOnFoot(W, P, b, pl.camYaw, pl.armTimer > 0, dt, cars);
+      stepOnFoot(W, P, b, pl.camYaw, pl.armTimer > 0, dt, cars, sx, sz);
       for (const p of peds) { if (p === P || p.dead || p.inCar) continue; const d2 = dist2(p.x, p.z, P.x, P.z); if (d2 < 0.7 && d2 > 1e-4) { const d = Math.sqrt(d2), push = (0.84 - d) / d; p.x += (p.x - P.x) * push; p.z += (p.z - P.z) * push; } }
       const c = nearestCar(P, 4.2);
       if (c) pl.hint = (c.ai === 'traffic' || (c.ai === 'cop' && c.occupants)) ? 2 : 3;
@@ -653,7 +657,11 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
 
   /* ============================================================ input from the players */
-  function setInput(pl, m) { if (!pl || pl.gone || !m) return; pl.bits = m.m | 0; if (typeof m.y === 'number') pl.camYaw = m.y; if (typeof m.p === 'number') pl.camPitch = clamp(m.p, -0.45, 1.1); if (typeof m.c === 'number') pl.clicks = m.c; if (typeof m.q === 'number') pl.seq = m.q; }
+  function setInput(pl, m) {
+    if (!pl || pl.gone || !m) return; pl.bits = m.m | 0;
+    pl.sx = typeof m.x === 'number' ? clamp(m.x, -1, 1) : 0; pl.sz = typeof m.z === 'number' ? clamp(m.z, -1, 1) : 0; pl.assist = !!m.a;
+    if (typeof m.y === 'number') pl.camYaw = m.y; if (typeof m.p === 'number') pl.camPitch = clamp(m.p, -0.45, 1.1); if (typeof m.c === 'number') pl.clicks = m.c; if (typeof m.q === 'number') pl.seq = m.q;
+  }
   function action(pl, a, n) {
     if (!pl || pl.gone || !pl.ped || S.phase !== 'play') return;
     if (a === 'use') tryEnterExit(pl); else if (a === 'reload') startReload(pl); else if (a === 'weapon') switchWeapon(pl, n | 0);

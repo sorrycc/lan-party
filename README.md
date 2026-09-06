@@ -31,13 +31,13 @@ Open one of these on every machine:
 **PLAY SOLO** runs the selected game without a room, if the game allows a single player; the game's options appear under the game list as **SOLO OPTIONS** and apply to every solo restart.
 
 **Phones and tablets.** The lobby shows the join link as a QR code: scan it with the phone's camera and the start screen opens with the room
-code filled in. Frostline Kart, Dodgeball 3v3 and Crossy Farm Car have touch controls. For the best experience on an iPhone or iPad, open the LAN address in
+code filled in. Every game has touch controls. For the best experience on an iPhone or iPad, open the LAN address in
 Safari once and use Share → **Add to Home Screen**: launched from there the game runs full screen in landscape with no browser bar and no
 back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) While a game is running the page holds a screen wake lock, so the phone
 does not dim or lock mid-game (iOS 16.4 and later; it is taken again when the page comes back from the background), and it asks for its sound to be
 played as media, so the game is heard with the ring/silent switch on silent (iOS 17 and later).
 
-Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart wire format, the QR encoder and the touch controls). `npm run icons` redraws the home-screen icons.
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart wire format, the QR encoder, the touch controls and the Fable Theft Auto movement code). `npm run icons` redraws the home-screen icons.
 `FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
@@ -66,10 +66,10 @@ client/
     dodgeball/    Dodgeball 3v3: index.js (game module) + dodgeball.css (its HUD)
     gta/          Fable Theft Auto 5.1: index.js (game module: lifecycle, input, HUD, netcode glue),
                   world.js (the seeded city + instanced pools), entities.js (how peds and cars draw),
-                  motion.js (walking and driving, shared by host and prediction), sim.js (the host's simulation),
+                  motion.js (walking and driving from keys or a thumb stick, shared by host and prediction), sim.js (the host's simulation),
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
     crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
-test/             node --test: the snapshot clock, the Kart wire format, the QR encoder and the touch controls
+test/             node --test: the snapshot clock, the Kart wire format, the QR encoder, the touch controls and the Fable Theft Auto movement code
 scripts/          make-icons.js draws client/icons/*.png with no dependencies
 ```
 
@@ -193,6 +193,16 @@ Click once at the start of a round to grab the mouse; Esc releases it and opens 
 F3 or I opens a stats panel (frame time breakdown, host frame rate, snapshot rate and bandwidth, input lag); the corner always shows FPS and, on a client, the input lag and the host's FPS.
 L cycles the graphics detail (high, medium, low, auto); auto mode drops a level by itself when the frame rate stays under 40.
 Clients predict their own walking and driving locally and are corrected by the host, so your own character answers the keys at once even though everything else is shown a few frames behind.
+The crosshair turns red while a shot would take someone: shots that miss narrowly still hit the nearest pedestrian within a small cone of the crosshair.
+
+On a touch screen (iPhone, iPad, any tablet) the left part of the screen is a thumb stick: touch anywhere there and drag to walk, push it all the way to run,
+and in a car push forward for gas, back for the brake and reverse, and sideways to steer. The rest of the screen is a look surface: drag to turn and aim.
+**FIRE** sits under the right thumb and is held to shoot; drag on it to aim while shooting, and it turns red while the shot would lock on. **JUMP** is the
+handbrake in a car, **USE** says what it would do (ENTER, JACK, EXIT, TURN IN) and lights up when there is something to use, **WEAPON** cycles the guns and
+**RELOAD** lights up when the magazine can be topped up. The ☰ button pauses: sound, detail level, look sensitivity (LOW, NORMAL, HIGH, remembered per browser),
+the stats panel, the controls card and, for the host, restart and leave. A touch player's shots get a wider lock-on cone than a mouse's. Phones and tablets start
+on MEDIUM detail, the HUD keeps clear of the notch and the home indicator, a phone held upright is asked to rotate, and on a phone in landscape the mission text
+folds away after the intro so the objective and the map have the screen.
 Everyone starts on Ender Ave with a sports car in their colour. The Downtown Hit mission is shared: the first player to reach Diamond Plaza flushes Vinny out,
 whoever whacks him collects the $5000 and the heat. Wanted levels are per player and the cops chase whoever they can see. Players can shoot and run each other over
 unless the host turns friendly fire off; a wasted player respawns at the hospital minus $300. Rounds are timed (5, 10, 15 minutes or unlimited) and end with a scoreboard ranked by cash, then kills.

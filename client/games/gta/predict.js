@@ -22,8 +22,9 @@ export function createPredictor({ W }) {
   }
   const otherCars = remote => { const out = []; for (const e of remote.ents.values()) if (e.cls === 'car' && e.id !== carId) out.push(e); return out; };
 
-  /* one local frame; returns the sequence number to stamp on this frame's input, or 0 when not predicting */
-  function step(bits, camYaw, aiming, dt, me, remote, now) {
+  /* one local frame; returns the sequence number to stamp on this frame's input, or 0 when not predicting.
+     `sx` / `sz` are the thumb stick (see motion.js), already rounded the way they go on the wire. */
+  function step(bits, camYaw, aiming, dt, me, remote, now, sx = 0, sz = 0) {
     if (!me || me.pedId < 0) return 0;
     const pe = remote.get(me.pedId);
     if (me.pedId !== pedId) { pedId = me.pedId; synced = false; car = null; carId = -1; }
@@ -31,8 +32,8 @@ export function createPredictor({ W }) {
     if (!synced) { if (!pe) return 0; snapPed(pe); synced = true; }
     if (me.carId !== carId) { carId = me.carId; if (carId >= 0) { const ce = remote.get(carId); if (!ce) { carId = -1; return 0; } attachCar(ce); } else { car = null; ped.inCar = null; if (pe) snapPed(pe); } }
     seq++;
-    if (car) { driveInput(car, bits, dt); stepCar(W, car, dt, null); ped.x = car.x; ped.z = car.z; ped.y = car.y; ped.yaw = car.yaw; ped.moving = 0; }
-    else stepOnFoot(W, ped, bits, camYaw, aiming, dt, otherCars(remote));
+    if (car) { driveInput(car, bits, dt, sx, sz); stepCar(W, car, dt, null); ped.x = car.x; ped.z = car.z; ped.y = car.y; ped.yaw = car.yaw; ped.moving = 0; }
+    else stepOnFoot(W, ped, bits, camYaw, aiming, dt, otherCars(remote), sx, sz);
     hist.push({ q: seq, sentAt: now, x: ped.x, z: ped.z, yaw: ped.yaw, car: car ? { x: car.x, z: car.z, yaw: car.yaw, vF: car.vF } : null });
     if (hist.length > 240) hist.shift();
     const k = Math.min(1, 12 * dt); vis.x -= vis.x * k; vis.z -= vis.z * k; vis.yaw -= vis.yaw * k;

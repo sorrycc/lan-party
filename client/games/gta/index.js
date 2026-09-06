@@ -7,18 +7,24 @@
    ride inside the snapshots and every machine plays its own particles and sounds from them; the camera, the
    HUD, the minimap route and the scenery animation are local. Solo play is the host path without a network.
 
+   Touch screens (core/touch.js): the left part of the screen is a thumb stick that walks, runs or drives, the rest is
+   a look surface, and FIRE, JUMP / HANDBRAKE, USE, WEAPON and RELOAD sit under the right thumb. The stick travels to
+   the host as an analog pair next to the key bits (motion.js), a touch player's shots get a wider soft lock, ☰ opens
+   the pause card, the canvas HUD keeps clear of the notch and a phone held upright is asked to rotate.
+
    Files: world.js (the city + pools), entities.js (how peds/cars draw), sim.js (the host's simulation),
    remote.js (a client's copy), fx.js (particles/decals/tracers), font.js (the bitmap font). */
 import * as THREE from 'three';
 import { clamp, lerp } from '../../core/math.js';
 import { esc, hex, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
+import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { WEAPONS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK } from './sim.js';
+import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol } from './sim.js';
 import { createRemote, parseBlock, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
@@ -26,12 +32,26 @@ import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
 const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car, turn yourself in'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
+const CONTROLS_TOUCH = [['LEFT SIDE', 'drag to move or drive · push all the way to run'], ['RIGHT SIDE', 'drag to look and aim'], ['FIRE', 'hold to shoot · drag on it to aim while shooting'], ['JUMP', 'jump on foot, handbrake in a car'], ['USE', 'enter or exit a car, turn yourself in'], ['WEAPON', 'next weapon · RELOAD reloads'], ['☰', 'pause, sound, detail, look sensitivity']];
+/* the on-screen hints on a touch screen: the USE and JUMP buttons already say what they do, so only the two with no button stay */
+const HINT_TOUCH = ['', '', '', '', HINT[4], 'TURN YOURSELF IN   $100 A STAR'];
 /* graphics detail levels; the auto mode steps down when the frame rate stays low */
 const QUALITY = [{ name: 'HIGH', pr: 1.5, shadow: 2048 }, { name: 'MEDIUM', pr: 1, shadow: 1024 }, { name: 'LOW', pr: 1, shadow: 0 }];
-const HTML = `<canvas class="gl"></canvas><canvas class="hud"></canvas>
-<div class="overlay" hidden><div class="card"><h1 data-title></h1><div class="sub" data-sub></div><div class="controls" data-controls></div><table class="score" data-score hidden></table><div class="foot" data-foot></div></div></div>`;
+/* how far a thumb's drag turns the camera (radians per CSS pixel); the pitch moves a little less than the yaw */
+const LOOK = [{ name: 'LOW', k: 0.0045 }, { name: 'NORMAL', k: 0.0065 }, { name: 'HIGH', k: 0.0095 }];
+const HTML = `<canvas class="gl"></canvas><canvas class="hud"></canvas><div class="sa"></div>
+<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl">DRAG HERE TO MOVE</div></div>
+<div class="look ctl" data-look><div class="lbl">DRAG HERE TO LOOK</div></div>
+<div class="tbtn ctl fire" data-fire><b>FIRE</b><small data-ammo></small></div>
+<div class="tbtn ctl jump" data-jump>JUMP</div>
+<div class="tbtn ctl use" data-use>USE</div>
+<div class="pill ctl weapon" data-weapon><canvas width="48" height="24"></canvas><b data-wname>PISTOL</b></div>
+<div class="pill ctl reload" data-reload>RELOAD</div>
+<div class="menu-btn ctl" data-menu>☰</div>
+<div class="overlay" hidden><div class="card"><h1 data-title></h1><div class="sub" data-sub></div><div class="controls" data-controls></div><table class="score" data-score hidden></table><div class="foot" data-foot></div></div></div>
+<div class="rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>FABLE THEFT AUTO PLAYS IN LANDSCAPE</small></div></div>`;
 const rr = (a, b) => a + Math.random() * (b - a);
-const r3 = v => Math.round(v * 1000) / 1000;
+const r2 = v => Math.round(v * 100) / 100, r3 = v => Math.round(v * 1000) / 1000;
 const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
 /* ============================================================ sound - the original synth on the shell's shared AudioContext */
@@ -82,10 +102,14 @@ function disposeScene(scene) {
 
 export async function create({ mount, audio, send, hooks }) {
   const unloadCss = await loadStylesheet('/games/gta/gta.css');
-  const root = document.createElement('div'); root.className = 'gta'; root.innerHTML = HTML; mount.appendChild(root);
+  const touch = isCoarse(); // phones and tablets: the thumb stick, the look surface, the buttons and ☰ appear and the mouse is ignored
+  const root = document.createElement('div'); root.className = 'gta' + (touch ? ' touch' : ''); root.innerHTML = HTML; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
   const glCanvas = $('canvas.gl'), hudCanvas = $('canvas.hud'), hctx = hudCanvas.getContext('2d');
   const ov = { el: $('.overlay'), title: $('[data-title]'), sub: $('[data-sub]'), controls: $('[data-controls]'), score: $('[data-score]'), foot: $('[data-foot]') };
+  /* the safe-area insets (notch, home indicator) as numbers, read off an element the stylesheet pads with them, so the canvas HUD keeps clear */
+  const saEl = $('.sa'), sa = { t: 0, r: 0, b: 0, l: 0 }; let saStale = true; // the probe has no size while the shell still hides the stage: measured again until it has
+  const measureSafeArea = () => { const r = saEl.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return; saStale = false; sa.t = Math.max(0, r.top); sa.l = Math.max(0, r.left); sa.r = Math.max(0, innerWidth - r.right); sa.b = Math.max(0, innerHeight - r.bottom); };
 
   /* ---- renderer, scene, the city */
   const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: false, powerPreference: 'high-performance' });
@@ -97,7 +121,7 @@ export async function create({ mount, audio, send, hooks }) {
   const fx = createFx({ W });
   const sfx = createSfx(audio);
   const V3 = new THREE.Vector3();
-  function sizeHud() { const dpr = Math.min(window.devicePixelRatio || 1, 2); hudCanvas.width = Math.round(innerWidth * dpr); hudCanvas.height = Math.round(innerHeight * dpr); hctx.setTransform(dpr, 0, 0, dpr, 0, 0); hctx.imageSmoothingEnabled = false; }
+  function sizeHud() { const dpr = Math.min(window.devicePixelRatio || 1, 2); hudCanvas.width = Math.round(innerWidth * dpr); hudCanvas.height = Math.round(innerHeight * dpr); hctx.setTransform(dpr, 0, 0, dpr, 0, 0); hctx.imageSmoothingEnabled = false; saStale = true; measureSafeArea(); }
   const onResize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); sizeHud(); };
   addEventListener('resize', onResize); sizeHud();
 
@@ -115,7 +139,7 @@ export async function create({ mount, audio, send, hooks }) {
   /* ---- session + local state */
   let sim = null, remote = null, session = null, isHost = false, online = false, hostId = null, myId = null, myIdx = 0, me = null, clients = [];
   let state = 'idle'; // idle | grab (click to play) | play | paused | over
-  let camYaw = 0, camPitch = 0.22, mouseIdle = 10, fallbackMouse = false, lockPending = 0, lastMX = null, lastMY = null;
+  let camYaw = 0, camPitch = 0.22, mouseIdle = 10, fallbackMouse = touch, lockPending = 0, lastMX = null, lastMY = null; // no pointer lock on a touch screen
   let t = 0, roundT = 0, fps = 60, clock = START_CLOCK.morning;
   let dmgFlash = 0, wantedFlash = 0, areaT = 0, curDistrict = '', curStreet = '', routeT = 0, route = [], routeTarget = null, wasDead = false;
   const floats = [];
@@ -129,7 +153,12 @@ export async function create({ mount, audio, send, hooks }) {
     W.sun.castShadow = q.shadow > 0;
     if (q.shadow > 0 && W.sun.shadow.mapSize.x !== q.shadow) { W.sun.shadow.mapSize.set(q.shadow, q.shadow); if (W.sun.shadow.map) { W.sun.shadow.map.dispose(); W.sun.shadow.map = null; } }
   }
-  { let saved = null; try { saved = localStorage.getItem('lan_gta_quality'); } catch {} if (saved !== null && QUALITY[+saved]) setQuality(+saved, true); }
+  { let saved = null; try { saved = localStorage.getItem('lan_gta_quality'); } catch {} if (saved !== null && QUALITY[+saved]) setQuality(+saved, true); else if (touch) setQuality(1); } // phones and tablets start a tier down, still in auto mode
+  function cycleQuality() { // HIGH -> MEDIUM -> LOW -> AUTO
+    if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; setQuality(touch ? 1 : 0); try { localStorage.removeItem('lan_gta_quality'); } catch {} }
+    floatText((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 0x9fb4dc);
+  }
+  const qualityLabel = () => 'DETAIL: ' + (autoQuality ? 'AUTO (' + QUALITY[quality].name + ')' : QUALITY[quality].name);
   const cam = { x: 0, y: 5, z: 0, dx: 0, dy: 0, dz: 1, lx: 0, ly: 0, lz: 1 };
   /* the view model the camera, HUD and audio read; filled from the sim (host) or the snapshot store (client) */
   const V = { me: null, subj: { x: 0, y: 0, z: 0, inCar: null, dead: false }, car: null, timeLeft: -1, phase: 0, ms: 0, vin: null, cops: [], players: [], blocks: [] };
@@ -194,9 +223,7 @@ export async function create({ mount, audio, send, hooks }) {
       if (e.code === 'Escape') { if (state === 'play' && fallbackMouse) pause(); else if (state === 'paused') grab(); return; }
       if (e.code === 'KeyM') { audio.toggle(); return; }
       if (e.code === 'F3' || e.code === 'KeyI') { e.preventDefault(); showStats = !showStats; return; }
-      if (e.code === 'KeyL') { // HIGH -> MEDIUM -> LOW -> AUTO
-        if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; setQuality(0); try { localStorage.removeItem('lan_gta_quality'); } catch {} }
-        floatText((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 0x9fb4dc); return; }
+      if (e.code === 'KeyL') { cycleQuality(); return; }
       if (state !== 'play') return;
       if (e.code === 'KeyF' || e.code === 'KeyE') act('use');
       else if (e.code === 'KeyR') act('reload');
@@ -205,12 +232,59 @@ export async function create({ mount, audio, send, hooks }) {
     },
   });
   const held = kb.held;
-  function readInput() {
-    let m = 0;
-    if (state === 'play') { if (held.up) m |= IN.UP; if (held.down) m |= IN.DOWN; if (held.left) m |= IN.LEFT; if (held.right) m |= IN.RIGHT; if (held.sprint) m |= IN.SPRINT; if (held.space) m |= IN.SPACE; if (fireHeld) m |= IN.FIRE; }
-    return { m, y: camYaw, p: camPitch, c: clicks };
+
+  /* touch (core/touch.js): the left part of the screen is a thumb stick that walks, runs (pushed all the way) or drives;
+     the rest is a look surface. FIRE, JUMP / HANDBRAKE, USE, WEAPON and RELOAD sit under the right thumb, and a drag on
+     FIRE aims while shooting. The stick goes to the host as an analog pair next to the key bits (motion.js) and the
+     input carries `a` so the host widens the soft lock for a thumb. */
+  const tc = createTouch();
+  const tb = touch ? { pad: $('[data-pad]'), look: $('[data-look]'), fire: $('[data-fire]'), ammo: $('[data-ammo]'), jump: $('[data-jump]'), use: $('[data-use]'), wname: $('[data-wname]'), wicon: $('[data-weapon] canvas').getContext('2d'), reload: $('[data-reload]'), menu: $('[data-menu]') } : null;
+  let lookLevel = 1;
+  { let saved = null; try { saved = localStorage.getItem('lan_gta_look'); } catch {} if (saved !== null && LOOK[+saved]) lookLevel = +saved; }
+  function cycleLook() { lookLevel = (lookLevel + 1) % LOOK.length; try { localStorage.setItem('lan_gta_look', String(lookLevel)); } catch {} floatText('LOOK: ' + LOOK[lookLevel].name, 0x9fb4dc); }
+  const lookLabel = () => 'LOOK: ' + LOOK[lookLevel].name;
+  /* a look surface reports the whole drag since the finger landed; the camera takes the part it has not seen yet (touchLook) */
+  const dragStart = st => { st.px = 0; st.py = 0; };
+  const stickS = touch ? tc.pad(tb.pad, { range: 60, dead: 6, axes: 2, onDown: () => audio.init() }) : null;
+  const lookS = touch ? tc.button(tb.look, { onDown: st => { audio.init(); dragStart(st); root.classList.add('looked'); } }) : null;
+  const fireS = touch ? tc.button(tb.fire, { onDown: st => { audio.init(); dragStart(st); if (state !== 'play') return; fireHeld = true; clicks++; localShot(false); }, onUp: () => { fireHeld = false; } }) : null;
+  const jumpS = touch ? tc.button(tb.jump, { onDown: () => audio.init() }) : null;
+  if (touch) {
+    tc.button(tb.use, { onDown: () => { audio.init(); act('use'); } });
+    tc.button($('[data-weapon]'), { onDown: () => { audio.init(); act('weapon', curW() + 1); } });
+    tc.button(tb.reload, { onDown: () => { audio.init(); act('reload'); } });
+    tb.menu.addEventListener('click', () => { audio.init(); if (state === 'play') pause(); else if (state === 'paused') grab(); });
   }
+  /* the stick as the analog pair the movement code takes (right, forward; -1..1), rounded the way it goes on the wire so
+     the prediction matches the host. In a car a light forward push is already full gas, so a thumb steering hard keeps
+     the speed and a sideways push does not brake; on foot a push past 0.9 is a run. */
+  const axes = { x: 0, z: 0, sprint: false };
+  function stickAxes(out) {
+    out.x = 0; out.z = 0; out.sprint = false;
+    if (!stickS || !stickS.held) return out;
+    const x = stickS.x, y = -stickS.y; // screen-down is backward
+    if (V.car) { out.x = r2(x); out.z = Math.abs(y) < 0.15 ? 0 : r2(clamp(y * 1.4, -1, 1)); }
+    else { const l = Math.hypot(x, y); if (l > 0.9) { out.x = r2(x / l); out.z = r2(y / l); out.sprint = true; } else { out.x = r2(x); out.z = r2(y); } }
+    return out;
+  }
+  function readInput() {
+    let m = 0, x = 0, z = 0;
+    if (state === 'play') {
+      if (held.up) m |= IN.UP; if (held.down) m |= IN.DOWN; if (held.left) m |= IN.LEFT; if (held.right) m |= IN.RIGHT; if (held.sprint) m |= IN.SPRINT; if (held.space || (jumpS && jumpS.held)) m |= IN.SPACE; if (fireHeld) m |= IN.FIRE;
+      if (touch) { stickAxes(axes); x = axes.x; z = axes.z; if (axes.sprint) m |= IN.SPRINT; }
+    }
+    return { m, y: camYaw, p: camPitch, c: clicks, x, z, a: touch ? 1 : 0 };
+  }
+  /* the camera follows a thumb dragged on the look surface or on FIRE */
+  function touchLook() {
+    if (!touch || state !== 'play') return;
+    const k = LOOK[lookLevel].k;
+    for (const st of [lookS, fireS]) { if (!st.held) continue; const dx = st.dx - st.px, dy = st.dy - st.py; st.px = st.dx; st.py = st.dy; if (!dx && !dy) continue;
+      camYaw -= dx * k; camPitch = clamp(camPitch + dy * k * 0.8, -0.45, 1.1); mouseIdle = 0; }
+  }
+  /* the mouse: ignored on a touch screen, where iOS synthesises mouse events from taps */
   const onMouseDown = e => {
+    if (touch) return;
     if (e.target && e.target.closest && e.target.closest('button')) return;
     if (state === 'grab' || state === 'paused') { if (e.button === 0) grab(); return; }
     if (state !== 'play') return;
@@ -225,6 +299,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
   const onMouseUp = e => { if (e.button === 0) fireHeld = false; };
   const onMouseMove = e => {
+    if (touch) return;
     let dx = e.movementX || 0, dy = e.movementY || 0;
     if (!document.pointerLockElement) { if (lastMX !== null && !dx && !dy) { dx = e.clientX - lastMX; dy = e.clientY - lastMY; } lastMX = e.clientX; lastMY = e.clientY; }
     if (state !== 'play') return;
@@ -239,33 +314,40 @@ export async function create({ mount, audio, send, hooks }) {
   const onLockChange = () => { if (document.pointerLockElement === root) { lockFails = 0; lockPending = 0; } else if (state === 'play' && !fallbackMouse && lockPending <= 0) pause(); };
   const onLockError = () => { lockPending = 0; if (++lockFails >= 3) fallbackMouse = true; else pause(); };
   root.addEventListener('mousedown', onMouseDown); root.addEventListener('contextmenu', onContext);
+  /* a click (or, on a touch screen, the tap itself: Safari only synthesises a click for what it deems clickable) on the card or its backdrop plays / resumes */
+  const onOverlayTap = e => { if (e.target.closest('button') || e.target.closest('table')) return; if (state === 'grab' || state === 'paused') grab(); };
+  ov.el.addEventListener('click', onOverlayTap); if (touch) ov.el.addEventListener('touchend', onOverlayTap);
   addEventListener('mouseup', onMouseUp); addEventListener('mousemove', onMouseMove); addEventListener('wheel', onWheel, { passive: true });
   document.addEventListener('pointerlockchange', onLockChange); document.addEventListener('pointerlockerror', onLockError);
 
   /* ---- pointer lock: "click to play" at the start of a round, pause when the lock is lost */
   function grab() {
     if (state !== 'grab' && state !== 'paused') return;
-    state = 'play'; ov.el.hidden = true; audio.init(); kb.reset();
+    state = 'play'; ov.el.hidden = true; audio.init(); kb.reset(); tc.releaseAll();
     if (!fallbackMouse && !document.pointerLockElement) {
       lockPending = 0.8;
       try { const p = root.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch { fallbackMouse = true; }
     }
   }
-  function pause() { if (state !== 'play') return; state = 'paused'; fireHeld = false; kb.reset(); showOverlay('paused'); }
-  function showOver() { if (state === 'over' || state === 'idle') return; state = 'over'; fireHeld = false; kb.reset(); if (document.pointerLockElement === root) document.exitPointerLock(); showOverlay('over'); }
+  function pause() { if (state !== 'play') return; state = 'paused'; fireHeld = false; kb.reset(); tc.releaseAll(); showOverlay('paused'); }
+  function showOver() { if (state === 'over' || state === 'idle') return; state = 'over'; fireHeld = false; kb.reset(); tc.releaseAll(); root.classList.add('over'); if (document.pointerLockElement === root) document.exitPointerLock(); showOverlay('over'); }
 
   /* ---- overlays: click to play / paused / time's up */
   function button(label, cls, fn) { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; ov.foot.appendChild(b); return b; }
   function showOverlay(kind) {
-    ov.el.hidden = false; ov.foot.innerHTML = ''; ov.score.hidden = kind !== 'over'; ov.controls.hidden = kind === 'over';
-    ov.controls.innerHTML = CONTROLS.map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('');
-    const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY';
+    ov.el.hidden = false; ov.foot.innerHTML = ''; ov.score.hidden = kind !== 'over'; ov.controls.hidden = kind === 'over' || (kind === 'paused' && touch); // the touch pause card is short: HOW TO PLAY unfolds the list
+    ov.controls.innerHTML = (touch ? CONTROLS_TOUCH : CONTROLS).map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('');
+    const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY', tap = touch ? 'TAP' : 'CLICK';
     if (kind === 'grab') {
-      ov.title.innerHTML = 'FABLE THEFT AUTO <b>5.1</b>'; ov.sub.textContent = 'LOS PIXELES  ·  CLICK TO PLAY';
+      ov.title.innerHTML = 'FABLE THEFT AUTO <b>5.1</b>'; ov.sub.textContent = `LOS PIXELES  ·  ${tap} TO PLAY`;
       const f = document.createElement('div'); f.textContent = 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
     } else if (kind === 'paused') {
-      ov.title.textContent = 'PAUSED'; ov.sub.textContent = online ? 'THE CITY KEEPS RUNNING WITHOUT YOU  ·  CLICK TO RESUME' : 'CLICK TO RESUME';
+      ov.title.textContent = 'PAUSED'; ov.sub.textContent = (online ? 'THE CITY KEEPS RUNNING WITHOUT YOU  ·  ' : '') + `${tap} TO RESUME`;
       button('RESUME', 'good', grab);
+      button(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); showOverlay('paused'); });
+      button(qualityLabel(), '', () => { cycleQuality(); showOverlay('paused'); });
+      if (touch) { button(lookLabel(), '', () => { cycleLook(); showOverlay('paused'); }); button('HOW TO PLAY', '', () => { ov.controls.hidden = !ov.controls.hidden; }); }
+      button(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { showStats = !showStats; showOverlay('paused'); });
       if (restart) { button(!online ? 'RESTART' : 'RESTART FOR EVERYONE', '', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
     } else {
       ov.title.textContent = "TIME'S UP"; ov.sub.textContent = 'FINAL STANDINGS  ·  MOST CASH WINS';
@@ -286,9 +368,10 @@ export async function create({ mount, audio, send, hooks }) {
   /* while playing, every frame carries an input (with its sequence number for the predictor); otherwise only changes and a keepalive */
   function clientSendInput(inp, dt) {
     sinceIn += dt;
-    const changed = !lastIn || lastIn.m !== inp.m || lastIn.c !== inp.c || Math.abs(lastIn.y - inp.y) > 0.002 || Math.abs(lastIn.p - inp.p) > 0.002;
+    const changed = !lastIn || lastIn.m !== inp.m || lastIn.c !== inp.c || lastIn.x !== inp.x || lastIn.z !== inp.z || Math.abs(lastIn.y - inp.y) > 0.002 || Math.abs(lastIn.p - inp.p) > 0.002;
     const due = state === 'play' ? sinceIn >= 1 / 65 : (changed && sinceIn >= 1 / 60) || sinceIn >= 0.25;
-    if (due) { lastIn = { ...inp }; sinceIn = 0; send({ t: 'in', to: hostId, m: inp.m, y: r3(inp.y), p: r3(inp.p), c: inp.c, q: inp.q || 0 }); count(netStats.out, 'in'); net.outMsgs++; net.outBytes += 64; }
+    if (due) { lastIn = { ...inp }; sinceIn = 0; const msg = { t: 'in', to: hostId, m: inp.m, y: r3(inp.y), p: r3(inp.p), c: inp.c, q: inp.q || 0 }; if (inp.x) msg.x = inp.x; if (inp.z) msg.z = inp.z; if (inp.a) msg.a = 1;
+      send(msg); count(netStats.out, 'in'); net.outMsgs++; net.outBytes += 64; }
   }
 
   /* ---- per-frame local work: camera, sky, scenery, effects, audio, area names, minimap route */
@@ -307,11 +390,26 @@ export async function create({ mount, audio, send, hooks }) {
     eng.sirenGain.gain.setTargetAtTime(playing ? clamp(near, 0, 1) * 0.035 : 0, ctx.currentTime, 0.1);
     eng.siren.frequency.setTargetAtTime(Math.floor(t * 2.5) % 2 ? 620 : 900, ctx.currentTime, 0.05);
   }
+  /* whether a shot now would soft-lock a pedestrian (the host's rule, aimTol): the crosshair and the FIRE button turn red */
+  let aimLock = false;
+  function findAimLock() {
+    const me = V.me; aimLock = false;
+    if (!me || me.dead || me.carId >= 0 || state !== 'play' || !(isHost ? sim : remote)) return;
+    const w = WEAPONS[me.curW], list = isHost ? sim.peds : remote.ents.values(), ox = cam.x, oy = cam.y, oz = cam.z, vx = cam.dx, vy = cam.dy, vz = cam.dz;
+    const friendly = !session || !session.opts || session.opts.friendlyFire !== false;
+    for (const p of list) { if (p.cls !== 'ped' || p.id === me.pedId || p.dead || p.inCar || p.released || (!friendly && p.kind === 'player')) continue;
+      const ddx = p.x - ox, ddz = p.z - oz; if (ddx * ddx + ddz * ddz > w.range * w.range) continue;
+      for (const hy of [0.3, 1.0, 1.6]) { const dy = p.y + hy - oy, d = Math.hypot(ddx, dy, ddz); if (d < 1.5) continue;
+        const ang = Math.acos(clamp((ddx * vx + dy * vy + ddz * vz) / d, -1, 1));
+        if (ang < aimTol(d, touch) && W.hasLOS(V.subj.x, V.subj.z, p.x, p.z)) { aimLock = true; return; } } }
+  }
   function localFrame(dt) {
     if (lockPending > 0) { lockPending -= dt; if (lockPending <= 0 && !document.pointerLockElement && state === 'play') fallbackMouse = true; }
+    touchLook();
     if (V.subj.dead) { camYaw += dt * 0.35; camPitch = lerp(camPitch, 0.75, dt); }
     else if (V.car && mouseIdle > 1.0) { const c = V.car; const target = c.vF < -1 ? c.yaw + PI : c.yaw; camYaw += angDiff(target, camYaw) * Math.min(1, 2.2 * dt); camPitch = lerp(camPitch, 0.22, dt); }
     computeCamera(W, V.subj, camYaw, camPitch, cam); camera.position.set(cam.x, cam.y, cam.z); camera.lookAt(cam.lx, cam.ly, cam.lz);
+    findAimLock();
     W.dayNight(clock, V.subj.x, V.subj.z, camera); W.animate(dt, t, camera); fx.update(dt); carAmbient(dt); updateAudio();
     W.plazaMarker.visible = V.ms < 2; W.plazaMarker.rotation.y += dt; W.plazaMarker.material.opacity = 0.3 + Math.sin(roundT * 4) * 0.15;
     W.sprayMarker.rotation.y -= dt; W.sprayMarker.material.opacity = (V.me && V.me.wanted > 0 ? 0.4 : 0.18) + Math.sin(roundT * 3) * 0.1;
@@ -359,16 +457,19 @@ export async function create({ mount, audio, send, hooks }) {
       ptext(hctx, p.name, sx, sy - 7 * sc, sc, p.dead ? '#888888' : hex(p.color), 'center'); }
   }
   function drawHUD() {
-    const Wd = innerWidth, Hd = innerHeight; hctx.clearRect(0, 0, Wd, Hd);
-    const s = Math.max(2, Math.round(Wd / 640)), me = V.me;
+    const Wd = innerWidth, Hd = innerHeight; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
+    const s = Math.max(2, Math.round(Wd / 640)), me = V.me, short = Hd < 560; // short: a phone in landscape
+    const L = 16 + sa.l, R = Wd - 16 - sa.r, T = 14 + sa.t, B = Hd - 16 - sa.b; // the HUD's edges, inside the notch and the home indicator
     if (!me) { ptext(hctx, 'WAITING FOR THE HOST…', Wd / 2, Hd / 2, s, '#ffffff', 'center'); return; }
     const dead = me.dead, inCar = me.carId >= 0, deadT = dead ? Math.max(0, 5.5 - me.wastedT) : 0;
     const lowHp = me.health < 30 && !dead ? 0.12 + 0.08 * Math.sin(t * 6) : 0;
     if (dmgFlash > 0 || lowHp) { const a = clamp(dmgFlash * 0.65 + lowHp, 0, 0.85); const g = hctx.createRadialGradient(Wd / 2, Hd / 2, Hd * 0.2, Wd / 2, Hd / 2, Hd * 0.8); g.addColorStop(0, `rgba(190,0,0,${a * 0.35})`); g.addColorStop(1, `rgba(190,0,0,${a})`); hctx.fillStyle = g; hctx.fillRect(0, 0, Wd, Hd); }
     drawNames(Wd, Hd, s);
-    if (!inCar && !dead && state === 'play') { hctx.fillStyle = '#ffffff'; hctx.fillRect(Wd / 2 - 1, Hd / 2 - 9, 2, 6); hctx.fillRect(Wd / 2 - 1, Hd / 2 + 3, 2, 6); hctx.fillRect(Wd / 2 - 9, Hd / 2 - 1, 6, 2); hctx.fillRect(Wd / 2 + 3, Hd / 2 - 1, 6, 2); }
+    if (!inCar && !dead && state === 'play') { // the crosshair: red and a little wider while a shot would lock onto someone
+      const g = aimLock ? 4 : 3, l = aimLock ? 7 : 6; hctx.fillStyle = aimLock ? '#ff4040' : '#ffffff';
+      hctx.fillRect(Wd / 2 - 1, Hd / 2 - g - l, 2, l); hctx.fillRect(Wd / 2 - 1, Hd / 2 + g, 2, l); hctx.fillRect(Wd / 2 - g - l, Hd / 2 - 1, l, 2); hctx.fillRect(Wd / 2 + g, Hd / 2 - 1, l, 2); }
     // top-right: stars, clock, cash, health, weapon, kills, round timer
-    const rx = Wd - 16; let y = 14;
+    const rx = R; let y = T;
     for (let k = 0; k < 5; k++) { const on = k < me.wanted; const blink = on && wantedFlash > 0 && Math.floor(t * 8) % 2 === 0; ptext(hctx, '*', rx - (4 - k) * s * 8, y, s * 1.3, on ? (blink ? '#ffffff' : '#ffe14d') : 'rgba(255,255,255,0.18)', 'right'); }
     y += s * 12;
     const hh = Math.floor(clock), mm = Math.floor((clock - hh) * 60);
@@ -382,20 +483,20 @@ export async function create({ mount, audio, send, hooks }) {
     ptext(hctx, w.name, rx, y, s * 0.8, '#bbbbbb', 'right'); y += s * 9;
     ptext(hctx, 'KILLS ' + me.kills, rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
     if (V.timeLeft >= 0) ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right');
-    // top-left: mission briefing
-    { const px = 14; let py = 14; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro';
+    // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
+    { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro';
       hctx.fillStyle = 'rgba(0,0,0,0.5)';
-      const brief = wrapText(BRIEF, Math.floor(tw / (6 * s * 0.8)));
+      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(BRIEF, Math.floor(tw / (6 * s * 0.8)));
       const objLines = wrapText('> ' + OBJECTIVES[ms], Math.floor(tw / (6 * s * 0.9)));
       hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
       ptext(hctx, 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
       for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
       py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
     // bottom-left: minimap + area name
-    const msz = Math.min(230, Math.round(Wd * 0.2)); drawMinimap(16, Hd - msz - 16, msz);
-    if (areaT > 0) { const a = clamp(areaT, 0, 1); hctx.globalAlpha = a; ptext(hctx, curDistrict, 16 + msz + 18, Hd - 16 - s * 20, s * 1.6, '#ffe14d'); ptext(hctx, curStreet, 16 + msz + 18, Hd - 16 - s * 8, s, '#ffffff'); hctx.globalAlpha = 1; }
-    const hint = HINT[me.hint] || '';
-    if (hint && !dead && state === 'play') ptext(hctx, hint, Wd / 2, Hd - s * 12, s, '#ffffff', 'center');
+    const msz = Math.min(short ? 140 : 230, Math.round(Wd * 0.2)); drawMinimap(L, B - msz, msz);
+    if (areaT > 0) { const a = clamp(areaT, 0, 1); hctx.globalAlpha = a; ptext(hctx, curDistrict, L + msz + 18, B - s * 20, s * 1.6, '#ffe14d'); ptext(hctx, curStreet, L + msz + 18, B - s * 8, s, '#ffffff'); hctx.globalAlpha = 1; }
+    const hint = (touch ? HINT_TOUCH : HINT)[me.hint] || '';
+    if (hint && !dead && state === 'play') ptext(hctx, hint, Wd / 2, B - s * 12 + 4, s, '#ffffff', 'center');
     // centre messages
     if (MISSION_STATES[V.ms] === 'intro' && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1);
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
@@ -406,21 +507,44 @@ export async function create({ mount, audio, send, hooks }) {
       ptext(hctx, 'MISSION PASSED', Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, 'RESPECT +', Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
     floats.forEach((f, i) => { const a = clamp(2.5 - f.t, 0, 1); hctx.globalAlpha = a; ptext(hctx, f.text, Wd / 2, Hd * 0.62 - f.t * 30 - i * s * 10, s * 1.1, hex(f.color), 'center'); hctx.globalAlpha = 1; });
     let line = 'FPS ' + Math.round(fps); if (online) line += isHost ? '  HOST' : `  LAG ${Math.round(pred ? pred.lag : 0)} MS  HOST ${net.hostFps} FPS`;
-    ptext(hctx, line, Wd - 16, Hd - 16 - s * 7, s * 0.7, 'rgba(255,255,255,0.45)', 'right', false);
+    if (touch) ptext(hctx, line, Wd / 2 + 34, sa.t + 16, s * 0.7, 'rgba(255,255,255,0.45)', 'left', false); // beside the ☰; the corner is under the FIRE button
+    else ptext(hctx, line, R, B - s * 7, s * 0.7, 'rgba(255,255,255,0.45)', 'right', false);
     if (showStats) drawStats(Wd, Hd, s);
   }
   function drawStats(Wd, Hd, s) {
-    const sc = s * 0.8, lines = [
+    const sc = Hd < 560 ? s * 0.55 : s * 0.8, lines = [ // a phone gets a smaller face so the lines fit its width
       `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   RENDER ${timing.render.toFixed(1)}   HUD ${timing.hud.toFixed(1)}`,
       `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}`,
     ];
+    if (touch) { // a control that stays HELD after the finger left is the bug these lines are for
+      const ctlWord = c => (c.held ? 'HELD #' + c.pid : 'FREE') + (c.last ? ' (' + c.last.toUpperCase() + ')' : '');
+      lines.push(`TOUCH   STICK ${ctlWord(stickS)}   LOOK ${ctlWord(lookS)}   FIRE ${ctlWord(fireS)}   JUMP ${ctlWord(jumpS)}`);
+      lines.push(`STICK   ${stickS.x.toFixed(2)} ${stickS.y.toFixed(2)} -> ${axes.x.toFixed(2)} / ${axes.z.toFixed(2)}${axes.sprint ? ' RUN' : ''}   LOOK ${LOOK[lookLevel].name}   SAFE AREA ${Math.round(sa.t)} ${Math.round(sa.r)} ${Math.round(sa.b)} ${Math.round(sa.l)}`);
+    }
     if (!online) lines.push(`SOLO   ENTITIES ${sim.peds.length} PEDS  ${sim.cars.length} CARS  ${sim.pickups.length} PICKUPS`);
     else if (isHost) lines.push(`HOST   SNAPSHOTS OUT ${net.rateOut.toFixed(0)}/S  ${net.kbOut.toFixed(1)} KB/S TO ${clients.filter(c => !c.pl.gone).length} PLAYER(S)   ENTITIES ${sim.peds.length} PEDS  ${sim.cars.length} CARS`);
     else lines.push(`CLIENT   SNAPSHOTS IN ${net.rateIn.toFixed(0)}/S  ${net.kbIn.toFixed(1)} KB/S   INPUT OUT ${net.rateOut.toFixed(0)}/S   HOST ${net.hostFps} FPS`,
       `INPUT LAG ${Math.round(pred ? pred.lag : 0)} MS   OTHERS SHOWN ${Math.round(INTERP * 1000)} MS BACK   CORRECTIONS ${pred ? pred.corrections : 0}   ENTITIES ${remote ? remote.ents.size : 0}`);
-    const w = Math.max(...lines.map(l => textW(l, sc))) + s * 8, x = Wd / 2 - w / 2, y = s * 26;
+    const w = Math.max(...lines.map(l => textW(l, sc))) + s * 8, x = Wd / 2 - w / 2, y = s * 26 + sa.t;
     hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(x, y - s * 3, w, lines.length * sc * 9 + s * 4);
     lines.forEach((l, i) => ptext(hctx, l, x + s * 4, y + i * sc * 9, sc, i === 0 ? '#ffe14d' : '#dddddd'));
+  }
+
+  /* ---- the touch buttons follow the game: USE says what F would do, JUMP becomes the handbrake in a car, FIRE dims
+     in a car and shows the magazine, WEAPON shows the gun, RELOAD lights up when there is something to reload */
+  let touchKey = '';
+  function syncTouch() {
+    if (!touch) return;
+    const me = V.me, inCar = !!(me && me.carId >= 0), hint = me ? me.hint : 0, w = WEAPONS[me ? me.curW : 0];
+    const useLabel = hint === 1 ? 'EXIT' : hint === 2 ? 'JACK' : hint === 3 ? 'ENTER' : hint === 5 ? 'TURN IN' : 'USE';
+    const reloading = !!(me && me.reloadT > 0), canReload = !!(me && !reloading && me.ammo < w.mag && me.reserve > 0), ammo = !me ? '' : reloading ? '…' : String(me.ammo);
+    const key = `${inCar}|${useLabel}|${w.key}|${canReload}|${ammo}|${aimLock}`;
+    if (key === touchKey) return; touchKey = key;
+    tb.use.textContent = useLabel; tb.use.classList.toggle('hot', useLabel !== 'USE');
+    tb.jump.textContent = inCar ? 'HANDBRAKE' : 'JUMP'; tb.jump.classList.toggle('car', inCar);
+    tb.fire.classList.toggle('dim', inCar); tb.fire.classList.toggle('lock', aimLock); tb.ammo.textContent = ammo;
+    tb.wname.textContent = w.name; tb.wicon.clearRect(0, 0, 48, 24); drawIcon(tb.wicon, ICONS[w.key], 0, 0, 3, '#ffffff');
+    tb.reload.classList.toggle('hot', canReload);
   }
 
   /* ---- main loop */
@@ -432,14 +556,14 @@ export async function create({ mount, audio, send, hooks }) {
       if (online) hostNetTick(raw); else sim.clearEvents();
       hostView();
     } else {
-      if (remote.R.got) inp.q = pred.step(inp.m, camYaw, localArm > 0, raw, remote.R.P[myIdx], remote, t0);
+      if (remote.R.got) inp.q = pred.step(inp.m, camYaw, localArm > 0, raw, remote.R.P[myIdx], remote, t0, inp.x, inp.z);
       clientSendInput(inp, raw);
       if (remote.R.got) { clock += raw / 45; remote.update(raw, t, myIdx, camPitch, pred.local()); }
       clientView();
       if (state === 'play' && fireHeld) localShot(true);
     }
     const t1 = performance.now();
-    localFrame(raw);
+    localFrame(raw); syncTouch();
     renderer.render(scene, camera);
     const t2 = performance.now();
     drawHUD();
@@ -462,9 +586,10 @@ export async function create({ mount, audio, send, hooks }) {
       hostView();
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
-    state = 'grab'; showOverlay('grab'); kb.attach(); sizeHud(); audio.init(); loop.start();
+    root.classList.remove('over'); touchKey = ''; aimLock = false;
+    state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
   }
-  function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }
+  function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); tc.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }
   function destroy() {
     stop(); unsubAudio(); if (eng) { try { eng.osc.stop(); eng.siren.stop(); eng.gain.disconnect(); eng.sirenGain.disconnect(); } catch {} eng = null; }
     removeEventListener('resize', onResize); removeEventListener('mouseup', onMouseUp); removeEventListener('mousemove', onMouseMove); removeEventListener('wheel', onWheel);
@@ -481,7 +606,8 @@ export async function create({ mount, audio, send, hooks }) {
     else if (msg.t === 'in') { if (isHost && sim) sim.setInput(sim.playerOf(msg.from), msg); }
     else if (msg.t === 'a') { if (isHost && sim) sim.action(sim.playerOf(msg.from), msg.a, msg.n); }
   }
-  const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get fps() { return fps; }, grab, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; } };
+  const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get fps() { return fps; }, grab, pause, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; },
+    get aimLock() { return aimLock; }, sa, touch: { on: touch, stick: stickS, lookPad: lookS, fire: fireS, jump: jumpS, axes, readInput, get sensitivity() { return LOOK[lookLevel]; }, cycleLook } };
   window.__gta = debug;
   return { start, stop, destroy, onNetMessage, playerLeft, debug };
 }

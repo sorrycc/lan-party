@@ -1,10 +1,19 @@
-/* Fable Theft Auto 5.1. Everything is scoped under .gta; the shell supplies .btn for the overlay buttons. */
-.gta { position: absolute; inset: 0; overflow: hidden; background: #000; cursor: crosshair; user-select: none; }
+/* Fable Theft Auto 5.1. Everything is scoped under .gta; the shell supplies .btn for the overlay buttons.
+   `.gta.touch` is set by the game on coarse-pointer devices (phones and tablets): the thumb stick, the look surface, the
+   buttons and the ☰ appear. Every edge offset adds the device's safe-area inset (notch, home indicator), and the canvas
+   HUD reads the same insets off the .sa probe. */
+.gta { --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px);
+  /* the thumb buttons stay clear of Safari's edge-swipe zones even where the safe-area insets are zero (an iPad in a browser tab) */
+  --edge-r: max(22px + var(--sa-r), 40px); --edge-b: max(22px + var(--sa-b), 40px);
+  position: absolute; inset: 0; overflow: hidden; background: #000; cursor: crosshair; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.gta.touch { touch-action: none; cursor: default; }
 .gta canvas.gl, .gta canvas.hud { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .gta canvas.hud { pointer-events: none; }
-/* click-to-play, pause and time's-up card */
-.gta .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(4,8,24,.55); cursor: default; }
-.gta .overlay .card { text-align: center; background: rgba(8,12,34,.9); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 26px 36px 28px; min-width: 460px; max-width: 92vw; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: gta-pop .4s ease-out; }
+.gta .sa { position: absolute; top: var(--sa-t); right: var(--sa-r); bottom: var(--sa-b); left: var(--sa-l); pointer-events: none; visibility: hidden; }
+/* click-to-play, pause and time's-up card (scrolls when it is taller than a phone) */
+.gta .overlay { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: rgba(4,8,24,.55); cursor: default; overflow: auto;
+  padding: calc(10px + var(--sa-t)) calc(10px + var(--sa-r)) calc(10px + var(--sa-b)) calc(10px + var(--sa-l)); }
+.gta .overlay .card { margin: auto; text-align: center; background: rgba(8,12,34,.9); border: 3px solid rgba(255,255,255,.25); border-radius: 22px; padding: 26px 36px 28px; min-width: min(460px, 100%); max-width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: gta-pop .4s ease-out; }
 .gta .overlay h1 { margin: 0 0 4px; font-size: 44px; font-style: italic; letter-spacing: 3px; color: #ffe14d; text-shadow: 0 6px 0 rgba(0,0,0,.4); }
 .gta .overlay h1 b { color: #ff4d4d; }
 .gta .overlay .sub { font-size: 14px; letter-spacing: 3px; color: #9fb4dc; margin-bottom: 16px; }
@@ -18,4 +27,75 @@
 .gta .score .cash { color: #3dff7a; } .gta .score .kills { color: #ff6060; }
 .gta .score .left { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 .gta .foot { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; font-size: 15px; color: #dbe9ff; letter-spacing: 2px; }
+.gta .foot .btn { touch-action: manipulation; }
 @keyframes gta-pop { 0% { transform: scale(.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+
+/* ---------------------------------------------------------------- touch controls (hidden unless .gta has .touch) */
+.gta .ctl { display: none; position: absolute; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.gta.touch .ctl { display: block; }
+/* the pointer target is always the control itself, never a child that may change mid-press (iOS Safari then drops the pointerup) */
+.gta .ctl > * { pointer-events: none; }
+/* thumb stick: the left part of the screen; a ring appears where the finger lands and the knob follows it */
+.gta .pad { left: 0; top: 0; bottom: 0; width: 42%; z-index: 5; --ox: 50%; --oy: 50%; --sx: 0; --sy: 0; }
+.gta .pad .ring { position: absolute; left: var(--ox); top: var(--oy); width: 124px; height: 124px; margin: -62px 0 0 -62px; border-radius: 50%; border: 3px solid rgba(255,255,255,.4); background: rgba(6,10,28,.3); opacity: 0; transition: opacity .2s; }
+.gta .pad.on .ring { opacity: 1; transition: none; }
+.gta .pad .knob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; margin: -27px 0 0 -27px; border-radius: 50%; background: rgba(255,255,255,.92); box-shadow: 0 4px 12px rgba(0,0,0,.45); transform: translate(calc(var(--sx) * 36px), calc(var(--sy) * 36px)); }
+.gta .ctl .lbl { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,.3); font-weight: 700; white-space: nowrap; }
+.gta .pad.on .lbl, .gta.looked .look .lbl { opacity: 0; }
+/* look surface: the rest of the screen, under the buttons; its label sits below the crosshair and goes after the first drag */
+.gta .look { right: 0; top: 0; bottom: 0; width: 58%; z-index: 4; }
+.gta .look .lbl { top: 64%; }
+/* the buttons under the right thumb: FIRE (hold; drag to aim) at the corner, JUMP / HANDBRAKE beside it, USE above FIRE, WEAPON and RELOAD stacked above JUMP */
+.gta .tbtn, .gta .pill { z-index: 6; border: 3px solid rgba(255,255,255,.4); background: rgba(6,10,28,.55); color: #fff; font-weight: 900; font-size: 14px; letter-spacing: 1px; line-height: 1.1;
+  text-shadow: 0 2px 0 rgba(0,0,0,.45); box-shadow: 0 4px 14px rgba(0,0,0,.35); text-align: center; }
+.gta.touch .tbtn, .gta.touch .pill { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.gta.touch.over .ctl { display: none; } /* round over: the scoreboard wants the screen */
+.gta .tbtn { width: 92px; height: 92px; border-radius: 50%; }
+.gta .tbtn.on, .gta .pill.on { transform: scale(.94); background: rgba(255,225,77,.45); border-color: #ffe14d; }
+.gta .fire { right: var(--edge-r); bottom: var(--edge-b); width: 104px; height: 104px; }
+.gta .fire b { letter-spacing: 2px; }
+.gta .fire small { font-size: 12px; color: rgba(255,255,255,.7); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.gta .fire.lock { border-color: #ff4040; box-shadow: 0 0 18px rgba(255,64,64,.6), 0 4px 14px rgba(0,0,0,.35); }
+.gta .fire.on { background: rgba(255,64,64,.45); border-color: #ff4040; }
+.gta .fire.dim { opacity: .35; }
+.gta .jump { right: calc(var(--edge-r) + 118px); bottom: var(--edge-b); }
+.gta .jump.car { font-size: 11px; }
+.gta .use { right: calc(var(--edge-r) + 6px); bottom: calc(var(--edge-b) + 116px); opacity: .55; }
+.gta .use.hot { opacity: 1; border-color: #3dff7a; box-shadow: 0 0 18px rgba(61,255,122,.55), 0 4px 14px rgba(0,0,0,.35); }
+.gta .pill { width: 92px; height: 48px; border-radius: 14px; font-size: 11px; }
+.gta .weapon { right: calc(var(--edge-r) + 118px); bottom: calc(var(--edge-b) + 104px); }
+.gta .weapon canvas { width: 48px; height: 24px; image-rendering: pixelated; }
+.gta .weapon b { font-size: 10px; letter-spacing: 2px; color: rgba(255,255,255,.8); }
+.gta .reload { right: calc(var(--edge-r) + 118px); bottom: calc(var(--edge-b) + 162px); height: 36px; opacity: .55; }
+.gta .reload.hot { opacity: 1; border-color: #ffe14d; }
+/* ☰: pause, sound, detail, look sensitivity, stats, restart, leave */
+.gta .menu-btn { top: calc(6px + var(--sa-t)); left: 50%; transform: translateX(-50%); width: 46px; height: 32px; border-radius: 10px; border: 2px solid rgba(255,255,255,.35); background: rgba(6,10,28,.55); color: #fff; font-size: 16px; text-align: center; line-height: 28px; z-index: 7; }
+/* a phone held upright is asked to rotate (a tablet held upright still fits) */
+.gta .rotate { position: absolute; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; background: #0a0e24; text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 3px; color: #fff; }
+.gta .rotate .phone { font-size: 64px; margin-bottom: 14px; animation: gta-rot 1.6s ease-in-out infinite alternate; }
+.gta .rotate small { display: block; font-size: 11px; color: #9fb4dc; letter-spacing: 2px; margin-top: 10px; font-weight: 700; }
+@keyframes gta-rot { from { transform: rotate(0); } to { transform: rotate(-90deg); } }
+@media (orientation: portrait) and (max-width: 760px) { .gta.touch .rotate { display: flex; } }
+
+/* ---------------------------------------------------------------- short viewports (a phone in landscape): everything a size down */
+@media (max-height: 560px) {
+  .gta { --edge-r: max(10px + var(--sa-r), 28px); --edge-b: max(10px + var(--sa-b), 22px); }
+  .gta .overlay .card { padding: 12px 18px 14px; border-radius: 16px; min-width: min(380px, 100%); }
+  .gta .overlay h1 { font-size: 28px; letter-spacing: 2px; }
+  .gta .overlay .sub { font-size: 10px; letter-spacing: 2px; margin-bottom: 8px; }
+  .gta .controls { font-size: 11px; gap: 2px 10px; margin-bottom: 10px; }
+  .gta .controls kbd { font-size: 10px; padding: 1px 6px; min-width: 36px; }
+  .gta .score { font-size: 14px; margin-bottom: 8px; } .gta .score td { padding: 3px 8px; }
+  .gta .foot { gap: 8px; font-size: 12px; } .gta .foot .btn.small { font-size: 12px; padding: 6px 10px; }
+  .gta .pad { width: 40%; } .gta .pad .ring { width: 108px; height: 108px; margin: -54px 0 0 -54px; } .gta .pad .knob { width: 46px; height: 46px; margin: -23px 0 0 -23px; transform: translate(calc(var(--sx) * 30px), calc(var(--sy) * 30px)); }
+  .gta .look { width: 60%; }
+  .gta .tbtn { width: 68px; height: 68px; font-size: 12px; border-width: 2px; }
+  .gta .fire { width: 84px; height: 84px; } .gta .fire small { font-size: 10px; }
+  .gta .jump { right: calc(var(--edge-r) + 96px); } .gta .jump.car { font-size: 9px; }
+  .gta .use { right: calc(var(--edge-r) + 8px); bottom: calc(var(--edge-b) + 94px); }
+  .gta .pill { width: 68px; height: 40px; border-width: 2px; border-radius: 11px; }
+  .gta .weapon { right: calc(var(--edge-r) + 96px); bottom: calc(var(--edge-b) + 78px); } .gta .weapon canvas { width: 36px; height: 18px; } .gta .weapon b { font-size: 8px; letter-spacing: 1px; }
+  .gta .reload { right: calc(var(--edge-r) + 96px); bottom: calc(var(--edge-b) + 124px); height: 28px; font-size: 9px; }
+  .gta .menu-btn { width: 38px; height: 26px; line-height: 22px; font-size: 14px; }
+  .gta .rotate .phone { font-size: 48px; }
+}

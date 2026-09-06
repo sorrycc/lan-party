@@ -1,7 +1,10 @@
 /* Movement shared by the host's simulation and a client's prediction of its own player: how a pedestrian walks
    from input bits, how a car answers the pedals and rolls, and how both stay out of buildings. Pure functions
    over plain state objects, so the same code moves the authoritative body on the host and the predicted copy
-   on the client. */
+   on the client.
+   Input is the key bits plus an optional analog pair `sx` / `sz` (-1..1: strafe right, forward) from a touch
+   thumb stick. The bits win when any direction key is down; otherwise the stick sets the direction and, on
+   foot, how fast to walk. */
 import { clamp, lerp } from '../../core/math.js';
 import { angDiff, groundY, inCity, HALF, BEACH_Z1 } from './world.js';
 
@@ -34,11 +37,12 @@ export function pushOutOfCars(e, r, isPlayer, cars) {
 }
 
 /* one frame of a player's on-foot movement: p = { x, y, z, yaw, vy, moving, jumpLatch, r, stuck, inCar } */
-export function stepOnFoot(W, p, bits, camYaw, aiming, dt, cars) {
+export function stepOnFoot(W, p, bits, camYaw, aiming, dt, cars, sx = 0, sz = 0) {
   const fx = Math.sin(camYaw), fz = Math.cos(camYaw), rx = -fz, rz = fx;
   let mx = ((bits & IN.RIGHT) ? 1 : 0) - ((bits & IN.LEFT) ? 1 : 0), mz = ((bits & IN.UP) ? 1 : 0) - ((bits & IN.DOWN) ? 1 : 0);
+  if (!mx && !mz) { mx = clamp(sx, -1, 1); mz = clamp(sz, -1, 1); }
   const ground = groundY(p.x, p.z);
-  if (mx || mz) { const l = Math.hypot(mx, mz); mx /= l; mz /= l; const speed = (bits & IN.SPRINT) && !aiming ? 7.6 : 4.6;
+  if (mx || mz) { const l = Math.hypot(mx, mz); mx /= l; mz /= l; const speed = ((bits & IN.SPRINT) && !aiming ? 7.6 : 4.6) * Math.min(1, l); // a half-pushed stick is a stroll
     const dx = fx * mz + rx * mx, dz = fz * mz + rz * mx; p.x += dx * speed * dt; p.z += dz * speed * dt; p.moving = speed;
     const ty = aiming ? camYaw : Math.atan2(dx, dz); p.yaw += angDiff(ty, p.yaw) * Math.min(1, 14 * dt); }
   else { p.moving = 0; if (aiming) p.yaw += angDiff(camYaw, p.yaw) * Math.min(1, 14 * dt); }
@@ -48,11 +52,14 @@ export function stepOnFoot(W, p, bits, camYaw, aiming, dt, cars) {
   pedCollideWorld(W, p); pushOutOfCars(p, 0.35, true, cars);
 }
 
-/* pedals and wheel from input bits (the steering is eased) */
-export function driveInput(c, bits, dt) {
-  c.throttle = (bits & IN.UP) ? 1 : (bits & IN.DOWN) ? -1 : 0;
+/* pedals and wheel from input bits (the steering is eased) or the stick (forward is gas, back is brake then
+   reverse, sideways steers; the wheel follows the thumb almost at once) */
+export function driveInput(c, bits, dt, sx = 0, sz = 0) {
+  c.throttle = (bits & IN.UP) ? 1 : (bits & IN.DOWN) ? -1 : clamp(sz, -1, 1);
   const st = ((bits & IN.LEFT) ? 1 : 0) - ((bits & IN.RIGHT) ? 1 : 0);
-  c.steer = st ? lerp(c.steer, st, Math.min(1, 5 * dt)) : lerp(c.steer, 0, Math.min(1, 8 * dt));
+  if (st) c.steer = lerp(c.steer, st, Math.min(1, 5 * dt));
+  else if (sx) c.steer = lerp(c.steer, clamp(-sx, -1, 1), Math.min(1, 14 * dt));
+  else c.steer = lerp(c.steer, 0, Math.min(1, 8 * dt));
   c.hand = !!(bits & IN.SPACE);
 }
 
