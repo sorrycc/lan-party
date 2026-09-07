@@ -1,7 +1,7 @@
 # LAN Party
 
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
-Ships with **Frostline Kart**, a snowy kart racer with Mario-Kart-style items, coins, Grand Prix cups, CPU karts and up to 8 players, **Dodgeball 3v3**,
+Ships with **Frostline Kart**, a snowy kart racer with shells, bananas and item boxes, coins, Grand Prix cups, CPU karts and up to 8 players, **Dodgeball 3v3**,
 a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest,
 **Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city, and
 **Crossy Farm Car**, a hop-across-the-farm race where up to 8 cars dodge the same herds until the last one is flattened.
