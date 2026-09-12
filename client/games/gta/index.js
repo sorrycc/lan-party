@@ -25,7 +25,7 @@ import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute,
 import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T } from './sim.js';
-import { raceCourse, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
+import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
@@ -159,7 +159,7 @@ export async function create({ mount, audio, send, hooks }) {
   let dmgFlash = 0, wantedFlash = 0, areaT = 0, curDistrict = '', curStreet = '', routeT = 0, route = [], routeTarget = null, wasDead = false;
   const floats = [];
   let clicks = 0, fireHeld = false, netAcc = 0, lastIn = null, sinceIn = 0, pred = null, localFireT = 0, localArm = 0;
-  let course = null, goT = 0, lastCount = -1, finishT = 0; // the race: the checkpoints (from the seed), the GO! flash, the last countdown number heard, the "you finished" flash
+  let course = null, legs = null, routeCp = -1, goT = 0, lastCount = -1, finishT = 0; // the race: the checkpoints and the planned lap (from the seed), where the checkpoint sits in the shown route, the GO! flash, the last countdown number heard, the "you finished" flash
   const timing = { frame: 0, sim: 0, render: 0, hud: 0 };
   const net = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, at: 0, hostFps: 0 };
   let showStats = false, quality = 0, autoQuality = true, lowFpsT = 0;
@@ -462,11 +462,11 @@ export async function create({ mount, audio, send, hooks }) {
      fare or destination, else the mission's target. { x, z, color, label, marker } or null (`marker`: a column and an edge arrow too). */
   const goalMarker = W.makeMarker(0xf2c014);
   /* the race's sat-nav: a trail of arrows on the road along the route (race.js raceGuide) and the next turn for the HUD */
-  const guideArrows = Array.from({ length: 40 }, () => W.makeArrow()); let guide = null;
+  const guideArrows = Array.from({ length: 40 }, () => W.makeArrow()); let guide = null; // { turn, cp } from raceGuide, or null
   function layGuide() {
     let n = 0; guide = null;
     if (course && V.me && !V.me.place && !V.subj.dead && V.md.race && V.md.race.state > 0 && route.length && state !== 'over') {
-      const yaw = V.car ? V.car.yaw : camYaw, g = raceGuide(route, V.subj.x, V.subj.z, Math.sin(yaw), Math.cos(yaw)); guide = g.turn;
+      const yaw = V.car ? V.car.yaw : camYaw, g = raceGuide(route, V.subj.x, V.subj.z, Math.sin(yaw), Math.cos(yaw), 4, 14, routeCp); guide = g.turn || g.cp ? g : null;
       guideArrows[0].material.opacity = 0.55 + Math.sin(roundT * 6) * 0.2;
       for (const a of g.arrows) { if (n >= guideArrows.length) break; const m = guideArrows[n++]; m.visible = true; m.position.x = a.x; m.position.z = a.z; m.rotation.y = a.yaw; const sc = a.big ? 1.7 : 1; m.scale.set(sc, sc, sc); }
     }
@@ -496,7 +496,9 @@ export async function create({ mount, audio, send, hooks }) {
     const d = districtAt(V.subj.x, V.subj.z), s = streetAt(V.subj.x, V.subj.z);
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
-    if (routeT <= 0) { routeT = 0.6; const g = goalOf(); route = g ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(g.x, g.z)) : []; routeTarget = g; }
+    if (routeT <= 0) { const g = goalOf(); routeTarget = g; routeCp = -1;
+      if (course && legs && V.me && !V.me.place) { routeT = 0.25; const yaw = V.car ? V.car.yaw : camYaw, r = raceRoute(course, legs, V.me.next, V.subj.x, V.subj.z, Math.sin(yaw), Math.cos(yaw)); route = r.nodes; routeCp = r.cp; } // the planned lap: this leg from the intersection ahead, then the next
+      else { routeT = 0.6; route = g ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(g.x, g.z)) : []; } }
     layGuide();
     { const g = routeTarget, m = goalMarker; m.visible = !!(g && g.marker); if (m.visible) { m.position.set(g.x, 20, g.z); m.material.color.setHex(g.color); m.rotation.y += dt * 1.2; m.material.opacity = 0.35 + Math.sin(roundT * 4) * 0.15; } }
     areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt; goT -= dt; finishT -= dt;
@@ -516,7 +518,7 @@ export async function create({ mount, audio, send, hooks }) {
     hctx.translate(-(me.x + MAP.MOFF) * MAP.MS, -(me.z + MAP.MOFF) * MAP.MS);
     if (W.mapCanvas) hctx.drawImage(W.mapCanvas, 0, 0);
     if (route.length > 1) { hctx.strokeStyle = '#d64fd6'; hctx.lineWidth = 4; hctx.beginPath(); hctx.moveTo(wx(me.x), wx(me.z));
-      for (const [i, j] of route) hctx.lineTo(wx(X(i)), wx(X(j))); if (routeTarget) hctx.lineTo(wx(routeTarget.x), wx(routeTarget.z)); hctx.stroke(); }
+      for (const [i, j] of route) hctx.lineTo(wx(X(i)), wx(X(j))); if (routeTarget && !course) hctx.lineTo(wx(routeTarget.x), wx(routeTarget.z)); hctx.stroke(); }
     if (routeTarget) { hctx.fillStyle = hex(routeTarget.color); hctx.fillRect(wx(routeTarget.x) - 6, wx(routeTarget.z) - 6, 12, 12); }
     if (course) { const next = V.me ? V.me.next : 1; // the course: numbered rings, the next one filled and blinking, the line a flag
       course.forEach((node, k) => { const p = nodeXZ(node), px = wx(p.x), pz = wx(p.z), isNext = k === next && V.me && !V.me.place;
@@ -555,12 +557,18 @@ export async function create({ mount, audio, send, hooks }) {
     hctx.restore();
   }
   function drawGuide(rx, y, s) {
-    const g = guide, r = s * 6, w = s * 86;
+    const { turn, cp } = guide, r = s * 6, w = s * 86, label = routeTarget ? routeTarget.label : 'GOAL';
     hctx.fillStyle = 'rgba(0,0,0,0.55)'; hctx.fillRect(rx - w, y, w, r * 2 + s * 4);
-    drawTurnArrow(rx - w + r + s * 3, y + r + s * 2, r, g.kind);
-    const word = g.kind === 'ARRIVE' ? (routeTarget ? routeTarget.label : 'GOAL') : g.kind;
-    ptext(hctx, `${word}  ${Math.round(g.d)} M`, rx - s * 2, y + s * 3, s * 1.1, g.kind === 'U-TURN' ? '#ff6060' : '#ffffff', 'right');
-    ptext(hctx, g.kind === 'ARRIVE' ? 'STRAIGHT ON' : g.street.toUpperCase(), rx - s * 2, y + s * 13, s * 0.75, '#2fd0ff', 'right');
+    if (cp && (!turn || turn.kind === 'ARRIVE' || cp.d <= turn.d)) { // the checkpoint is next: name it, and under it the way out of it
+      const after = turn && turn.kind !== 'ARRIVE' ? turn : null;
+      drawTurnArrow(rx - w + r + s * 3, y + r + s * 2, r, after ? after.kind : 'STRAIGHT');
+      ptext(hctx, `${label}  ${Math.round(cp.d)} M`, rx - s * 2, y + s * 3, s * 1.1, '#ffffff', 'right');
+      ptext(hctx, after ? `THEN ${after.kind}  ·  ${after.street.toUpperCase()}` : 'THEN STRAIGHT ON', rx - s * 2, y + s * 13, s * 0.75, after && after.kind === 'U-TURN' ? '#ff6060' : '#2fd0ff', 'right');
+      return; }
+    drawTurnArrow(rx - w + r + s * 3, y + r + s * 2, r, turn.kind);
+    const word = turn.kind === 'ARRIVE' ? label : turn.kind;
+    ptext(hctx, `${word}  ${Math.round(turn.d)} M`, rx - s * 2, y + s * 3, s * 1.1, turn.kind === 'U-TURN' ? '#ff6060' : '#ffffff', 'right');
+    ptext(hctx, turn.kind === 'ARRIVE' ? 'STRAIGHT ON' : turn.street.toUpperCase(), rx - s * 2, y + s * 13, s * 0.75, '#2fd0ff', 'right');
   }
   function bar(x, y, w, h, f, color) { hctx.fillStyle = 'rgba(0,0,0,0.7)'; hctx.fillRect(x - 2, y - 2, w + 4, h + 4); hctx.fillStyle = '#333'; hctx.fillRect(x, y, w, h); hctx.fillStyle = color; hctx.fillRect(x, y, w * clamp(f, 0, 1), h); }
   function drawNames(Wd, Hd, s) {
@@ -743,7 +751,7 @@ export async function create({ mount, audio, send, hooks }) {
       if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
-    course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; goT = 0; lastCount = -1; finishT = 0; // the course comes from the seed on every machine
+    course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; legs = course ? planLap(course) : null; routeCp = -1; goT = 0; lastCount = -1; finishT = 0; // the course and the lap plan come from the seed on every machine
     root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
   }

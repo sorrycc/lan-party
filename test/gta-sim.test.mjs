@@ -275,7 +275,7 @@ test('the ambulance: the patient lies down, the hospital is the destination, and
 });
 
 /* ---- phase 5: the street race */
-import { raceCourse, raceGuide, nodeXZ, progressOf, gridSlot, LAPS, CHECKPOINTS, START_NODE, CP_RADIUS, ordinal } from '../client/games/gta/race.js';
+import { raceCourse, raceGuide, planPath, planLap, raceRoute, nodeAhead, hairpins, exitDir, dirOf, DIRS, DIR_PZ, nodeXZ, progressOf, gridSlot, LAPS, CHECKPOINTS, START_NODE, CP_RADIUS, ordinal } from '../client/games/gta/race.js';
 import { COUNTDOWN_T, RACE_END_T } from '../client/games/gta/sim.js';
 import { NB } from '../client/games/gta/world.js';
 
@@ -286,6 +286,7 @@ test('the course comes from the seed: a loop of inner intersections a few blocks
     for (const p of c.slice(1)) { assert.ok(p[0] >= 1 && p[0] <= NB - 1 && p[1] >= 1 && p[1] <= NB - 1, 'an inner intersection'); }
     for (let i = 0; i < c.length; i++) for (let j = i + 1; j < c.length; j++) assert.ok(Math.abs(c[i][0] - c[j][0]) + Math.abs(c[i][1] - c[j][1]) >= 2, 'spread out: ' + c[i] + ' vs ' + c[j]);
     assert.ok(c[1][1] >= START_NODE[1] - 1, 'the first checkpoint is not behind the grid');
+    assert.equal(hairpins(c), 0, 'no leg doubles back on the one before it, the line included');
     assert.deepEqual(raceCourse(seed), c, 'the same seed lays out the same course');
   }
   assert.notDeepEqual(raceCourse(1), raceCourse(2), 'different seeds, different courses');
@@ -357,6 +358,7 @@ test('everyone home ends the race at once; a wasted racer is back at the wheel a
   assert.equal(pl.cash, cash, 'no hospital bill in a race');
   const c = pl.ped.inCar; assert.ok(c && c !== car0 && c.driver === pl.ped, 'a fresh car'); const cp = nodeXZ(sim.course[2]);
   assert.ok(Math.hypot(c.x - cp.x, c.z - cp.z) < CP_RADIUS, 'at the last checkpoint passed'); assert.equal(pl.next, 3, 'still heading for the next');
+  { const leg = planLap(sim.course)[2], d = DIRS[dirOf(leg[1][0] - leg[0][0], leg[1][1] - leg[0][1])]; assert.ok(Math.abs(Math.sin(c.yaw) - d[0]) < 1e-6 && Math.abs(Math.cos(c.yaw) - d[1]) < 1e-6, 'facing the way the planned route leaves the checkpoint'); }
   for (let lap = 0; lap < LAPS; lap++) { for (let k = lap ? 1 : 3; k < n; k++) { goTo(sim, pl, k); run(sim, 0.05); } goTo(sim, pl, 0); run(sim, 0.05); }
   assert.equal(pl.place, 1); run(sim, 0.1); assert.equal(sim.S.phase, 'over', 'the only racer is home: no grace to wait out');
   assert.equal(sim.WE.kind, null, 'no world events on a race day');
@@ -454,5 +456,59 @@ test('the sat-nav: the first turn on the route, its hand, its distance, and a tr
   g = raceGuide([[6, 6], [6, 5]], X6.x, X6.z + 20, 0, 1); assert.equal(g.turn.kind, 'U-TURN'); assert.equal(g.arrows.length, 0);
   // a node just behind still counts as the one I am at, so its way out is the instruction
   g = raceGuide([[6, 6], [7, 6]], X6.x, X6.z + 1, 0, 1); assert.equal(g.turn.kind, 'LEFT');
-  assert.deepEqual(raceGuide([], 0, 0, 0, 1), { arrows: [], turn: null });
+  assert.deepEqual(raceGuide([], 0, 0, 0, 1), { arrows: [], turn: null, cp: null });
+  // a checkpoint in the middle of the route: its distance is reported, the turn found is the one after it, and the checkpoint gets a big arrow pointing the way out
+  g = raceGuide([[6, 6], [6, 7], [6, 8], [7, 8]], X6.x, X6.z - 20, 0, 1, 4, 14, 2);
+  assert.ok(Math.abs(g.cp.d - 128) < 1e-6, 'the checkpoint two blocks up'); assert.equal(g.turn.kind, 'LEFT'); assert.ok(Math.abs(g.turn.d - g.cp.d) < 1e-6, 'the turn is at the checkpoint itself');
+  const atCp = g.arrows.find(a => a.big && Math.abs(a.z - nodeXZ([6, 8]).z) < 1e-6); assert.ok(atCp && Math.abs(atCp.yaw - Math.PI / 2) < 1e-6, 'the arrow on the checkpoint points +x, the way out');
+  assert.equal(raceGuide([[6, 6], [6, 7]], X6.x, X6.z - 20, 0, 1, 4, 14, 5).cp, null, 'no checkpoint on this route');
+});
+
+const noReverse = path => { for (let k = 2; k < path.length; k++) if (path[k - 2][0] === path[k][0] && path[k - 2][1] === path[k][1]) return false; return true; };
+const sameNode = (a, b) => a[0] === b[0] && a[1] === b[1];
+
+test('the planner: shortest road paths that never reverse, prefer straight, and enter the goal only the asked way', () => {
+  let p = planPath([2, 2], DIR_PZ, [2, 6]); assert.deepEqual(p, [[2, 2], [2, 3], [2, 4], [2, 5], [2, 6]], 'straight up the avenue');
+  p = planPath([2, 2], DIR_PZ, [5, 2]); assert.equal(p.length, 4); assert.ok(noReverse(p)); assert.ok(sameNode(p[0], [2, 2]) && sameNode(p[3], [5, 2]), 'a turn, then along');
+  p = planPath([2, 2], DIR_PZ, [2, 0]); assert.ok(noReverse(p), 'the goal is behind: round a block, never a U-turn'); assert.ok(p.length >= 5); assert.ok(sameNode(p[p.length - 1], [2, 0]));
+  p = planPath([3, 7], DIR_PZ, [3, 8], DIR_PZ); assert.deepEqual(p, [[3, 7], [3, 8]], 'arriving the way asked');
+  p = planPath([3, 9], 3, [3, 8], DIR_PZ); assert.ok(noReverse(p)); assert.ok(sameNode(p[p.length - 2], [3, 7]) && sameNode(p[p.length - 1], [3, 8]), 'coming from the north it loops round to arrive heading +z');
+  assert.ok(p.slice(0, -1).every(q => !sameNode(q, [3, 8])), 'and never crosses the line on the way');
+  p = planPath([4, 4], DIR_PZ, [4, 4], DIR_PZ); assert.deepEqual(p, [[4, 4]], 'already there, facing the right way');
+  p = planPath([4, 4], DIR_PZ, [4, 4], 0); assert.ok(p.length > 2 && sameNode(p[0], [4, 4]) && sameNode(p[p.length - 1], [4, 4]) && noReverse(p), 'already there but facing wrong: round the block');
+  assert.equal(exitDir(p), 0); assert.equal(exitDir([[1, 1]]), DIR_PZ);
+  assert.equal(dirOf(1, 0), 0); assert.equal(dirOf(-1, 0.2), 1); assert.equal(dirOf(0, 1), 2); assert.equal(dirOf(0.1, -1), 3);
+});
+
+test('the lap plan: every leg runs checkpoint to checkpoint, nothing reverses (not through a checkpoint either), and the line is crossed heading +z', () => {
+  for (const seed of [1, 2, 3, 7, 11, 99, 123, 20260903, 4294967295]) {
+    const c = raceCourse(seed), legs = planLap(c), n = c.length; assert.equal(legs.length, n);
+    const whole = [];
+    legs.forEach((leg, k) => { assert.ok(sameNode(leg[0], c[k]) && sameNode(leg[leg.length - 1], c[(k + 1) % n]), 'leg ' + k + ' ends: ' + JSON.stringify(leg)); assert.ok(leg.length >= 2); whole.push(...(k ? leg.slice(1) : leg)); });
+    assert.ok(noReverse(whole), 'seed ' + seed + ' reverses somewhere in ' + JSON.stringify(whole));
+    assert.ok(noReverse([...whole, ...legs[0].slice(1, 3)]), 'nor between the line and lap two');
+    const last = legs[n - 1]; assert.ok(sameNode(last[last.length - 2], [START_NODE[0], START_NODE[1] - 1]), 'back across the line heading +z');
+    for (let k = 0; k < n; k++) assert.ok(legs[k].slice(1, -1).every(q => !sameNode(q, c[(k + 1) % n])), 'a leg never crosses its own checkpoint early');
+    assert.deepEqual(planLap(c), legs, 'deterministic');
+  }
+});
+
+test('the route shown: the rest of this leg from the intersection ahead and the whole of the next, or the way back onto it, and never a U-turn in the city', () => {
+  const c = raceCourse(7), legs = planLap(c), n = c.length;
+  const P = nodeXZ(legs[0][0]), q = legs[0][1], d = DIRS[dirOf(q[0] - legs[0][0][0], q[1] - legs[0][0][1])];
+  // on the first leg, a little past the line, heading its way: the leg from the next node, through checkpoint 1, and on down leg 1
+  let r = raceRoute(c, legs, 1, P.x + d[0] * 1, P.z + d[1] * 1, d[0], d[1]);
+  assert.deepEqual(r.nodes, [...legs[0], ...legs[1].slice(1)]); assert.equal(r.cp, legs[0].length - 1); assert.ok(sameNode(r.nodes[r.cp], c[1]));
+  r = raceRoute(c, legs, 1, P.x + d[0] * 30, P.z + d[1] * 30, d[0], d[1]); assert.deepEqual(r.nodes[0], legs[0][1], 'past the first block: from the node ahead');
+  // driving the leg backwards: planned forward from the node ahead, no reversing, still through the checkpoint and on
+  r = raceRoute(c, legs, 1, P.x + d[0] * 30, P.z + d[1] * 30, -d[0], -d[1]);
+  assert.ok(noReverse(r.nodes)); assert.ok(sameNode(r.nodes[r.cp], c[1])); assert.deepEqual(r.nodes.slice(r.cp), legs[1]);
+  const g = raceGuide(r.nodes, P.x + d[0] * 30, P.z + d[1] * 30, -d[0], -d[1], 4, 14, r.cp); assert.notEqual(g.turn.kind, 'U-TURN'); assert.ok(g.arrows.length > 0);
+  // off the route entirely, from every intersection and heading in the city: a route that starts ahead and never asks for a U-turn
+  for (const seed of [7, 99]) { const cc = raceCourse(seed), ll = planLap(cc);
+    for (let i = 1; i < 12; i += 2) for (let j = 1; j < 12; j += 3) for (let dd = 0; dd < 4; dd++) { const at = nodeXZ([i, j]), h = DIRS[dd], x = at.x + h[0] * 12, z = at.z + h[1] * 12;
+      const rr = raceRoute(cc, ll, 3, x, z, h[0], h[1]); assert.ok(noReverse(rr.nodes), 'reverses at ' + [i, j, dd]); assert.ok(sameNode(rr.nodes[rr.cp], cc[3]));
+      const gg = raceGuide(rr.nodes, x, z, h[0], h[1], 4, 14, rr.cp); assert.ok(gg.turn && gg.turn.kind !== 'U-TURN', 'U-turn asked at ' + [i, j, dd] + ': ' + JSON.stringify(rr.nodes.slice(0, 4))); } }
+  const X6 = nodeXZ([6, 6]);
+  assert.deepEqual(nodeAhead(X6.x, X6.z + 1, 0, 1), [6, 6], 'just past a node still counts as at it'); assert.deepEqual(nodeAhead(X6.x, X6.z + 5, 0, 1), [6, 7]); assert.deepEqual(nodeAhead(X6.x + 20, X6.z, 1, 0), [7, 6]); assert.deepEqual(nodeAhead(X6.x + 20, X6.z, -1, 0), [6, 6]);
 });

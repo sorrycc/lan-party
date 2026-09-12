@@ -12,7 +12,7 @@ import { AVATARS } from '../../core/avatars.js';
 import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, TAXI_RANK, cornerXZ, nearestNode, streetAt, districtAt, rayAabb, raySphere, computeCamera } from './world.js';
 import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS, CAUSES, EVENT_KINDS, JOB_KINDS, JOB_STAGES, seatsOf, seatOffset } from './entities.js';
 import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar, carOffs } from './motion.js';
-import { raceCourse, nodeXZ, progressOf, gridSlot, LAPS, CP_RADIUS } from './race.js';
+import { raceCourse, planLap, nodeXZ, progressOf, gridSlot, LAPS, CP_RADIUS } from './race.js';
 export { IN };
 
 const rnd = Math.random;
@@ -70,7 +70,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const S = { clockH: START_CLOCK[opts.time] ?? START_CLOCK.morning, timeLeft: (Number(opts.minutes) || 0) * 60, unlimited: !(Number(opts.minutes) > 0), phase: mode === 'race' ? 'countdown' : 'play', t: 0, spawnT: 0 };
   const mission = { state: mode === 'sandbox' ? 'intro' : 'done', t: 0, vinny: null, guards: [], hostile: false, passedT: 0, killer: null };
   /* the race: the course (from the seed, the same on every machine), the countdown, then the grace once someone has finished */
-  const course = mode === 'race' ? raceCourse(session.seed) : null;
+  const course = mode === 'race' ? raceCourse(session.seed) : null, legs = course ? planLap(course) : null; // the planned lap decides which way a respawned car faces
   const RC = { t: COUNTDOWN_T, finishers: 0, ending: false };
   /* Most Wanted: who carries the mark and for how long this time */
   const mark = { idx: -1, heldT: 0, pickT: MARK_PICK_T };
@@ -535,8 +535,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
   function respawn(pl) {
     const P = pl.ped; P.dead = false; P.health = 100; P.vy = 0;
-    if (mode === 'race') { // back at the wheel of a fresh car at the last checkpoint, facing the next
-      const n = course.length, at = nodeXZ(course[(pl.next + n - 1) % n]), to = nodeXZ(course[pl.next]), yaw = Math.atan2(to.x - at.x, to.z - at.z), side = pl.idx % 2 ? 3 : -3;
+    if (mode === 'race') { // back at the wheel of a fresh car at the last checkpoint, facing the way the planned route leaves it
+      const n = course.length, k = (pl.next + n - 1) % n, at = nodeXZ(course[k]), leg = legs[k], to = nodeXZ(course[pl.next]);
+      const yaw = leg.length > 1 ? Math.atan2(leg[1][0] - leg[0][0], leg[1][1] - leg[0][1]) : Math.atan2(to.x - at.x, to.z - at.z), side = pl.idx % 2 ? 3 : -3;
       const c = new Car(CAR_TYPES[1], at.x - Math.cos(yaw) * side, at.z + Math.sin(yaw) * side, yaw, (AVATARS[pl.avatar] || AVATARS[0]).color); cars.push(c);
       P.x = c.x; P.z = c.z; P.y = c.y; P.yaw = yaw; c.driver = P; P.inCar = c; P.seat = 0;
       emit(['float', pl.idx, 'BACK ON THE COURSE', 0x2fd0ff]);
