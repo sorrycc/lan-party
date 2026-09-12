@@ -57,6 +57,8 @@ export const POLICE = { x: X(8) + PITCH / 2, z: X(5) + PITCH - ROAD / 2 - 2 };
 export const POLICE_DOOR = { x: POLICE.x, z: X(5) + PITCH - ROAD / 2 - SW - 7.2 };
 export const SPRAY = { x: X(4) + PITCH / 2, z: X(4) + PITCH - ROAD / 2 - SW - 7.5, hw: 4.5, hd: 6.5 };
 export const FERRIS = { x: 0, y: 26, z: BEACH_Z0 + 30, r: 22 };
+/* the taxi rank: three cabs parked along the plaza's west curb, so a taxi job starts without a carjacking */
+export const TAXI_RANK = { x: X(6) + PARK, z: X(6) + 22 };
 export const cornerXZ = (i, j, k) => {
   const c = ROAD / 2 + SW / 2;
   return k === 0 ? [X(i) + c, X(j) + c] : k === 1 ? [X(i + 1) - c, X(j) + c] : k === 2 ? [X(i + 1) - c, X(j + 1) - c] : [X(i) + c, X(j + 1) - c];

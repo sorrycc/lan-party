@@ -10,7 +10,8 @@ export const INTERP = 0.08;
 
 /* the per-player block the host packs in sim.js (`block`) */
 export const parseBlock = b => ({ pedId: b[0], health: b[1], wanted: b[2], cash: b[3], kills: b[4], curW: b[5], ammo: b[6], reserve: b[7], reloadT: b[8], dead: !!b[9], wastedT: b[10], carId: b[11], hint: b[12], camPitch: b[13], god: !!b[14], gone: !!b[15], ack: b[16] | 0,
-  killer: b[17] === undefined ? -1 : b[17], cause: b[18] | 0, markT: b[19] || 0, owned: b[20] === undefined ? 7 : b[20], seat: b[21] | 0 });
+  killer: b[17] === undefined ? -1 : b[17], cause: b[18] | 0, markT: b[19] || 0, owned: b[20] === undefined ? 7 : b[20], seat: b[21] | 0,
+  job: b[22] ? { kind: b[22], stage: b[23] | 0, x: b[24], z: b[25], t: b[26] || 0, n: b[27] | 0 } : null }); // job: the taxi fare / ambulance patient I am on (JOB_KINDS, JOB_STAGES, the target, seconds left, the streak)
 /* the shared mode state the host packs (`modeState`): { mode index, the mark's player index, seconds held, the world event or null } */
 export const parseMode = m => m ? { mode: m[0] | 0, mark: m[1], markT: m[2] || 0, we: m[3] ? { kind: m[3][0], x: m[3][1], z: m[3][2], t: m[3][3], landed: !!m[3][4] } : null } : { mode: 0, mark: -1, markT: 0, we: null };
 
@@ -23,7 +24,7 @@ export function createRemote({ W }) {
     for (const id of m.rm || []) { const e = ents.get(id); if (e) drop(e); }
     for (const a of m.p || []) {
       let e = ents.get(a[0]);
-      if (!e) { const kind = KINDS[a[1]] || 'civ'; e = { id: a[0], cls: 'ped', kind, style: a[2], view: new PedView(W, kind, a[2]), buf: [], x: a[3], y: a[7] !== undefined ? a[7] : groundY(a[3], a[4]), z: a[4], yaw: a[5], dead: false, deadT: 0, moving: 0, hitT: 0, armRaise: 0, inCar: false, camPitch: 0, gun: null }; ents.set(e.id, e); }
+      if (!e) { const kind = KINDS[a[1]] || 'civ'; e = { id: a[0], cls: 'ped', kind, style: a[2], view: new PedView(W, kind, a[2]), buf: [], x: a[3], y: a[7] !== undefined ? a[7] : groundY(a[3], a[4]), z: a[4], yaw: a[5], dead: false, deadT: 0, moving: 0, hitT: 0, armRaise: 0, inCar: false, down: false, camPitch: 0, gun: null }; ents.set(e.id, e); }
       pushSnap(e.buf, { x: a[3], z: a[4], yaw: a[5], f: a[6], y: a[7] }, now);
     }
     for (const a of m.v || []) {
@@ -56,7 +57,7 @@ export function createRemote({ W }) {
       if (e.cls === 'ped') {
         e.y = mine ? mine.y : a.y !== undefined ? (b && b.y !== undefined ? lerp(a.y, b.y, f) : a.y) : groundY(e.x, e.z);
         const dead = !!(fl & PF.DEAD); if (dead && !e.dead) e.deadT = (fl & PF.OLDDEAD) ? 5 : 0; e.dead = dead; if (dead) e.deadT += dt;
-        e.inCar = !!(fl & PF.INCAR); e.moving = mine ? mine.moving : (fl & PF.RUN) ? 5 : (fl & PF.WALK) ? 1.5 : 0; e.armRaise = lerp(e.armRaise, (fl & PF.ARM) ? 1 : 0, Math.min(1, 8 * dt)); e.hitT = (fl & PF.HIT) ? 0.25 : 0;
+        e.inCar = !!(fl & PF.INCAR); e.down = !!(fl & PF.DOWN); e.moving = mine ? mine.moving : (fl & PF.RUN) ? 5 : (fl & PF.WALK) ? 1.5 : 0; e.armRaise = lerp(e.armRaise, (fl & PF.ARM) ? 1 : 0, Math.min(1, 8 * dt)); e.hitT = (fl & PF.HIT) ? 0.25 : 0;
         e.view.draw(e, dt);
       } else {
         if (mine) { e.steer = mine.steer; e.vF = mine.vF; } else { e.steer = b ? lerp(a.steer, b.steer, f) : a.steer; e.vF = b ? lerp(a.vF, b.vF, f) : a.vF; } e.speed = Math.abs(e.vF);

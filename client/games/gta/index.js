@@ -21,7 +21,7 @@ import { createInput } from '../../core/input.js';
 import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { AVATARS } from '../../core/avatars.js';
-import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
+import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL } from './sim.js';
@@ -35,6 +35,8 @@ const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_
 /* what the death card says for each CAUSES entry; a name is filled in when a player did it */
 const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
 const PICK_TEXT = { sniper: 'SNIPER RIFLE', rpg: 'ROCKET LAUNCHER' };
+/* the driving jobs on the HUD, by JOB_KINDS index: the title, what rides along, the colour of its marker */
+const JOB_TEXT = [null, { title: 'TAXI DRIVER', who: 'FARE', color: 0xf2c014 }, { title: 'PARAMEDIC', who: 'PATIENT', color: 0xff4d4d }];
 const EVENT_TEXT = ['ARMORED TRUCK', 'AIRDROP'];
 /* players further than this (or off screen) get an arrow at the edge of the screen; nearer ones have their name over their head */
 const ARROW_FROM = 120;
@@ -230,6 +232,7 @@ export async function create({ mount, audio, send, hooks }) {
       case 'mark': { const [, who, why] = ev; if (mine(who)) { floatText(why === 'start' ? 'YOU ARE THE MOST WANTED. STAY ALIVE.' : 'YOU TOOK THE MARK. STAY ALIVE.', 0xffe14d); sfx.wanted(); }
         else { floatText(nameOf(who) + ' IS THE MOST WANTED', 0xffe14d); sfx.cleared(); } break; }
       case 'wevent': { floatText(ev[4], 0x3dff7a); sfx.cleared(); break; }
+      case 'job': if (mine(ev[1])) { const w = ev[2]; if (w === 'paid') sfx.cash(); else if (w === 'fail') sfx.wanted(); else if (w === 'pickup') sfx.enter(); else if (w === 'start' || w === 'fare') sfx.pickup(); } break;
       case 'wland': { const [, x, z] = ev; if (near(x, z)) { fx.burst.dust(x, 0.5, z); fx.burst.crash(x, 1, z, 10); } sfx.crash(vol(x, z, 200)); break; }
     }
   }
@@ -444,6 +447,15 @@ export async function create({ mount, audio, send, hooks }) {
     if (P) { line1 = (cause === 'runover' ? 'RUN OVER BY ' : cause === 'explosion' ? 'BLOWN UP BY ' : 'WASTED BY ') + P.name.toUpperCase(); line2 = (CAUSE_TEXT[cause] && cause !== 'runover' && cause !== 'explosion' ? CAUSE_TEXT[cause] + '  ·  ' : '') + dist + ' M'; }
     death = { killer: P ? k : -1, line1, line2, t: 0 };
   }
+  /* where the route on the minimap, the yellow square and the marker column point: my job's fare or destination first, else the
+     mission's target. { x, z, color, label, job } or null. */
+  const jobMarker = W.makeMarker(0xf2c014);
+  function goalOf() {
+    const me = V.me, j = me && me.job, jt = j && JOB_TEXT[j.kind];
+    if (j && jt && j.stage > 0) return { x: j.x, z: j.z, color: jt.color, label: j.stage === 1 ? jt.who : 'DROP OFF', job: true };
+    const ms = MISSION_STATES[V.ms]; const tgt = ms === 'goto' || ms === 'intro' ? PLAZA : ms === 'hit' && V.vin ? V.vin : null;
+    return tgt ? { x: tgt.x, z: tgt.z, color: 0xffe14d, label: 'TARGET', job: false } : null;
+  }
   function localFrame(dt) {
     if (lockPending > 0) { lockPending -= dt; if (lockPending <= 0 && !document.pointerLockElement && state === 'play') fallbackMouse = true; }
     touchLook(); magnetise(dt);
@@ -461,7 +473,8 @@ export async function create({ mount, audio, send, hooks }) {
     const d = districtAt(V.subj.x, V.subj.z), s = streetAt(V.subj.x, V.subj.z);
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
-    if (routeT <= 0) { routeT = 0.6; const ms = MISSION_STATES[V.ms]; const tgt = ms === 'goto' || ms === 'intro' ? PLAZA : ms === 'hit' && V.vin ? V.vin : null; route = tgt ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(tgt.x, tgt.z)) : []; routeTarget = tgt; }
+    if (routeT <= 0) { routeT = 0.6; const g = goalOf(); route = g ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(g.x, g.z)) : []; routeTarget = g; }
+    { const g = routeTarget, m = jobMarker; m.visible = !!(g && g.job); if (m.visible) { m.position.set(g.x, 20, g.z); m.material.color.setHex(g.color); m.rotation.y += dt * 1.2; m.material.opacity = 0.35 + Math.sin(roundT * 4) * 0.15; } }
     areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt;
     if (autoQuality && state === 'play' && roundT > 4) { if (fps < 40) { lowFpsT += dt; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; floatText('LOW FRAME RATE: ' + QUALITY[quality].name + ' DETAIL', 0x9fb4dc); } } else lowFpsT = 0; }
     for (let k = floats.length - 1; k >= 0; k--) { floats[k].t += dt; if (floats[k].t > 2.5) floats.splice(k, 1); }
@@ -479,7 +492,8 @@ export async function create({ mount, audio, send, hooks }) {
     if (W.mapCanvas) hctx.drawImage(W.mapCanvas, 0, 0);
     if (route.length > 1) { hctx.strokeStyle = '#d64fd6'; hctx.lineWidth = 4; hctx.beginPath(); hctx.moveTo(wx(me.x), wx(me.z));
       for (const [i, j] of route) hctx.lineTo(wx(X(i)), wx(X(j))); if (routeTarget) hctx.lineTo(wx(routeTarget.x), wx(routeTarget.z)); hctx.stroke(); }
-    if (routeTarget) { hctx.fillStyle = '#ffe14d'; hctx.fillRect(wx(routeTarget.x) - 6, wx(routeTarget.z) - 6, 12, 12); }
+    if (routeTarget) { hctx.fillStyle = hex(routeTarget.color); hctx.fillRect(wx(routeTarget.x) - 6, wx(routeTarget.z) - 6, 12, 12); }
+    { const tx = wx(TAXI_RANK.x + 3), tz = wx(TAXI_RANK.z); hctx.fillStyle = '#f2c014'; hctx.fillRect(tx - 6, tz - 6, 12, 12); ptext(hctx, 'T', tx, tz - 3.5, 1.5, '#000000', 'center', false); } // the taxi rank
     hctx.fillStyle = '#ffffff'; hctx.fillRect(wx(HOSPITAL.x) - 6, wx(HOSPITAL.z - 10) - 6, 12, 12); hctx.fillStyle = '#e02020'; hctx.fillRect(wx(HOSPITAL.x) - 4, wx(HOSPITAL.z - 10) - 1.5, 8, 3); hctx.fillRect(wx(HOSPITAL.x) - 1.5, wx(HOSPITAL.z - 10) - 4, 3, 8);
     // the Pay 'n' Spray (cyan, a spray can) and the precinct door (blue, a badge)
     { const sx = wx(SPRAY.x), sz = wx(SPRAY.z); hctx.fillStyle = '#2fd0ff'; hctx.fillRect(sx - 6, sz - 6, 12, 12); hctx.fillStyle = '#ffffff'; hctx.fillRect(sx - 2, sz - 2, 4, 6); hctx.fillRect(sx - 1, sz - 4.5, 2, 2); hctx.fillRect(sx + 1, sz - 4, 2.5, 1.5); }
@@ -526,6 +540,7 @@ export async function create({ mount, audio, send, hooks }) {
     };
     for (let i = 0; i < V.players.length; i++) { const p = V.players[i]; if (p.me || p.gone || p.dead) continue; const isMark = i === mk; one(p.x, p.y, p.z, isMark ? 0xffe14d : p.color, isMark ? 'MARK ' + p.name : p.name, isMark); }
     if (we) one(we.x, 0, we.z, 0x3dff7a, EVENT_TEXT[we.kind] || 'EVENT', true);
+    if (routeTarget && routeTarget.job) one(routeTarget.x, 0, routeTarget.z, routeTarget.color, routeTarget.label, true);
   }
   function drawHUD() {
     const Wd = innerWidth, Hd = innerHeight; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
@@ -559,12 +574,14 @@ export async function create({ mount, audio, send, hooks }) {
     { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark;
       hctx.fillStyle = 'rgba(0,0,0,0.5)';
       const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
-      const objective = !mw ? OBJECTIVES[ms] : mk < 0 ? 'The mark is drawn in a moment. Find a car.' : mk === myIdx ? `You are the mark. Stay alive: +$${MARK_CASH_PER_S} a second.` : `Hunt ${nameOf(mk)}. The kill pays $${MARK_BOUNTY} and the mark.`;
+      const job = me.job, jt = job && JOB_TEXT[job.kind];
+      const objective = jt ? (job.stage === 0 ? `A ${jt.who.toLowerCase()} is on the way.` : job.stage === 1 ? `Pick up the ${jt.who.toLowerCase()} on ${streetAt(job.x, job.z)}.` : `Take the ${jt.who.toLowerCase()} to ${job.kind === 2 ? 'the hospital' : streetAt(job.x, job.z)}.`) + (job.stage > 0 ? '  ' + fmtClock(job.t) : '') + (job.n ? `  ·  ${job.n} in a row` : '')
+        : !mw ? OBJECTIVES[ms] : mk < 0 ? 'The mark is drawn in a moment. Find a car.' : mk === myIdx ? `You are the mark. Stay alive: +$${MARK_CASH_PER_S} a second.` : `Hunt ${nameOf(mk)}. The kill pays $${MARK_BOUNTY} and the mark.`;
       const objLines = wrapText('> ' + objective, Math.floor(tw / (6 * s * 0.9)));
       hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
-      ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
+      ptext(hctx, jt ? jt.title : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
       for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
-      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
+      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
     // the world event banner, under the wanted flash
     if (V.md.we) { const e = V.md.we, left = fmtClock(Math.max(0, e.t)), txt = e.kind === 1 ? (e.landed ? 'AIRDROP DOWN  ·  ' + left : 'AIRDROP LANDS IN ' + Math.ceil(Math.max(0, e.t - (AIRDROP_T - AIRDROP_FALL)))) : (e.landed ? 'TRUCK OPEN  ·  ' + left : 'ARMORED TRUCK  ·  ' + left);
       ptext(hctx, txt, Wd / 2, T + s * 2, s * 0.9, '#3dff7a', 'center'); }
@@ -664,7 +681,7 @@ export async function create({ mount, audio, send, hooks }) {
       if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
-    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false;
+    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false; jobMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
   }
   function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); tc.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }

@@ -13,7 +13,7 @@ export const KINDS = ['civ', 'cop', 'guard', 'vinny', 'player', 'swat']; // inde
 export const kindIdx = k => KINDS.indexOf(k);
 
 /* ped state flags on the wire */
-export const PF = { DEAD: 1, INCAR: 2, WALK: 4, RUN: 8, ARM: 16, HIT: 32, OLDDEAD: 64 };
+export const PF = { DEAD: 1, INCAR: 2, WALK: 4, RUN: 8, ARM: 16, HIT: 32, OLDDEAD: 64, DOWN: 128 }; // DOWN: lying hurt but alive (a patient waiting for the ambulance)
 /* car state flags on the wire */
 export const CF = { DEAD: 1, SMOKE: 2, BURN: 4, LIGHTS: 8 };
 
@@ -99,6 +99,7 @@ export class PedView {
     if (s.inCar) { this.hide(); return; }
     let bodyPitch = 0, y = s.y;
     if (s.dead) { bodyPitch = -PI / 2 * Math.min(1, s.deadT * 4); y = s.y + 0.28 * Math.min(1, s.deadT * 4); }
+    else if (s.down) { bodyPitch = -PI / 2; y = s.y + 0.28; } // a patient lies where it fell
     M.makeTranslation(s.x, y, s.z); M.multiply(M2.makeRotationY(s.yaw)); if (bodyPitch) M.multiply(M2.makeRotationX(bodyPitch));
     if (s.moving > 0) this.phase += dt * (s.moving > 3 ? 11 : 6.5); else this.phase = lerp(this.phase, Math.round(this.phase / PI) * PI, Math.min(1, 10 * dt));
     const amp = s.moving > 3 ? 1.1 : s.moving > 0 ? 0.7 : 0;
@@ -176,3 +177,6 @@ export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe', 'sniper', 'rpg'];
 export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg'];
 /* the world events, indexed on the wire */
 export const EVENT_KINDS = ['truck', 'airdrop'];
+/* the driving jobs (taxi fares, ambulance patients) and their stages, indexed on the wire (the per-player block) */
+export const JOB_KINDS = ['', 'taxi', 'ambulance'];
+export const JOB_STAGES = ['wait', 'pickup', 'dropoff'];

@@ -201,3 +201,75 @@ test('a passenger is not predicted: the predictor steps aside until the seat is 
   me.carId = -1; me.seat = 0;
   assert.ok(pred.step(0, 0, false, 1 / 60, me, remote, 0) > 0, 'out again: predicting from the host\'s position');
 });
+
+/* ---- phase 4: the taxi rank, taxi fares and ambulance patients */
+import { TAXI_RANK, HOSPITAL } from '../client/games/gta/world.js';
+import { PF, JOB_KINDS, JOB_STAGES } from '../client/games/gta/entities.js';
+import { JOB_PICKUP_T, TAXI_PAY, JOB_STREAK } from '../client/games/gta/sim.js';
+
+const jobOf = (sim, i) => parseBlock(snapshot(sim, i).P[i]).job;
+const entryOf = (sim, i, id) => { const m = snapshot(sim, i); return m.p.find(e => e[0] === id); };
+/* put the player at the wheel of a cab from the rank */
+const takeCab = sim => { const pl = sim.players[0], P = pl.ped; P.x = TAXI_RANK.x - 3; P.z = TAXI_RANK.z; run(sim, 0.05); sim.action(pl, 'use'); return pl; };
+/* park the car right there, engine off, and let the sim notice */
+const stopAt = (sim, c, x, z) => { c.x = x; c.z = z; c.vx = c.vz = 0; c.vF = 0; c.speed = 0; c.angVel = 0; run(sim, 0.2); };
+
+test('three cabs wait at the rank by the plaza, and taking one is not a carjacking', () => {
+  const sim = make(1);
+  const cabs = sim.cars.filter(c => c.type.taxi && c.parked); assert.equal(cabs.length, 3);
+  for (const c of cabs) assert.ok(Math.abs(c.x - TAXI_RANK.x) < 0.1 && Math.abs(c.z - TAXI_RANK.z) <= 8.1, 'lined up along the curb');
+  assert.equal(sim.cars.filter(c => c.type.ambulance).length, 1, 'and the ambulance outside the hospital');
+  const pl = takeCab(sim);
+  assert.ok(pl.ped.inCar && pl.ped.inCar.type.taxi, 'at the wheel of a cab'); assert.equal(pl.wanted, 0, 'no star for a cab off the rank');
+});
+
+test('at the wheel of a cab a fare waves from a corner nearby; stop beside it and it gets in, deliver it and it pays', () => {
+  const sim = make(2); const pl = takeCab(sim), c = pl.ped.inCar;
+  assert.equal(jobOf(sim, 0), null, 'not yet');
+  run(sim, 1.8);
+  let j = pl.job; assert.ok(j && j.kind === 'taxi' && j.stage === 'pickup' && j.fare, 'the job starts by itself at the wheel');
+  const fare = j.fare, d0 = Math.hypot(fare.x - c.x, fare.z - c.z); assert.ok(d0 > 40 && d0 < 180, 'a block or two away: ' + d0);
+  assert.ok(j.t > JOB_PICKUP_T - 1 && j.t <= JOB_PICKUP_T);
+  let w = jobOf(sim, 0); assert.equal(JOB_KINDS[w.kind], 'taxi'); assert.equal(JOB_STAGES[w.stage], 'pickup'); assert.equal(w.x, Math.round(fare.x * 10) / 10); assert.equal(w.n, 0);
+  assert.equal(jobOf(sim, 1), null, 'the other player has no job');
+  run(sim, 1); assert.ok(fare.armRaise > 0.8, 'waving'); assert.ok(entryOf(sim, 0, fare.id)[6] & PF.ARM, 'seen waving on the wire');
+  fare.x = c.x + 40; fare.z = c.z; // whatever corner it picked, bring it within reach of a straight road
+  stopAt(sim, c, fare.x + 2, fare.z);
+  j = pl.job; assert.equal(j.stage, 'dropoff'); assert.equal(fare.inCar, c, 'in the back'); assert.ok(entryOf(sim, 0, fare.id)[6] & PF.INCAR, 'and out of sight');
+  const d = Math.hypot(j.x - c.x, j.z - c.z); assert.ok(d > 30, 'somewhere else in town'); assert.equal(j.pay, Math.round(TAXI_PAY[0] + d * TAXI_PAY[1]));
+  w = jobOf(sim, 0); assert.equal(JOB_STAGES[w.stage], 'dropoff'); assert.equal(w.x, Math.round(j.x * 10) / 10);
+  const cash = pl.cash, pay = j.pay;
+  stopAt(sim, c, j.x + 1, j.z);
+  j = pl.job; assert.equal(j.stage, 'wait'); assert.equal(j.n, 1); assert.equal(fare.inCar, null, 'out again'); assert.equal(fare.job, null);
+  assert.equal(pl.cash, cash + pay + Math.round(pay * 0.5), 'paid, with the tip for a run this fast');
+  assert.equal(jobOf(sim, 0).n, 1);
+  run(sim, 2.2); j = pl.job; assert.equal(j.stage, 'pickup'); assert.notEqual(j.fare, fare, 'the next fare is waiting');
+  const f2 = j.fare; f2.x = c.x + 40; f2.z = c.z; stopAt(sim, c, f2.x + 2, f2.z); const p2 = pl.job.pay, c2 = pl.cash; stopAt(sim, c, pl.job.x + 1, pl.job.z);
+  assert.equal(pl.cash, c2 + p2 + Math.round(p2 * 0.5) + JOB_STREAK, 'two in a row pays the streak');
+});
+
+test('too slow and the fare is gone with the streak; getting out ends the job; a waiting fare is never culled', () => {
+  const sim = make(1); const pl = takeCab(sim), c = pl.ped.inCar; run(sim, 1.8);
+  let j = pl.job; const fare = j.fare; j.n = 2; j.t = 0.05; run(sim, 0.2);
+  assert.equal(j.stage, 'wait'); assert.equal(j.n, 0); assert.equal(fare.job, null); assert.ok(fare.flee > 0, 'it took another cab');
+  const m = snapshot(sim, 0); assert.ok(m.ev.some(e => e[0] === 'job' && e[2] === 'fail'));
+  run(sim, 4.2); j = pl.job; assert.equal(j.stage, 'pickup'); const f2 = j.fare;
+  f2.x = c.x + 500; f2.z = c.z + 500; run(sim, 1.2); assert.ok(!f2.released, 'far from everyone but still waiting');
+  f2.x = c.x + 40; f2.z = c.z; stopAt(sim, c, f2.x + 2, f2.z); assert.equal(f2.inCar, c);
+  sim.action(pl, 'use'); assert.equal(pl.ped.inCar, null);
+  assert.equal(pl.job, null, 'the job ends with the ride'); assert.equal(f2.inCar, null); assert.equal(f2.job, null); assert.equal(jobOf(sim, 0), null);
+  run(sim, 1); assert.ok(!f2.dead);
+});
+
+test('the ambulance: the patient lies down, the hospital is the destination, and a patient shot is a patient lost', () => {
+  const sim = make(1); const pl = sim.players[0], P = pl.ped, amb = sim.cars.find(c => c.type.ambulance);
+  P.x = amb.x + 3; P.z = amb.z; run(sim, 0.05); sim.action(pl, 'use'); assert.equal(P.inCar, amb);
+  run(sim, 1.8); let j = pl.job; assert.equal(j.kind, 'ambulance'); assert.equal(JOB_KINDS[jobOf(sim, 0).kind], 'ambulance');
+  const pt = j.fare; assert.ok(pt.down); run(sim, 0.5); assert.ok(pt.armRaise < 0.3, 'not waving'); assert.ok(entryOf(sim, 0, pt.id)[6] & PF.DOWN, 'lying on the wire');
+  pt.x = amb.x + 40; pt.z = amb.z; stopAt(sim, amb, pt.x + 2, pt.z);
+  j = pl.job; assert.equal(j.stage, 'dropoff'); assert.ok(Math.hypot(j.x - HOSPITAL.x, j.z - HOSPITAL.z) < 12, 'to the hospital');
+  const cash = pl.cash; stopAt(sim, amb, j.x, j.z); assert.equal(pl.job.n, 1); assert.ok(pl.cash > cash); assert.equal(pt.down, false, 'walks out cured');
+  run(sim, 2.2); const pt2 = pl.job.fare; assert.ok(pt2 && pt2.down);
+  pt2.hurt(50, sim.players[0], 'pistol'); assert.ok(pt2.dead); run(sim, 0.1);
+  assert.equal(pl.job.stage, 'wait'); assert.equal(pl.job.n, 0);
+});

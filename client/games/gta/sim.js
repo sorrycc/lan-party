@@ -9,8 +9,8 @@
        range that changed since the last tick, plus a per-player HUD block and the events that concern them). */
 import { clamp, lerp } from '../../core/math.js';
 import { AVATARS } from '../../core/avatars.js';
-import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, cornerXZ, nearestNode, streetAt, districtAt, rayAabb, raySphere, computeCamera } from './world.js';
-import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS, CAUSES, EVENT_KINDS } from './entities.js';
+import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, TAXI_RANK, cornerXZ, nearestNode, streetAt, districtAt, rayAabb, raySphere, computeCamera } from './world.js';
+import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS, CAUSES, EVENT_KINDS, JOB_KINDS, JOB_STAGES } from './entities.js';
 import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar } from './motion.js';
 export { IN };
 
@@ -38,7 +38,7 @@ export const ESCAPE_BONUS = 1000;
 const NET_RANGE2 = 320 * 320, EV_RANGE2 = 360 * 360;
 /* the police budget grows with the room: this many foot cops and cars per player, capped */
 const COPS_PER_PLAYER = 16, COP_CARS_PER_PLAYER = 5, MAX_COPS_ROOM = 72, MAX_COP_CARS_ROOM = 20, ROADBLOCK_EVERY = 14, MAX_ROADBLOCKS = 2;
-const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared']);
+const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared', 'job']);
 /* the wanted level: what a star costs to buy off, how long a taken bribe stays gone, how often a dead cop drops one */
 const STAR_PRICE = 100, BRIBE_RESPAWN = 90, COP_BRIBE_CHANCE = 0.35;
 /* the weapon crates: how long a taken one takes to grow back, how long a dropped weapon lies in the street */
@@ -48,6 +48,9 @@ const SEATS = 3;
 /* the world events: seconds between them, how long each runs, and what the armored truck spills */
 const EVENT_GAP = [70, 110], TRUCK_T = 150, TRUCK_CASH = 12;
 export const AIRDROP_T = 75, AIRDROP_FALL = 10;
+/* the driving jobs: seconds to reach a waiting fare or patient, the base fare and the rate per metre, the bonus for a fast run, what each delivery in a row adds */
+export const JOB_PICKUP_T = 60, TAXI_PAY = [30, 0.6], AMB_PAY = [60, 0.8], JOB_TIP = 0.5, JOB_STREAK = 25;
+const AMB_BAY = { x: HOSPITAL.x, z: HOSPITAL.z + ROAD / 2 + SW / 2 - 2.5 }; // the road outside the hospital's front door
 const SPAWN_ROAD = 3, SPAWN_BLOCK = 7; // the players line up on Ender Ave beside block (3,7), four per sidewalk
 export const SPAWNS = Array.from({ length: 8 }, (_, i) => { const side = i < 4 ? -1 : 1, z = X(SPAWN_BLOCK) + 12 + (i % 4) * 8;
   return { x: X(SPAWN_ROAD) + side * 9.6, z, cx: X(SPAWN_ROAD) + side * PARK, yaw: side < 0 ? 0 : PI, face: side < 0 ? PI / 2 : -PI / 2 }; });
@@ -79,6 +82,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.msgT = 0; // cooldown on the "can't afford it" reminder
       this.killer = -1; this.cause = 0; // who and what got me last (the death camera and its card)
       this.markT = 0; this.peak = 0; this.blockT = 0; // seconds carrying the mark; the highest wanted level since it was last cleared; the roadblock timer
+      this.job = null; // the taxi or ambulance job I am driving: { kind, stage, fare, x, z, t, dist, pay, n }
     }
     get car() { return this.ped ? this.ped.inCar : null; }
     get dead() { return !this.ped || this.ped.dead; }
@@ -98,6 +102,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.flee = 0; this.tx = x; this.tz = z; this.speedMul = rr(0.8, 1.25); this.shootT = rr(0.5, 1.5); this.hostile = false; this.pause = 0;
       this.hitT = 0; this.inCar = null; this.seat = 0; this.armRaise = 0; this.stuck = 0; this.detourT = 0; this.carStuck = 0; this.camPitch = 0; this.gun = null; this.target = null; this.jumpLatch = false;
       this.threatX = x; this.threatZ = z; this.killedBy = null; this.released = false; this.sent = null; this.entry = null; this.dirty = true;
+      this.job = null; this.down = false; // the player whose fare or patient I am; lying hurt, waiting for the ambulance
       this.style = style !== undefined ? style : kind === 'player' ? (owner ? owner.avatar : 0) : ri(0, 1e6);
       this.view = new PedView(W, kind, this.style); this.r = 0.42;
       ents.set(this.id, this);
@@ -141,7 +146,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       if (this.dead) return;
       if (this.kind === 'player') { damagePlayer(this.owner, dmg, by, cause); return; }
       this.health -= dmg; this.hitT = 0.25;
-      if (this.kind === 'civ') { const tp = by && by.ped ? by.ped : null; this.flee = rr(6, 10); this.threatX = tp ? tp.x : this.x + rr(-1, 1); this.threatZ = tp ? tp.z : this.z + rr(-1, 1); this.state = 'flee'; this.pause = 0; }
+      if (this.kind === 'civ') { const tp = by && by.ped ? by.ped : null; this.flee = rr(6, 10); this.threatX = tp ? tp.x : this.x + rr(-1, 1); this.threatZ = tp ? tp.z : this.z + rr(-1, 1); this.state = 'flee'; this.pause = 0;
+        if (this.job && this.health > 0 && !this.down) failJob(this.job, 'THE FARE RAN OFF'); } // a patient just dies of it
       if (this.kind === 'guard' || this.kind === 'vinny') setHostile();
       if (this.health <= 0) this.die(by);
     }
@@ -154,10 +160,12 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     }
     update(dt) {
       if (this.dead) { this.deadT += dt; if (this.deadT > 30 && minPlayerDist2(this.x, this.z) > 900) this.release(); this.draw(dt); return; }
+      if (this.inCar) { const c = this.inCar; this.x = c.x; this.z = c.z; this.y = c.y; this.moving = 0; this.draw(dt); return; } // a fare rides along, out of sight
       this.moving = 0; this.hitT = Math.max(0, this.hitT - dt);
       if (this.kind === 'civ') {
-        this.armRaise = lerp(this.armRaise, 0, 3 * dt);
-        if (this.flee > 0) { this.flee -= dt; const dx = this.x - this.threatX, dz = this.z - this.threatZ, d = Math.hypot(dx, dz) || 1;
+        this.armRaise = lerp(this.armRaise, this.job && !this.down ? 1 : 0, 3 * dt); // a fare waves the cab down
+        if (this.job) { const tp = this.down ? null : nearestPlayer(this.x, this.z); if (tp) this.yaw += angDiff(Math.atan2(tp.ped.x - this.x, tp.ped.z - this.z), this.yaw) * Math.min(1, 4 * dt); } // waiting (a patient lies still)
+        else if (this.flee > 0) { this.flee -= dt; const dx = this.x - this.threatX, dz = this.z - this.threatZ, d = Math.hypot(dx, dz) || 1;
           this.moveToward(this.x + dx / d * 10, this.z + dz / d * 10, 5.5 * this.speedMul, dt);
           if (this.flee <= 0) this.pickNearestCorner(); }
         else if (this.pause > 0) { this.pause -= dt; }
@@ -254,6 +262,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       for (const pl of players) { if (!alive(pl)) continue; if (pl.ped.inCar === this) damagePlayer(pl, 500, by, 'explosion'); else if (!pl.ped.inCar && dist2(pl.ped.x, pl.ped.z, this.x, this.z) < 81) damagePlayer(pl, 70, by, 'explosion'); }
       for (const c of cars) if (c !== this && !c.dead && dist2(c.x, c.z, this.x, this.z) < 100) { c.lastHitBy = this.lastHitBy; c.damage(60); }
       if (this.driver && !this.driver.owner) { this.driver.inCar = null; this.driver.hurt(500, by, 'explosion'); }
+      for (const p of peds) if (p.inCar === this && p.kind !== 'player') { p.inCar = null; p.hurt(500, by, 'explosion'); } // a fare or a patient inside
       this.driver = null;
       if (this.lastHitBy) addWanted(this.lastHitBy, 1);
       alertPeds(this.x, this.z, 60);
@@ -588,7 +597,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const side = P.seat === 0 || P.seat === 2 ? -1 : 1; // the driver and seat 2 step out on the left, the others on the right
     P.x = c.x + c.rx * side * 2.1; P.z = c.z + c.rz * side * 2.1; P.y = groundY(P.x, P.z); P.vy = 0; P.yaw = c.yaw;
     P.inCar = null;
-    if (P.seat === 0) { c.driver = null; c.throttle = 0; c.steer = 0; c.hand = c.speed < 4; }
+    if (P.seat === 0) { c.driver = null; c.throttle = 0; c.steer = 0; c.hand = c.speed < 4; if (pl.job) endJob(pl); }
     else { const i = c.riders.indexOf(P); if (i >= 0) c.riders.splice(i, 1); c.riders.forEach((r, k) => { r.seat = k + 1; }); P.seat = 0; }
     if (!silent) emit(['enter', pl.idx]);
     P.collideWorld();
@@ -745,6 +754,63 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (WE.t <= 0) endEvent();
   }
 
+  /* ============================================================ the driving jobs: taxi fares and ambulance patients
+     At the wheel of a taxi (or the ambulance) a job starts by itself: a fare waves from a street corner a block or two away
+     (a patient lies there), stop beside it and it gets in, then a destination is named (the hospital for a patient) with a
+     timer and a price by the metre. Delivered in time it pays, fast pays a tip, every delivery in a row adds to the next.
+     Too slow, or the fare is hurt or the car is left, and the fare is gone and the streak with it. */
+  function pickCorner(x, z, minD, maxD) {
+    for (let tries = 0; tries < 24; tries++) { const a = rr(0, TAU), d = rr(minD, maxD); const px = x + Math.sin(a) * d, pz = z + Math.cos(a) * d; if (!inCity(px, pz)) continue;
+      const [cx, cz] = cornerXZ(clamp(cellOf(px), 0, NB - 1), clamp(cellOf(pz), 0, NB - 1), ri(0, 3)); if (dist2(cx, cz, x, z) < (minD * 0.7) ** 2) continue; return { x: cx, z: cz }; }
+    return null;
+  }
+  const jobWord = j => j.kind === 'taxi' ? 'FARE' : 'PATIENT';
+  function newFare(pl) {
+    const j = pl.job, c = pl.ped.inCar; const spot = pickCorner(c.x, c.z, 60, 170); if (!spot) { j.t = 3; return; }
+    const p = new Ped('civ', spot.x + rr(-1, 1), spot.z + rr(-1, 1)); p.job = pl; p.state = 'wait'; p.pause = 0; p.flee = 0;
+    if (j.kind === 'ambulance') { p.down = true; p.health = 25; }
+    peds.push(p); j.fare = p; j.stage = 'pickup'; j.x = p.x; j.z = p.z; j.t = JOB_PICKUP_T;
+    emit(['float', pl.idx, jobWord(j) + ' WAITING ON ' + streetAt(p.x, p.z).toUpperCase(), 0xf2c014]); emit(['job', pl.idx, 'fare']);
+  }
+  /* the fare steps out beside the car; delivered it walks off, otherwise it runs */
+  function fareOut(p, c, ok) {
+    p.inCar = null; p.job = null; p.down = false; p.x = c.x + c.rx * 2.4; p.z = c.z + c.rz * 2.4; p.y = groundY(p.x, p.z);
+    if (ok) p.pickNearestCorner(); else { p.flee = 6; p.threatX = c.x; p.threatZ = c.z; p.state = 'flee'; }
+    p.collideWorld();
+  }
+  function releaseFare(j, ok) {
+    const p = j.fare; j.fare = null; if (!p || p.dead || p.released) return;
+    if (p.inCar) fareOut(p, p.inCar, ok); else { p.job = null; p.down = false; if (ok) p.pickNearestCorner(); else { p.flee = 5; p.state = 'flee'; } }
+  }
+  function endJob(pl) { const j = pl.job; if (!j) return; pl.job = null; releaseFare(j, true); emit(['job', pl.idx, 'end']); }
+  function failJob(pl, text) {
+    const j = pl.job; if (!j) return;
+    releaseFare(j, false); j.n = 0; j.stage = 'wait'; j.t = 4;
+    emit(['float', pl.idx, text, 0xff6060]); emit(['job', pl.idx, 'fail']);
+  }
+  function updateJob(pl, dt) {
+    const P = pl.ped, c = P.inCar; const kind = c && P.seat === 0 && !c.dead ? (c.type.taxi ? 'taxi' : c.type.ambulance ? 'ambulance' : null) : null;
+    if (!kind) { if (pl.job) endJob(pl); return; }
+    if (!pl.job) { pl.job = { kind, stage: 'wait', fare: null, x: 0, z: 0, t: 1.5, dist: 0, pay: 0, n: 0 };
+      emit(['float', pl.idx, kind === 'taxi' ? 'TAXI JOB  ·  FARES PAY BY THE METRE' : 'PARAMEDIC  ·  GET THE PATIENTS TO THE HOSPITAL', 0xf2c014]); emit(['job', pl.idx, 'start']); }
+    const j = pl.job; j.t -= dt;
+    if (j.stage === 'wait') { if (j.t <= 0) newFare(pl); return; }
+    const p = j.fare;
+    if (!p || p.dead || p.released) { failJob(pl, kind === 'taxi' ? 'YOUR FARE IS GONE' : "THE PATIENT DIDN'T MAKE IT"); return; }
+    if (j.t <= 0) { failJob(pl, j.stage === 'pickup' ? (kind === 'taxi' ? 'THE FARE TOOK ANOTHER CAB' : 'TOO LATE FOR THE PATIENT') : 'TOO SLOW. THE ' + jobWord(j) + ' GOT OUT'); return; }
+    if (c.speed > 1.5) return;
+    if (j.stage === 'pickup') { if (dist2(c.x, c.z, p.x, p.z) > 8 * 8) return;
+      p.inCar = c; p.armRaise = 0; p.flee = 0;
+      const dest = kind === 'taxi' ? (pickCorner(c.x, c.z, 90, 260) || pickCorner(c.x, c.z, 40, 300) || AMB_BAY) : AMB_BAY;
+      const d = Math.hypot(dest.x - c.x, dest.z - c.z), rate = kind === 'taxi' ? TAXI_PAY : AMB_PAY;
+      j.stage = 'dropoff'; j.x = dest.x; j.z = dest.z; j.dist = d; j.t = d / 8 + 20; j.pay = Math.round(rate[0] + d * rate[1]);
+      emit(['float', pl.idx, (kind === 'taxi' ? 'TAKE THE FARE TO ' + streetAt(dest.x, dest.z).toUpperCase() : 'GET THE PATIENT TO THE HOSPITAL') + '  $' + j.pay, 0xf2c014]); emit(['job', pl.idx, 'pickup']); }
+    else { if (dist2(c.x, c.z, j.x, j.z) > 9 * 9) return;
+      j.n++; const tip = j.t > (j.dist / 8 + 20) * 0.4 ? Math.round(j.pay * JOB_TIP) : 0, streak = JOB_STREAK * (j.n - 1), total = j.pay + tip + streak;
+      pl.cash += total; releaseFare(j, true); j.stage = 'wait'; j.t = 2;
+      emit(['float', pl.idx, (kind === 'taxi' ? 'FARE PAID' : 'PATIENT DELIVERED') + '  +$' + total + (tip ? '  (TIP $' + tip + ')' : '') + (streak ? '  (' + j.n + ' IN A ROW +$' + streak + ')' : ''), 0x3dff7a]); emit(['job', pl.idx, 'paid']); }
+  }
+
   /* ============================================================ the players' own update */
   function updatePlayer(pl, dt, live) {
     const P = pl.ped; pl.noDmgT += dt; pl.godT -= dt; pl.fireT -= dt; pl.armTimer -= dt; pl.msgT -= dt;
@@ -770,6 +836,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       if (pl.wanted > 0 && atPoliceDoor(P)) pl.hint = 5;
       if (dist2(P.x, P.z, HOSPITAL.x, HOSPITAL.z) < 36 && P.health < 100) P.health = Math.min(100, P.health + 25 * dt);
     }
+    if (live) updateJob(pl, dt);
     P.armRaise = lerp(P.armRaise, pl.armTimer > 0 && !P.inCar ? 1 : 0, Math.min(1, 10 * dt));
     P.camPitch = pl.camPitch; P.gun = P.inCar ? null : pl.weapons[pl.curW].key;
     if (!pl.weapons[pl.curW].owned) switchWeapon(pl, 0);
@@ -794,7 +861,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       let civs = 0, traffic = 0;
       for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.kind === 'player') continue;
         const far = minPlayerDist2(p.x, p.z) > 240 * 240;
-        if (far && (p.kind === 'civ' || p.kind === 'cop' || p.kind === 'swat' || p.dead) && p !== mission.vinny) { p.release(); peds.splice(k, 1); continue; }
+        if (far && (p.kind === 'civ' || p.kind === 'cop' || p.kind === 'swat' || p.dead) && p !== mission.vinny && !p.job) { p.release(); peds.splice(k, 1); continue; }
         if (p.kind === 'civ' && !p.dead) civs++; }
       for (let k = cars.length - 1; k >= 0; k--) { const c = cars[k]; if (hasDriverPlayer(c) || c.riders.length) continue;
         const far = minPlayerDist2(c.x, c.z) > 270 * 270;
@@ -828,14 +895,15 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
 
   /* ============================================================ the wire */
-  const pedEntry = p => { const f = (p.dead ? PF.DEAD : 0) | (p.inCar ? PF.INCAR : 0) | (p.moving > 3 ? PF.RUN : p.moving > 0 ? PF.WALK : 0) | (p.armRaise > 0.5 ? PF.ARM : 0) | (p.hitT > 0 ? PF.HIT : 0) | (p.dead && p.deadT > 1 ? PF.OLDDEAD : 0);
+  const pedEntry = p => { const f = (p.dead ? PF.DEAD : 0) | (p.inCar ? PF.INCAR : 0) | (p.moving > 3 ? PF.RUN : p.moving > 0 ? PF.WALK : 0) | (p.armRaise > 0.5 ? PF.ARM : 0) | (p.hitT > 0 ? PF.HIT : 0) | (p.dead && p.deadT > 1 ? PF.OLDDEAD : 0) | (p.down && !p.dead ? PF.DOWN : 0);
     const e = [p.id, kindIdx(p.kind), p.style, r2(p.x), r2(p.z), r2(p.yaw), f]; if (p.kind === 'player') e.push(r2(p.y)); return e; };
   const carEntry = c => [c.id, c.type.idx, c.color, c.cabinColor, r2(c.x), r2(c.z), r2(c.yaw), r2(c.steer), r2(c.vF), (c.dead ? CF.DEAD : 0) | (c.smoking ? CF.SMOKE : 0) | (c.burn > 0 ? CF.BURN : 0) | (c.lights ? CF.LIGHTS : 0)];
   const pickEntry = p => [p.id, PICK_KINDS.indexOf(p.kind), r1(p.x), r1(p.z)];
   const same = (a, b) => { if (!b || a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
   const block = pl => { const P = pl.ped, w = pl.weapons[pl.curW];
     return [P ? P.id : -1, P ? Math.round(P.health) : 0, pl.wanted, Math.floor(pl.cash), pl.kills, pl.curW, w.ammo, w.reserve, r2(pl.reloadT), P && P.dead ? 1 : 0, r1(pl.wastedT), P && P.inCar ? P.inCar.id : -1, pl.hint, r2(pl.camPitch), pl.godT > 0 ? 1 : 0, pl.gone ? 1 : 0, pl.seqApplied,
-      pl.killer, pl.cause, r1(pl.markT), pl.weapons.reduce((m, w, i) => m | (w.owned ? 1 << i : 0), 0), P ? P.seat : 0]; }; // appended: who killed me last and how, seconds as the mark, the weapons I own (a bit each), my seat (0 = the wheel)
+      pl.killer, pl.cause, r1(pl.markT), pl.weapons.reduce((m, w, i) => m | (w.owned ? 1 << i : 0), 0), P ? P.seat : 0, // appended: who killed me last and how, seconds as the mark, the weapons I own (a bit each), my seat (0 = the wheel)
+      ...(pl.job ? [JOB_KINDS.indexOf(pl.job.kind), JOB_STAGES.indexOf(pl.job.stage), r1(pl.job.x), r1(pl.job.z), r1(Math.max(0, pl.job.t)), pl.job.n] : [0])]; }; // the job: kind, stage, where to go, seconds left, deliveries in a row
   /* the shared mode state: [mode, the mark's player index, seconds it has held, the world event or null ([kind, x, z, seconds left, landed])] */
   const modeState = () => [MODES.indexOf(mode), mark.idx, r1(mark.heldT), WE.kind ? [EVENT_KINDS.indexOf(WE.kind), r1(WE.x), r1(WE.z), r1(WE.t), WE.landed ? 1 : 0] : null];
   function prepareNet() {
@@ -870,6 +938,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (let k = 0; k <= NB; k++) for (let m = 0; m < NB; m++) for (const vert of [true, false]) for (const side of [1, -1]) {
       if (rnd() > 0.09) continue;
       if (vert && k === SPAWN_ROAD && m === SPAWN_BLOCK) continue; // the players' cars line this street
+      if (vert && k === 6 && m === 6 && side < 0) continue; // the taxi rank
       const a = vert ? [k, m] : [m, k], b = vert ? [k, m + 1] : [m + 1, k]; const s = side > 0 ? segInfo(a, b) : segInfo(b, a);
       const t = rr(12, s.len - 14); const x = s.ax + s.dx * t + s.rx * PARK, z = s.az + s.dz * t + s.rz * PARK;
       const type = pick([CAR_TYPES[0], CAR_TYPES[0], CAR_TYPES[1], CAR_TYPES[3], CAR_TYPES[4]]);
@@ -877,6 +946,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     }
     for (const ox of [-6, 0, 6]) { const c = new Car(CAR_TYPES[5], POLICE.x + ox, POLICE.z, PI); c.hand = true; c.parked = true; cars.push(c); }
     const amb = new Car(CAR_TYPES[6], HOSPITAL.x + 9, HOSPITAL.z - 1, PI / 2); amb.hand = true; amb.parked = true; cars.push(amb);
+    for (const oz of [-8, 0, 8]) { const c = new Car(CAR_TYPES[2], TAXI_RANK.x, TAXI_RANK.z + oz, PI); c.hand = true; c.parked = true; cars.push(c); } // the rank: three cabs, no carjacking needed
   }
   (session.players || []).forEach((info, i) => {
     const pl = new Player(info, i); players.push(pl); const s = SPAWNS[i % SPAWNS.length];
@@ -889,5 +959,5 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
 
   return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, mark, WE, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
     /* for the tests and the console: reach into the rules directly */
-    debug: { damagePlayer, killPlayer, addWanted, clearWanted, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, Ped, Car } };
+    debug: { damagePlayer, killPlayer, addWanted, clearWanted, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, Ped, Car } };
 }
