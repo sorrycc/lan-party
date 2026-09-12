@@ -651,6 +651,10 @@ export async function create({ mount, audio, send, hooks }) {
     const L = 16 + sa.l, R = Wd - 16 - sa.r, T = 14 + sa.t, B = Hd - 16 - sa.b; // the HUD's edges, inside the notch and the home indicator
     if (!me) { ptext(hctx, 'WAITING FOR THE HOST…', Wd / 2, Hd / 2, s, '#ffffff', 'center'); return; }
     const dead = me.dead, inCar = me.carId >= 0, deadT = dead ? Math.max(0, 5.5 - me.wastedT) : 0;
+    if (dead && replay.active) { // the killcam: letterboxed, nothing else of the HUD (the names, arrows, briefing and feed all describe the live world, not the clip)
+      const bar = Math.round(Hd * 0.09); hctx.fillStyle = '#000000'; hctx.fillRect(0, 0, Wd, bar); hctx.fillRect(0, Hd - bar, Wd, bar);
+      ptext(hctx, 'KILLCAM', Wd / 2, bar + s * 6, s * 1.6, '#ff6060', 'center'); ptext(hctx, 'THROUGH THE EYES OF ' + nameOf(replay.killer).toUpperCase(), Wd / 2, bar + s * 22, s, hex(playerColor(replay.killer)), 'center');
+      hctx.fillStyle = '#ff6060'; hctx.fillRect(0, Hd - bar, Math.round(Wd * replay.progress), 3); return; }
     const lowHp = me.health < 30 && !dead ? 0.12 + 0.08 * Math.sin(t * 6) : 0;
     if (dmgFlash > 0 || lowHp) { const a = clamp(dmgFlash * 0.65 + lowHp, 0, 0.85); const g = hctx.createRadialGradient(Wd / 2, Hd / 2, Hd * 0.2, Wd / 2, Hd / 2, Hd * 0.8); g.addColorStop(0, `rgba(190,0,0,${a * 0.35})`); g.addColorStop(1, `rgba(190,0,0,${a})`); hctx.fillStyle = g; hctx.fillRect(0, 0, Wd, Hd); }
     drawNames(Wd, Hd, s); drawEdgeArrows(Wd, Hd, s, L, R, T, B);
@@ -713,10 +717,7 @@ export async function create({ mount, audio, send, hooks }) {
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
       ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, 'WANTED LEVEL ' + '*'.repeat(me.wanted), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
-    if (dead && replay.active) { const bar = Math.round(Hd * 0.09); hctx.fillStyle = '#000000'; hctx.fillRect(0, 0, Wd, bar); hctx.fillRect(0, Hd - bar, Wd, bar); // letterboxed: the last seconds again, from behind the killer
-      ptext(hctx, 'KILLCAM', Wd / 2, bar + s * 6, s * 1.6, '#ff6060', 'center'); ptext(hctx, 'THROUGH THE EYES OF ' + nameOf(replay.killer).toUpperCase(), Wd / 2, bar + s * 22, s, hex(playerColor(replay.killer)), 'center');
-      hctx.fillStyle = '#ff6060'; hctx.fillRect(0, Hd - bar, Math.round(Wd * replay.progress), 3); }
-    else if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
+    if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
       if (death && deadT > 0.8) { ptext(hctx, death.line1, Wd / 2, Hd / 2 + sc * 4, s * 1.2, '#ffffff', 'center'); if (death.line2) ptext(hctx, death.line2, Wd / 2, Hd / 2 + sc * 4 + s * 12, s * 0.9, '#bbbbbb', 'center'); } }
     if (MISSION_STATES[V.ms] === 'passed') { hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
       ptext(hctx, 'MISSION PASSED', Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, 'RESPECT +', Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
@@ -838,6 +839,6 @@ export async function create({ mount, audio, send, hooks }) {
   }
   const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get fps() { return fps; }, grab, pause, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; },
     get aimLock() { return aimLock; }, sa, touch: { on: touch, stick: stickS, lookPad: lookS, fire: fireS, jump: jumpS, axes, readInput, get sensitivity() { return LOOK[lookLevel]; }, cycleLook } };
-  window.__gta = debug;
+  debug.replay = replay; window.__gta = debug;
   return { start, stop, destroy, onNetMessage, playerLeft, debug };
 }
