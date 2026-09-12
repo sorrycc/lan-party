@@ -39,6 +39,7 @@ export const GAMES = [
     id: 'gta', title: 'Fable Theft Auto 5.1', tagline: 'LOS PIXELES · VOXEL CRIME SANDBOX · UP TO 8',
     minPlayers: 1, maxPlayers: 8,
     options: [
+      { key: 'mode', type: 'select', label: 'MODE', default: 'sandbox', choices: [{ value: 'sandbox', label: 'Sandbox · most cash wins' }, { value: 'mostWanted', label: 'Most Wanted · carry the mark, hunt the mark' }] },
       { key: 'minutes', type: 'select', label: 'ROUND', default: 10, choices: [{ value: 5, label: '5 minutes' }, { value: 10, label: '10 minutes' }, { value: 15, label: '15 minutes' }, { value: 0, label: 'Unlimited' }] },
       { key: 'friendlyFire', type: 'bool', label: 'PLAYERS CAN HURT EACH OTHER', default: true },
       { key: 'time', type: 'select', label: 'TIME OF DAY', default: 'morning', choices: [{ value: 'morning', label: 'Morning' }, { value: 'sunset', label: 'Sunset' }, { value: 'night', label: 'Night' }] },

@@ -9,8 +9,8 @@
        range that changed since the last tick, plus a per-player HUD block and the events that concern them). */
 import { clamp, lerp } from '../../core/math.js';
 import { AVATARS } from '../../core/avatars.js';
-import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, cornerXZ, rayAabb, raySphere, computeCamera } from './world.js';
-import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS } from './entities.js';
+import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, cornerXZ, nearestNode, streetAt, districtAt, rayAabb, raySphere, computeCamera } from './world.js';
+import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS, CAUSES, EVENT_KINDS } from './entities.js';
 import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar } from './motion.js';
 export { IN };
 
@@ -26,12 +26,24 @@ export const OBJECTIVES = { intro: 'Get to Diamond Plaza, downtown.', goto: 'Get
 export const INTRO_T = 5.5;
 /* the soft lock: a shot that misses still takes the nearest pedestrian this close (radians) to the crosshair;
    a touch player aiming with a thumb gets a wider cone. The HUD uses the same rule to colour the crosshair. */
-export const aimTol = (d, assist) => assist ? Math.max(0.1, Math.atan(1.7 / d)) : Math.max(0.05, Math.atan(0.8 / d));
+export const aimTol = (d, assist) => assist ? Math.max(0.16, Math.atan(2.4 / d)) : Math.max(0.05, Math.atan(0.8 / d));
 export const START_CLOCK = { morning: 9.4, sunset: 18.2, night: 23.5 };
-const NET_RANGE2 = 320 * 320, EV_RANGE2 = 360 * 360, MAX_COPS = 24, MAX_COP_CARS = 8;
+/* the game modes, indexed on the wire. Most Wanted needs two players: solo it falls back to the sandbox. */
+export const MODES = ['sandbox', 'mostWanted'];
+export const modeOf = (opts, nPlayers) => opts.mode === 'mostWanted' && nPlayers >= 2 ? 'mostWanted' : 'sandbox';
+/* Most Wanted: what the mark earns a second, the bounty on it, how long after the start the first mark is drawn, the stars it always carries */
+export const MARK_CASH_PER_S = 15, MARK_BOUNTY = 500, MARK_PICK_T = 8, MARK_STARS = 2;
+/* a five-star chase shaken off (not bought off at the precinct) pays this */
+export const ESCAPE_BONUS = 1000;
+const NET_RANGE2 = 320 * 320, EV_RANGE2 = 360 * 360;
+/* the police budget grows with the room: this many foot cops and cars per player, capped */
+const COPS_PER_PLAYER = 16, COP_CARS_PER_PLAYER = 5, MAX_COPS_ROOM = 72, MAX_COP_CARS_ROOM = 20, ROADBLOCK_EVERY = 14, MAX_ROADBLOCKS = 2;
 const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared']);
 /* the wanted level: what a star costs to buy off, how long a taken bribe stays gone, how often a dead cop drops one */
 const STAR_PRICE = 100, BRIBE_RESPAWN = 90, COP_BRIBE_CHANCE = 0.35;
+/* the world events: seconds between them, how long each runs, and what the armored truck spills */
+const EVENT_GAP = [70, 110], TRUCK_T = 150, TRUCK_CASH = 12;
+export const AIRDROP_T = 75, AIRDROP_FALL = 10;
 const SPAWN_ROAD = 3, SPAWN_BLOCK = 7; // the players line up on Ender Ave beside block (3,7), four per sidewalk
 export const SPAWNS = Array.from({ length: 8 }, (_, i) => { const side = i < 4 ? -1 : 1, z = X(SPAWN_BLOCK) + 12 + (i % 4) * 8;
   return { x: X(SPAWN_ROAD) + side * 9.6, z, cx: X(SPAWN_ROAD) + side * PARK, yaw: side < 0 ? 0 : PI, face: side < 0 ? PI / 2 : -PI / 2 }; });
@@ -40,9 +52,16 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const peds = [], cars = [], pickups = [], cops = [], players = [], events = [];
   const ents = new Map(); // id -> entity, everything that can appear on the wire
   let nextId = 1;
-  const friendly = opts.friendlyFire !== false;
+  const nPlayers = (session.players || []).length;
+  const mode = modeOf(opts, nPlayers);
+  const friendly = mode === 'mostWanted' || opts.friendlyFire !== false; // the mark can only be hunted with friendly fire on
+  const MAX_COPS = Math.min(MAX_COPS_ROOM, COPS_PER_PLAYER * Math.max(1, nPlayers)), MAX_COP_CARS = Math.min(MAX_COP_CARS_ROOM, COP_CARS_PER_PLAYER * Math.max(1, nPlayers));
   const S = { clockH: START_CLOCK[opts.time] ?? START_CLOCK.morning, timeLeft: (Number(opts.minutes) || 0) * 60, unlimited: !(Number(opts.minutes) > 0), phase: 'play', t: 0, spawnT: 0 };
-  const mission = { state: 'intro', t: 0, vinny: null, guards: [], hostile: false, passedT: 0, killer: null };
+  const mission = { state: mode === 'sandbox' ? 'intro' : 'done', t: 0, vinny: null, guards: [], hostile: false, passedT: 0, killer: null };
+  /* Most Wanted: who carries the mark and for how long this time */
+  const mark = { idx: -1, heldT: 0, pickT: MARK_PICK_T };
+  /* the current world event (one at a time): kind, where it is, how long it has left; the truck's car or the airdrop's landing timer */
+  const WE = { kind: null, x: 0, z: 0, t: 0, nextT: rr(EVENT_GAP[0], EVENT_GAP[1]), car: null, landT: 0, landed: false };
   const emit = (ev, x, z) => { events.push({ e: ev, x, z }); onEvent(ev); };
   const camTmp = {};
 
@@ -54,6 +73,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.wanted = 0; this.heat = 0; this.crimeT = 0; this.seenT = 0; this.copSpawnT = 0; this.cash = 250; this.kills = 0;
       this.weapons = WEAPONS.map(w => ({ ...w })); this.curW = 0; this.reloadT = 0; this.fireT = 0; this.armTimer = 0; this.godT = 0; this.noDmgT = 0; this.wastedT = 0; this.hint = 0; this.jumpLatch = false;
       this.msgT = 0; // cooldown on the "can't afford it" reminder
+      this.killer = -1; this.cause = 0; // who and what got me last (the death camera and its card)
+      this.markT = 0; this.peak = 0; this.blockT = 0; // seconds carrying the mark; the highest wanted level since it was last cleared; the roadblock timer
     }
     get car() { return this.ped ? this.ped.inCar : null; }
     get dead() { return !this.ped || this.ped.dead; }
@@ -68,7 +89,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   class Ped {
     constructor(kind, x, z, style, owner) {
       this.id = nextId++; this.cls = 'ped'; this.kind = kind; this.owner = owner || null; this.x = x; this.z = z; this.y = groundY(x, z); this.vy = 0; this.yaw = rr(0, TAU);
-      this.health = kind === 'vinny' ? 170 : kind === 'guard' ? 90 : kind === 'cop' ? 55 : kind === 'player' ? 100 : 40;
+      this.health = kind === 'vinny' ? 170 : kind === 'guard' ? 90 : kind === 'swat' ? 110 : kind === 'cop' ? 55 : kind === 'player' ? 100 : 40;
       this.dead = false; this.deadT = 0; this.state = kind === 'civ' ? 'walk' : 'idle'; this.moving = 0;
       this.flee = 0; this.tx = x; this.tz = z; this.speedMul = rr(0.8, 1.25); this.shootT = rr(0.5, 1.5); this.hostile = false; this.pause = 0;
       this.hitT = 0; this.inCar = null; this.armRaise = 0; this.stuck = 0; this.detourT = 0; this.carStuck = 0; this.camPitch = 0; this.gun = null; this.target = null; this.jumpLatch = false;
@@ -112,9 +133,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       return d;
     }
     collideWorld() { pedCollideWorld(W, this); }
-    hurt(dmg, by) {
+    hurt(dmg, by, cause) {
       if (this.dead) return;
-      if (this.kind === 'player') { damagePlayer(this.owner, dmg, by); return; }
+      if (this.kind === 'player') { damagePlayer(this.owner, dmg, by, cause); return; }
       this.health -= dmg; this.hitT = 0.25;
       if (this.kind === 'civ') { const tp = by && by.ped ? by.ped : null; this.flee = rr(6, 10); this.threatX = tp ? tp.x : this.x + rr(-1, 1); this.threatZ = tp ? tp.z : this.z + rr(-1, 1); this.state = 'flee'; this.pause = 0; }
       if (this.kind === 'guard' || this.kind === 'vinny') setHostile();
@@ -137,17 +158,18 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
           if (this.flee <= 0) this.pickNearestCorner(); }
         else if (this.pause > 0) { this.pause -= dt; }
         else { const d = this.moveToward(this.tx, this.tz, 1.5 * this.speedMul, dt); if (d < 0.7) this.nextTarget(); }
-      } else if (this.kind === 'cop' || (this.kind === 'guard' && this.hostile)) {
-        const tp = this.kind === 'cop' ? nearestPlayer(this.x, this.z, p => p.wanted > 0) : nearestPlayer(this.x, this.z);
+      } else if (this.kind === 'cop' || this.kind === 'swat' || (this.kind === 'guard' && this.hostile)) {
+        const police = this.kind !== 'guard', swat = this.kind === 'swat';
+        const tp = police ? nearestPlayer(this.x, this.z, p => p.wanted > 0) : nearestPlayer(this.x, this.z);
         this.target = tp;
         if (tp) {
           const T = tp.ped, car = T.inCar, dP = Math.hypot(T.x - this.x, T.z - this.z);
           const engage = dP < 60 && W.hasLOS(this.x, this.z, T.x, T.z);
           const wantDist = car ? 10 : 7;
-          if (engage) { if (dP > wantDist) this.moveToward(T.x, T.z, 5.6, dt); else this.yaw += angDiff(Math.atan2(T.x - this.x, T.z - this.z), this.yaw) * Math.min(1, 10 * dt);
+          if (engage) { if (dP > wantDist) this.moveToward(T.x, T.z, swat ? 6.2 : 5.6, dt); else this.yaw += angDiff(Math.atan2(T.x - this.x, T.z - this.z), this.yaw) * Math.min(1, 10 * dt);
             this.armRaise = lerp(this.armRaise, 1, 6 * dt);
             this.shootT -= dt;
-            if (this.shootT <= 0 && dP < 26) { const agg = this.kind === 'guard' ? 1 : clamp(0.45 + tp.wanted * 0.14, 0.5, 1.1); this.shootT = rr(0.8, 1.6) / agg; npcShoot(this, tp, (car ? 0.55 : 0.4) * agg, car ? 3 : this.kind === 'guard' ? 9 : 6); }
+            if (this.shootT <= 0 && dP < (swat ? 32 : 26)) { const agg = this.kind === 'guard' ? 1 : swat ? 1.3 : clamp(0.45 + tp.wanted * 0.14, 0.5, 1.1); this.shootT = rr(0.8, 1.6) / agg; npcShoot(this, tp, (car ? 0.55 : 0.4) * agg, car ? (swat ? 5 : 3) : this.kind === 'guard' ? 9 : swat ? 9 : 6); }
           } else { this.armRaise = lerp(this.armRaise, 0, 3 * dt);
             if (this.detourT > 0) { this.detourT -= dt; this.moveToward(this.dtx, this.dtz, 5.2, dt); }
             else { this.moveToward(T.x, T.z, 5.2, dt);
@@ -193,7 +215,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     constructor(type, x, z, yaw, color) {
       this.id = nextId++; this.cls = 'car'; this.type = type; this.x = x; this.z = z; this.y = groundY(x, z); this.yaw = yaw; this.vx = 0; this.vz = 0; this.angVel = 0;
       this.steer = 0; this.throttle = 0; this.hand = false; this.vF = 0; this.speed = 0;
-      this.health = 100; this.dead = false; this.burn = 0; this.driver = null; this.ai = null; this.panic = 0; this.desired = 0; this.target = null; this.lastHitBy = null; this.lights = false; this.smoking = false;
+      this.hp = type.hp || 100; this.health = this.hp; this.dead = false; this.burn = 0; this.driver = null; this.ai = null; this.panic = 0; this.desired = 0; this.target = null; this.lastHitBy = null; this.lights = false; this.smoking = false; this.roadblock = false;
       this.r = type.w / 2 + 0.12; this.off = type.l / 2 - this.r; this.mass = type.mass; this.occupants = 0; this.hornT = 0; this.age = 0; this.yieldT = 0; this.why = ''; this.stuckT = 0; this.pedWaitT = 0;
       this.color = color !== undefined ? color : pick(type.colors);
       this.cabinColor = type.cabin !== undefined ? type.cabin : (rnd() < 0.5 ? this.color : 0x222630);
@@ -215,22 +237,23 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     damage(d) {
       if (this.dead) return;
       this.health -= d;
-      if (this.ai === 'traffic') this.panic = Math.max(this.panic, 2.5);
+      if (this.ai === 'traffic' && !this.type.armored) this.panic = Math.max(this.panic, 2.5); // the armored truck keeps rolling under fire
       if (this.health <= 0) this.explode();
-      else if (this.health < 35 && !this.smoking) this.smoking = true;
+      else if (this.health < this.hp * 0.35 && !this.smoking) this.smoking = true;
     }
     explode() {
       if (this.dead) return;
       this.dead = true; this.burn = 7; this.ai = null; this.throttle = 0;
       emit(['explode', r1(this.x), r1(this.y + 1), r1(this.z)], this.x, this.z);
       const by = this.lastHitBy || driverOf(this);
-      for (const p of peds) if (!p.dead && !p.inCar && p.kind !== 'player' && dist2(p.x, p.z, this.x, this.z) < 64) p.hurt(200, by);
-      for (const pl of players) { if (!alive(pl)) continue; if (pl.ped.inCar === this) damagePlayer(pl, 500, by); else if (!pl.ped.inCar && dist2(pl.ped.x, pl.ped.z, this.x, this.z) < 81) damagePlayer(pl, 70, by); }
+      for (const p of peds) if (!p.dead && !p.inCar && p.kind !== 'player' && dist2(p.x, p.z, this.x, this.z) < 64) p.hurt(200, by, 'explosion');
+      for (const pl of players) { if (!alive(pl)) continue; if (pl.ped.inCar === this) damagePlayer(pl, 500, by, 'explosion'); else if (!pl.ped.inCar && dist2(pl.ped.x, pl.ped.z, this.x, this.z) < 81) damagePlayer(pl, 70, by, 'explosion'); }
       for (const c of cars) if (c !== this && !c.dead && dist2(c.x, c.z, this.x, this.z) < 100) { c.lastHitBy = this.lastHitBy; c.damage(60); }
-      if (this.driver && !this.driver.owner) { this.driver.inCar = null; this.driver.hurt(500, by); }
+      if (this.driver && !this.driver.owner) { this.driver.inCar = null; this.driver.hurt(500, by, 'explosion'); }
       this.driver = null;
       if (this.lastHitBy) addWanted(this.lastHitBy, 1);
       alertPeds(this.x, this.z, 60);
+      if (this.type.armored) truckOpened(this);
     }
     drive(dt) {
       if (this.dead || !this.ai) { if (!this.driver) { this.throttle = 0; this.steer = 0; if (!this.dead) this.hand = this.speed < 1; } return; }
@@ -244,7 +267,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
         if (t + la <= s.len) { tx = s.ax + s.dx * (t + la) + s.rx * LANE; tz = s.az + s.dz * (t + la) + s.rz * LANE; }
         else { const n = this.nseg, t2 = t + la - s.len; tx = n.ax + n.dx * t2 + n.rx * LANE; tz = n.az + n.dz * t2 + n.rz * LANE; }
         const turning = (this.nseg.dx !== s.dx || this.nseg.dz !== s.dz);
-        desired = this.type.name === 'sports' ? 16 : this.type.name === 'van' ? 11 : 13;
+        desired = this.type.name === 'sports' ? 16 : this.type.name === 'van' ? 11 : this.type.armored ? 10 : 13;
         this.why = ''; if (turning && t > s.len - 14) desired = 6;
         // intersection yield: someone already in the box ahead who is not going my way
         if (t > s.len - 13 && t < s.len - 6 && this.yieldT < 4) {
@@ -260,7 +283,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
         const T = tp.ped, car = T.inCar, target = car || T; tx = target.x; tz = target.z; const d = Math.hypot(tx - this.x, tz - this.z);
         desired = car ? 27 : (d > 16 ? 24 : 0);
         if (!car && d < 18 && this.speed < 2.5 && this.occupants > 0) { const n = this.occupants; this.occupants = 0;
-          for (let k = 0; k < n; k++) { const side = k ? 2.4 : -2.4; const c = new Ped('cop', this.x + this.rx * side, this.z + this.rz * side); c.hostile = true; peds.push(c); cops.push(c); } }
+          for (let k = 0; k < n; k++) { const side = (k % 2 ? 2.4 : -2.4), back = k < 2 ? 0 : -1.4; const c = new Ped(this.type.swat ? 'swat' : 'cop', this.x + this.rx * side + this.fx * back, this.z + this.rz * side + this.fz * back); c.hostile = true; peds.push(c); cops.push(c); } }
         if (car && d < 8) desired = 30; // ram
       }
       // car ahead / ped ahead sensing
@@ -295,8 +318,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
         for (const p of peds) { if (p.dead || p.inCar) continue; const dx = p.x - this.x, dz = p.z - this.z; if (dx * dx + dz * dz > hitR2) continue;
           const lx = dx * this.rx + dz * this.rz, lz = dx * this.fx + dz * this.fz;
           if (Math.abs(lx) < T.w / 2 + 0.3 && Math.abs(lz) < T.l / 2 + 0.3) {
-            if (p.kind === 'player') { if (friendly || !drv) damagePlayer(p.owner, this.speed * 3.5, drv); p.x += this.fx * 1.5 + this.rx * (lx > 0 ? 1.5 : -1.5); p.z += this.fz * 1.5 + this.rz * (lx > 0 ? 1.5 : -1.5); p.vy = 4; emit(['crash', r1(this.x), r1(this.y + 0.8), r1(this.z), 10], this.x, this.z); }
-            else { p.hurt(500, drv); emit(['runover', r1(p.x), r1(p.z), r2(this.yaw)], p.x, p.z); p.yaw = this.yaw + rr(-0.5, 0.5); this.damage(1); if (drv) addWanted(drv, 1); } } }
+            if (p.kind === 'player') { if (friendly || !drv) damagePlayer(p.owner, this.speed * 3.5, drv, 'runover'); p.x += this.fx * 1.5 + this.rx * (lx > 0 ? 1.5 : -1.5); p.z += this.fz * 1.5 + this.rz * (lx > 0 ? 1.5 : -1.5); p.vy = 4; emit(['crash', r1(this.x), r1(this.y + 0.8), r1(this.z), 10], this.x, this.z); }
+            else { p.hurt(500, drv, 'runover'); emit(['runover', r1(p.x), r1(p.z), r2(this.yaw)], p.x, p.z); p.yaw = this.yaw + rr(-0.5, 0.5); this.damage(1); if (drv) addWanted(drv, 1); } } }
       }
       if (this.burn > 0) this.burn -= dt;
     }
@@ -340,7 +363,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
         if (p.kind === 'bribe' && pl.wanted <= 0) continue; // nothing to buy off: leave it for when it matters
         take = true;
         if (p.kind === 'cash') pl.cash += p.amount; else if (p.kind === 'ammo') { pl.weapons[0].reserve += 24; pl.weapons[1].reserve += 8; pl.weapons[2].reserve += 40; }
-        else if (p.kind === 'bribe') { pl.wanted--; if (pl.wanted <= 0) clearWanted(pl); }
+        else if (p.kind === 'bribe') { pl.wanted--; if (pl.wanted <= 0) clearWanted(pl, 'bribe'); }
         else P.health = Math.min(100, P.health + 40);
         emit(['pickup', pl.idx, p.kind, p.kind === 'bribe' ? pl.wanted : p.amount]); break; }
       if (take || p.life <= 0) { W.pickPool.release(p.i); p.released = true; ents.delete(p.id); pickups.splice(k, 1); if (p.spot) { p.spot.p = null; p.spot.t = BRIBE_RESPAWN; } continue; }
@@ -402,9 +425,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       const h = raycast(mx, my, mz, dx, dy, dz, w.range, P, null);
       let kind = 0;
       if (h.hit) {
-        if (h.hit.kind === 'ped') { const p = h.hit.p; kind = 1; if (friendly || p.kind !== 'player') p.hurt(w.dmg, pl); if (p.kind === 'civ' || p.kind === 'cop') pl.heat += 2; }
+        if (h.hit.kind === 'ped') { const p = h.hit.p; kind = 1; if (friendly || p.kind !== 'player') p.hurt(w.dmg, pl, w.key); if (p.kind === 'civ' || p.kind === 'cop' || p.kind === 'swat') pl.heat += 2; }
         else if (h.hit.kind === 'car') { const c = h.hit.c; kind = 2; c.lastHitBy = pl; c.damage(w.dmg * 0.4);
-          if (c.driver && c.driver.kind !== 'player' && rnd() < 0.25) c.driver.hurt(w.dmg, pl); if (c.ai === 'traffic') c.panic = Math.max(c.panic, 4); }
+          if (c.driver && c.driver.kind !== 'player' && rnd() < 0.25) c.driver.hurt(w.dmg, pl, w.key); if (c.ai === 'traffic' && !c.type.armored) c.panic = Math.max(c.panic, 4); }
         else kind = 3;
       }
       hits.push([r1(h.x), r1(h.y), r1(h.z), kind]);
@@ -420,7 +443,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const hit = rnd() < chance && (car || W.hasLOS(sh.x, sh.z, T.x, T.z));
     const tx = T.x + (hit ? 0 : rr(-2.5, 2.5)), ty = T.y + 1 + (hit ? 0 : rr(-1, 1.5)), tz = T.z + (hit ? 0 : rr(-2.5, 2.5));
     emit(['nshot', r1(sx), r1(sy), r1(sz), r1(tx), r1(ty), r1(tz), hit && car ? 1 : 0], sx, sz);
-    if (hit) { if (car) { car.damage(dmg); car.lastHitBy = null; } else damagePlayer(tp, dmg, null); }
+    if (hit) { if (car) { car.damage(dmg); car.lastHitBy = null; } else damagePlayer(tp, dmg, null, sh.kind); }
     alertPeds(sh.x, sh.z, 30);
   }
   function alertPeds(x, z, radius) {
@@ -429,17 +452,23 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
 
   /* ============================================================ player life */
-  function damagePlayer(pl, d, by) {
+  /* `cause` is a CAUSES entry: the weapon key, 'runover', 'explosion' or the kind of NPC that fired */
+  function damagePlayer(pl, d, by, cause) {
     if (!alive(pl) || pl.godT > 0 || S.phase !== 'play') return;
     pl.ped.health -= d; pl.noDmgT = 0; emit(['hurt', pl.idx, r1(d)]);
-    if (pl.ped.health <= 0) { pl.ped.health = 0; killPlayer(pl, by); }
+    if (pl.ped.health <= 0) { pl.ped.health = 0; killPlayer(pl, by, cause); }
   }
-  function killPlayer(pl, by) {
+  function killPlayer(pl, by, cause) {
     const P = pl.ped; if (P.dead) return;
     P.dead = true; P.deadT = 0; P.moving = 0; pl.wastedT = 5.5; P.killedBy = by || null;
+    pl.killer = by && by !== pl ? by.idx : -1; pl.cause = Math.max(0, CAUSES.indexOf(cause || ''));
     if (P.inCar) leaveCar(pl, true);
     emit(['wasted', pl.idx]); emit(['blood', r1(P.x), r1(P.z)], P.x, P.z);
-    if (by && by !== pl) { by.kills++; by.cash += 100; emit(['float', by.idx, 'WASTED ' + pl.name.toUpperCase() + '  +$100', 0xff6060]); if (by.wanted < 2) addWanted(by, 1); }
+    const wasMark = mode === 'mostWanted' && mark.idx === pl.idx;
+    if (by && by !== pl) { by.kills++; by.cash += 100; emit(['float', by.idx, 'WASTED ' + pl.name.toUpperCase() + '  +$100', 0xff6060]);
+      if (by.wanted < 2 && !wasMark) addWanted(by, 1); // hunting the mark is legal
+      emit(['kill', by.idx, pl.idx, pl.cause]); }
+    if (wasMark) { if (by && by !== pl) { by.cash += MARK_BOUNTY; emit(['float', by.idx, 'BOUNTY  +$' + MARK_BOUNTY, 0xffe14d]); setMark(by.idx, 'kill'); } else setMark(randomPlayer(pl), 'cops'); }
   }
   function respawn(pl) {
     const P = pl.ped; P.dead = false; P.health = 100; P.x = HOSPITAL.x - 2 + (pl.idx % 4) * 1.2; P.z = HOSPITAL.z - Math.floor(pl.idx / 4) * 1.2; P.y = groundY(P.x, P.z); P.vy = 0; P.yaw = 0;
@@ -451,26 +480,50 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (let k = 0; k < 10; k++) spawnTrafficCar(pl);
   }
   function onPlayerKill(p, by) {
-    if (p.kind === 'cop') { addWanted(by, 1); spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), rnd() < COP_BRIBE_CHANCE ? 'bribe' : 'ammo', 1); }
+    if (p.kind === 'cop' || p.kind === 'swat') { addWanted(by, 1); spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), rnd() < COP_BRIBE_CHANCE ? 'bribe' : 'ammo', 1); }
     else if (p.kind === 'civ') { if (rnd() < 0.75 || by.wanted === 0) addWanted(by, 1); if (rnd() < 0.7) spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), 'cash', ri(5, 60)); }
     else if (p.kind === 'guard') { if (by.wanted < 1) addWanted(by, 1); if (rnd() < 0.6) spawnPickup(p.x + rr(-1, 1), p.z + rr(-1, 1), 'ammo', 1); }
   }
   function addWanted(pl, n) {
     if (!pl || pl.gone) return;
-    const old = pl.wanted; pl.wanted = clamp(pl.wanted + n, 0, 5); pl.crimeT = 0; pl.seenT = 0;
+    const old = pl.wanted; pl.wanted = clamp(pl.wanted + n, 0, 5); pl.crimeT = 0; pl.seenT = 0; pl.peak = Math.max(pl.peak, pl.wanted);
     if (pl.wanted > old) emit(['wanted', pl.idx, pl.wanted]);
   }
-  /* the heat is off: no stars, no simmering heat, and the cops on this player's tail pick a new target or stand down */
-  function clearWanted(pl) {
+  /* the heat is off: no stars, no simmering heat, and the cops on this player's tail pick a new target or stand down.
+     Shaking off (or buying off) a five-star chase pays a bonus the whole room hears about; turning yourself in does not. */
+  function clearWanted(pl, how = 'lost') {
     pl.wanted = 0; pl.heat = 0; pl.crimeT = 0; pl.seenT = 0;
     for (const c of cars) if (c.target === pl) c.target = null;
     for (const c of cops) if (c.target === pl) c.target = null;
+    if (pl.peak >= 5 && how !== 'busted') { pl.cash += ESCAPE_BONUS; emit(['float', pl.idx, '5-STAR ESCAPE  +$' + ESCAPE_BONUS, 0xffe14d]); emit(['float', -1, pl.name.toUpperCase() + ' ESCAPED A 5-STAR CHASE', 0x7fe0ff]); }
+    pl.peak = 0;
+  }
+  /* Most Wanted: hand the mark to a player (-1 clears it); `why` is 'start', 'kill', 'cops' or 'left' */
+  function setMark(idx, why) {
+    if (mode !== 'mostWanted') return;
+    mark.idx = idx; mark.heldT = 0;
+    if (idx >= 0) emit(['mark', idx, why]);
+  }
+  /* a random player who is still in the city, preferably alive and not `excl` */
+  function randomPlayer(excl) {
+    const here = players.filter(p => !p.gone && p !== excl), up = here.filter(alive);
+    const list = up.length ? up : here.length ? here : players.filter(p => !p.gone);
+    return list.length ? pick(list).idx : -1;
+  }
+  function updateMark(dt) {
+    if (mode !== 'mostWanted') return;
+    if (mark.idx < 0) { mark.pickT -= dt; if (mark.pickT <= 0) setMark(randomPlayer(null), 'start'); return; }
+    const h = players[mark.idx];
+    if (!h || h.gone) { setMark(randomPlayer(h), 'left'); return; }
+    if (!alive(h)) return;
+    mark.heldT += dt; h.markT += dt; h.cash += MARK_CASH_PER_S * dt;
+    if (h.wanted < MARK_STARS) addWanted(h, MARK_STARS - h.wanted); // the mark always has the cops on it
   }
   /* the Pay 'n' Spray: parked in the bay with stars, pay per star, get a new colour and a clean record */
   function trySpray(pl, c) {
     const cost = STAR_PRICE * pl.wanted;
     if (pl.cash < cost) { if (pl.msgT <= 0) { pl.msgT = 4; emit(['float', pl.idx, 'THE RESPRAY COSTS $' + cost, 0xff6060]); } return; }
-    pl.cash -= cost; clearWanted(pl);
+    pl.cash -= cost; clearWanted(pl, 'spray');
     const colors = c.type.colors.filter(k => k !== c.color); c.color = colors.length ? pick(colors) : c.color;
     if (c.type.cabin === undefined) c.cabinColor = rnd() < 0.5 ? c.color : 0x222630;
     c.view.recolor(c.color, c.cabinColor);
@@ -480,7 +533,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   function surrender(pl) {
     const fine = Math.min(pl.cash, STAR_PRICE * pl.wanted);
     pl.cash -= fine; for (const w of pl.weapons) w.reserve = 0;
-    clearWanted(pl);
+    clearWanted(pl, 'busted');
     emit(['cleared', pl.idx, 'busted']); emit(['float', pl.idx, 'BUSTED  -$' + fine, 0x4d7fff]); emit(['float', pl.idx, 'SPARE AMMO CONFISCATED', 0xff6060]);
   }
 
@@ -500,7 +553,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const P = pl.ped;
     if (c.ai === 'traffic' && !c.type.cop) { const d = new Ped('civ', c.x + c.rx * 2.4, c.z + c.rz * 2.4); d.flee = 9; d.threatX = P.x; d.threatZ = P.z; d.state = 'flee'; d.yaw = c.yaw; peds.push(d);
       addWanted(pl, 1); emit(['float', pl.idx, 'CARJACKING', 0xff6060]); }
-    if (c.ai === 'cop' && c.occupants > 0) { for (let k = 0; k < c.occupants; k++) { const p = new Ped('cop', c.x + c.rx * 2.4, c.z + c.rz * 2.4 + k * 1.2); p.hostile = true; peds.push(p); cops.push(p); } c.occupants = 0; addWanted(pl, 1); }
+    if (c.ai === 'cop' && c.occupants > 0) { for (let k = 0; k < c.occupants; k++) { const p = new Ped(c.type.swat ? 'swat' : 'cop', c.x + c.rx * 2.4, c.z + c.rz * 2.4 + k * 1.2); p.hostile = true; peds.push(p); cops.push(p); } c.occupants = 0; addWanted(pl, 1); }
     if (c.driver && c.driver !== P) { const d = c.driver; d.inCar = null; d.x = c.x + c.rx * 2.4; d.z = c.z + c.rz * 2.4; c.driver = null; }
     c.ai = null; c.driver = P; c.panic = 0; c.hand = false; c.target = null; P.inCar = c; P.moving = 0; emit(['enter', pl.idx]);
     if (c.type.cop && pl.wanted < 1) addWanted(pl, 1);
@@ -530,7 +583,22 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
   function spawnCopCar(pl) {
     const p = laneSpawnPoint(70, 150, pl); if (!p) return;
-    const c = new Car(CAR_TYPES[5], p.x, p.z, p.yaw); c.ai = 'cop'; c.occupants = 2; c.target = pl; c.setSeg(p.a, p.b); cars.push(c);
+    const swat = pl.wanted >= 5 && rnd() < 0.6; // five stars: more often than not it is the SWAT van, four inside
+    const c = new Car(CAR_TYPES[swat ? 8 : 5], p.x, p.z, p.yaw); c.ai = 'cop'; c.occupants = swat ? 4 : 2; c.target = pl; c.setSeg(p.a, p.b); cars.push(c);
+  }
+  /* four stars and driving: two cop cars parked across the road at the next intersection ahead, two cops behind each */
+  function spawnRoadblock(pl) {
+    const c = pl.ped.inCar; if (!c) return;
+    let n = 0; for (const o of cars) if (o.roadblock && o.target === pl && !o.dead && !o.released) n++; if (n >= MAX_ROADBLOCKS * 2) return;
+    const fx = c.fx, fz = c.fz, node = nearestNode(c.x + fx * 110, c.z + fz * 110), nx = X(node[0]), nz = X(node[1]);
+    const alongX = Math.abs(fx) > Math.abs(fz), dir = alongX ? Math.sign(fx) || 1 : Math.sign(fz) || 1;
+    const bx = alongX ? nx - dir * 12 : c.x, bz = alongX ? c.z : nz - dir * 12; // a little before the intersection, on the player's road
+    const d = Math.hypot(bx - c.x, bz - c.z); if (d < 55 || d > 170 || !inCity(bx, bz)) return;
+    for (const o of cars) if (o.roadblock && !o.released && dist2(o.x, o.z, bx, bz) < 30 * 30) return; // one block per intersection
+    const ax = alongX ? 0 : 1, az = alongX ? 1 : 0, yaw = alongX ? 0 : PI / 2; // the cars sit across the road, noses along it
+    for (const side of [-1, 1]) { const car = new Car(CAR_TYPES[5], bx + ax * side * 3.4, bz + az * side * 3.4, yaw); car.hand = true; car.roadblock = true; car.target = pl; cars.push(car);
+      for (let k = 0; k < 2; k++) { const cop = new Ped('cop', car.x + (alongX ? dir : 0) * 3 + ax * k * 1.4, car.z + (alongX ? 0 : dir) * 3 + az * k * 1.4); cop.hostile = true; cop.target = pl; peds.push(cop); cops.push(cop); } } // the cops take cover on the far side
+    emit(['float', pl.idx, 'ROADBLOCK AHEAD', 0xff6060]);
   }
   function spawnTrafficCar(pl) {
     if (!pl) return; const p = laneSpawnPoint(60, 170, pl); if (!p) return;
@@ -558,7 +626,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       for (const c of cops) if (dist2(c.x, c.z, P.x, P.z) < 3600 && W.hasLOS(c.x, c.z, P.x, P.z)) { seen = true; break; }
       if (!seen) for (const c of cars) if (c.ai === 'cop' && dist2(c.x, c.z, P.x, P.z) < 4900) { seen = true; break; }
       if (seen) pl.seenT = 0; else pl.seenT += dt;
-      if (pl.seenT > 16 && pl.crimeT > 16) { pl.wanted--; pl.seenT = 4; emit(['float', pl.idx, pl.wanted ? 'LOSING THE HEAT' : 'YOU LOST THE COPS', 0x7fe0ff]); }
+      const marked = mode === 'mostWanted' && mark.idx === pl.idx; // the mark never drops below its stars
+      if (pl.seenT > 16 && pl.crimeT > 16 && !(marked && pl.wanted <= MARK_STARS)) { pl.wanted--; pl.seenT = 4; emit(['float', pl.idx, pl.wanted ? 'LOSING THE HEAT' : 'YOU LOST THE COPS', 0x7fe0ff]); if (!pl.wanted) clearWanted(pl, 'lost'); }
+      if (pl.wanted >= 4 && P.inCar && P.inCar.speed > 8) { pl.blockT -= dt; if (pl.blockT <= 0) { pl.blockT = ROADBLOCK_EVERY; spawnRoadblock(pl); } } else pl.blockT = Math.min(pl.blockT, 4);
       pl.copSpawnT -= dt;
       const wantFoot = pl.wanted * 2 + 1, wantCars = Math.max(0, pl.wanted - 1) + (pl.wanted >= 4 ? 1 : 0);
       let myFoot = 0, myCars = 0; for (const c of cops) if (c.target === pl) myFoot++; for (const c of cars) if (c.ai === 'cop' && !c.dead && c.target === pl) myCars++;
@@ -572,6 +642,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       for (const c of cops) { let keep = false; for (const pl of players) { if (pl.gone || !pl.ped) continue; if (dist2(c.x, c.z, pl.ped.x, pl.ped.z) <= 900 && W.hasLOS(c.x, c.z, pl.ped.x, pl.ped.z)) { keep = true; break; } } if (!keep) { c.release(); c.dead = true; } }
       for (const c of cars) if (c.ai === 'cop') c.rejoin();
     }
+    for (const c of cars) if (c.roadblock && !c.dead && !c.driver && (!c.target || c.target.gone || c.target.wanted === 0) && minPlayerDist2(c.x, c.z) > 40 * 40) c.release(); // the chase is over: the block packs up out of sight
   }
 
   /* ============================================================ mission (shared by the whole room) */
@@ -588,11 +659,44 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     mission.t += dt; const v = mission.vinny;
     if (mission.state === 'intro') { if (mission.t > INTRO_T) mission.state = 'goto'; }
     else if (mission.state === 'goto') { for (const pl of players) { if (!alive(pl)) continue; if (dist2(pl.ped.x, pl.ped.z, PLAZA.x, PLAZA.z) < 34 * 34) { mission.state = 'hit'; emit(['float', -1, 'THERE HE IS. TAKE HIM OUT.', 0xffe14d]); break; } } }
-    else if (mission.state === 'hit') { if (v.dead) { mission.state = 'passed'; mission.passedT = 6; const k = v.killedBy; mission.killer = k;
+    else if (mission.state === 'hit') { if (v && v.dead) { mission.state = 'passed'; mission.passedT = 6; const k = v.killedBy; mission.killer = k;
       if (k) { k.cash += 5000; addWanted(k, 2); } emit(['passed', k ? k.idx : -1]);
       mission.guards.forEach(g => { if (!g.dead) { g.kind = 'civ'; g.hostile = false; g.flee = 12; g.threatX = v.x; g.threatZ = v.z; g.state = 'flee'; } }); } }
     else if (mission.state === 'passed') { mission.passedT -= dt; if (mission.passedT <= 0) mission.state = mission.killer && !mission.killer.gone && mission.killer.wanted > 0 ? 'escape' : 'done'; }
     else if (mission.state === 'escape') { const k = mission.killer; if (!k || k.gone || k.wanted === 0) { mission.state = 'done'; if (k && !k.gone) emit(['float', k.idx, 'CLEAN GETAWAY', 0x7fe0ff]); } }
+  }
+
+  /* ============================================================ world events (one at a time, the whole room hears about them)
+     'truck': an armored truck joins the traffic near someone; blow it open and it spills cash.
+     'airdrop': a crate is called in over a park or the plaza and lands ten seconds later with cash, ammo and health around it. */
+  const DROP_SPOTS = [parkSpot(2, 2, 0, 0), parkSpot(10, 9, 0, 0), parkSpot(3, 10, 0, 0), parkSpot(1, 7, 0, 0), { x: PLAZA.x, z: PLAZA.z }, { x: FERRIS.x - 34, z: FERRIS.z }];
+  function startEvent(kind) {
+    if (WE.kind) return false;
+    if (kind === 'truck') { const pl = anchor(); if (!pl || !pl.ped) return false; const p = laneSpawnPoint(120, 220, pl); if (!p) return false;
+      const c = new Car(CAR_TYPES[7], p.x, p.z, p.yaw); c.ai = 'traffic'; c.setSeg(p.a, p.b); c.vx = c.fx * 6; c.vz = c.fz * 6; cars.push(c);
+      WE.kind = kind; WE.car = c; WE.x = c.x; WE.z = c.z; WE.t = TRUCK_T; WE.landed = false;
+      emit(['wevent', EVENT_KINDS.indexOf(kind), r1(c.x), r1(c.z), 'ARMORED TRUCK ON ' + streetAt(c.x, c.z).toUpperCase() + '  ·  BLOW IT OPEN']); return true; }
+    if (kind === 'airdrop') { const s = pick(DROP_SPOTS);
+      WE.kind = kind; WE.car = null; WE.x = s.x; WE.z = s.z; WE.t = AIRDROP_T; WE.landT = AIRDROP_FALL; WE.landed = false;
+      emit(['wevent', EVENT_KINDS.indexOf(kind), r1(s.x), r1(s.z), 'AIRDROP INCOMING  ·  ' + districtAt(s.x, s.z)]); return true; }
+    return false;
+  }
+  function endEvent() { WE.kind = null; WE.car = null; WE.landed = false; WE.nextT = rr(EVENT_GAP[0], EVENT_GAP[1]); }
+  function truckOpened(c) {
+    for (let k = 0; k < TRUCK_CASH; k++) { const a = rr(0, TAU), d = rr(2.5, 6.5); spawnPickup(c.x + Math.sin(a) * d, c.z + Math.cos(a) * d, 'cash', ri(80, 160), 90); }
+    emit(['float', -1, 'THE ARMORED TRUCK IS OPEN. GRAB THE CASH!', 0x3dff7a]);
+    if (WE.car === c) { WE.t = Math.min(WE.t, 45); WE.landed = true; } // the event lingers over the spill, then ends
+  }
+  function updateEvents(dt) {
+    if (!WE.kind) { WE.nextT -= dt; if (WE.nextT <= 0) { if (!startEvent(pick(EVENT_KINDS))) WE.nextT = 3; } return; }
+    WE.t -= dt;
+    if (WE.kind === 'truck') { const c = WE.car; if (c && !c.released && !c.dead) { WE.x = c.x; WE.z = c.z; } if (!c || c.released) { endEvent(); return; } }
+    else if (WE.kind === 'airdrop' && !WE.landed) { WE.landT -= dt; if (WE.landT <= 0) { WE.landed = true;
+      for (let k = 0; k < 8; k++) { const a = k * TAU / 8, d = 3.2; spawnPickup(WE.x + Math.sin(a) * d, WE.z + Math.cos(a) * d, 'cash', 100, AIRDROP_T); }
+      for (let k = 0; k < 3; k++) { const a = k * TAU / 3 + 0.4, d = 1.6; spawnPickup(WE.x + Math.sin(a) * d, WE.z + Math.cos(a) * d, 'ammo', 1, AIRDROP_T); }
+      spawnPickup(WE.x, WE.z, 'health', 40, AIRDROP_T);
+      emit(['wland', r1(WE.x), r1(WE.z)], WE.x, WE.z); alertPeds(WE.x, WE.z, 30); } }
+    if (WE.t <= 0) endEvent();
   }
 
   /* ============================================================ the players' own update */
@@ -634,7 +738,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (const c of cars) if (!c.released) c.draw(dt);
     for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.released) { peds.splice(k, 1); continue; } if (p.kind === 'player') continue; p.update(dt);
       if (!p.dead && !p.inCar) { if (pushOutOfCars(p, 0.3, false, cars)) { p.carStuck++; if (p.carStuck > 90 && p.kind === 'civ') { p.carStuck = 0; p.flee = 2; p.threatX = p.x + rr(-1, 1); p.threatZ = p.z + rr(-1, 1); p.state = 'flee'; } } else p.carStuck = 0; } }
-    if (live) { updateWanted(dt); updateMission(dt); }
+    if (live) { updateWanted(dt); updateMission(dt); updateMark(dt); updateEvents(dt); }
     updatePickups(dt); growBribes(dt);
     W.dirtyDynamic();
     // population maintenance: cull what is far from everyone, top up near a random player
@@ -643,11 +747,12 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       let civs = 0, traffic = 0;
       for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.kind === 'player') continue;
         const far = minPlayerDist2(p.x, p.z) > 240 * 240;
-        if (far && (p.kind === 'civ' || p.kind === 'cop' || p.dead) && p !== mission.vinny) { p.release(); peds.splice(k, 1); continue; }
+        if (far && (p.kind === 'civ' || p.kind === 'cop' || p.kind === 'swat' || p.dead) && p !== mission.vinny) { p.release(); peds.splice(k, 1); continue; }
         if (p.kind === 'civ' && !p.dead) civs++; }
       for (let k = cars.length - 1; k >= 0; k--) { const c = cars[k]; if (c.driver && c.driver.kind === 'player') continue;
         const far = minPlayerDist2(c.x, c.z) > 270 * 270;
-        if (far && (c.ai === 'traffic' || c.ai === 'cop' || c.dead || (!c.ai && !c.parked))) { c.release(); cars.splice(k, 1); continue; }
+        if (far && (c.ai === 'traffic' || c.ai === 'cop' || c.dead || (!c.ai && !c.parked)) && c !== WE.car) { c.release(); cars.splice(k, 1); continue; }
+        if (c.released) { cars.splice(k, 1); continue; }
         if (c.ai === 'traffic') traffic++; }
       for (let k = 0; k < 3 && civs + k < 92; k++) spawnCiv(anchor());
       for (let k = 0; k < 2 && traffic + k < 40; k++) spawnTrafficCar(anchor());
@@ -672,6 +777,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (pl.ped) { if (pl.ped.inCar) leaveCar(pl, true); pl.ped.release(); const i = peds.indexOf(pl.ped); if (i >= 0) peds.splice(i, 1); pl.ped = null; }
     for (const c of cars) if (c.target === pl) c.target = null;
     emit(['float', -1, pl.name.toUpperCase() + ' LEFT THE CITY', 0x9fb4dc]);
+    if (mode === 'mostWanted' && mark.idx === pl.idx) setMark(randomPlayer(pl), 'left');
   }
 
   /* ============================================================ the wire */
@@ -681,7 +787,10 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const pickEntry = p => [p.id, PICK_KINDS.indexOf(p.kind), r1(p.x), r1(p.z)];
   const same = (a, b) => { if (!b || a.length !== b.length) return false; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
   const block = pl => { const P = pl.ped, w = pl.weapons[pl.curW];
-    return [P ? P.id : -1, P ? Math.round(P.health) : 0, pl.wanted, Math.floor(pl.cash), pl.kills, pl.curW, w.ammo, w.reserve, r2(pl.reloadT), P && P.dead ? 1 : 0, r1(pl.wastedT), P && P.inCar ? P.inCar.id : -1, pl.hint, r2(pl.camPitch), pl.godT > 0 ? 1 : 0, pl.gone ? 1 : 0, pl.seqApplied]; };
+    return [P ? P.id : -1, P ? Math.round(P.health) : 0, pl.wanted, Math.floor(pl.cash), pl.kills, pl.curW, w.ammo, w.reserve, r2(pl.reloadT), P && P.dead ? 1 : 0, r1(pl.wastedT), P && P.inCar ? P.inCar.id : -1, pl.hint, r2(pl.camPitch), pl.godT > 0 ? 1 : 0, pl.gone ? 1 : 0, pl.seqApplied,
+      pl.killer, pl.cause, r1(pl.markT)]; }; // appended: who killed me last and how, seconds as the mark
+  /* the shared mode state: [mode, the mark's player index, seconds it has held, the world event or null ([kind, x, z, seconds left, landed])] */
+  const modeState = () => [MODES.indexOf(mode), mark.idx, r1(mark.heldT), WE.kind ? [EVENT_KINDS.indexOf(WE.kind), r1(WE.x), r1(WE.z), r1(WE.t), WE.landed ? 1 : 0] : null];
   function prepareNet() {
     for (const e of ents.values()) { const entry = e.cls === 'ped' ? pedEntry(e) : e.cls === 'car' ? carEntry(e) : pickEntry(e); e.entry = entry; e.dirty = !same(entry, e.sent); }
   }
@@ -690,7 +799,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const pl = client.pl, P = pl.ped, cx = P ? P.x : 0, cz = P ? P.z : 0, known = client.known;
     const v = mission.vinny;
     const msg = { t: 's', to: client.id, c: r2(S.clockH), tl: S.unlimited ? -1 : r1(S.timeLeft), ph: S.phase === 'over' ? 1 : 0, ms: MISSION_STATES.indexOf(mission.state),
-      vin: v && !v.released ? [r1(v.x), r1(v.z), v.dead ? 1 : 0] : null, P: players.map(block), p: [], v: [], k: [], rm: [], ev: [] };
+      vin: v && !v.released ? [r1(v.x), r1(v.z), v.dead ? 1 : 0] : null, md: modeState(), P: players.map(block), p: [], v: [], k: [], rm: [], ev: [] };
     for (const e of ents.values()) {
       const inRange = (e.cls === 'ped' && e.kind === 'player') || dist2(e.x, e.z, cx, cz) < NET_RANGE2;
       if (inRange) { if (e.dirty || !known.has(e.id)) { (e.cls === 'ped' ? msg.p : e.cls === 'car' ? msg.v : msg.k).push(e.entry); known.add(e.id); } }
@@ -727,9 +836,11 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     pl.ped = new Ped('player', s.x, s.z, pl.avatar, pl); pl.ped.yaw = s.face; peds.push(pl.ped);
     const car = new Car(CAR_TYPES[1], s.cx, s.z, s.yaw, (AVATARS[pl.avatar] || AVATARS[0]).color); car.hand = true; car.parked = true; cars.push(car);
   });
-  placeParkedCars(); initMission();
+  placeParkedCars(); if (mode === 'sandbox') initMission();
   for (let k = 0; k < 90; k++) spawnCiv(anchor());
   for (let k = 0; k < 40; k++) spawnTrafficCar(anchor());
 
-  return { players, peds, cars, cops, pickups, mission, S, ents, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null };
+  return { players, peds, cars, cops, pickups, mission, S, ents, mode, mark, WE, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
+    /* for the tests and the console: reach into the rules directly */
+    debug: { damagePlayer, killPlayer, addWanted, clearWanted, setMark, startEvent, spawnRoadblock, Ped, Car } };
 }

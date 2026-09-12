@@ -24,7 +24,7 @@
 .gta .score tr.me td { background: rgba(255,213,74,.15); font-weight: 900; }
 .gta .score .sw { display: inline-block; width: 16px; height: 16px; border-radius: 5px; vertical-align: middle; margin-right: 8px; border: 2px solid rgba(255,255,255,.5); }
 .gta .score .n { text-align: right; font-variant-numeric: tabular-nums; }
-.gta .score .cash { color: #3dff7a; } .gta .score .kills { color: #ff6060; }
+.gta .score .cash { color: #3dff7a; } .gta .score .kills { color: #ff6060; } .gta .score .mark { color: #ffe14d; }
 .gta .score .left { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 .gta .foot { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; font-size: 15px; color: #dbe9ff; letter-spacing: 2px; }
 .gta .foot .btn { touch-action: manipulation; }

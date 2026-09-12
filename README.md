@@ -3,7 +3,7 @@
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
 Ships with **Frostline Kart**, a snowy kart racer with shells, bananas and item boxes, coins, Grand Prix cups, CPU karts and up to 8 players, **Dodgeball 3v3**,
 a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest,
-**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city,
+**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city (free roam with a hit to pull off, or Most Wanted, where one player carries the mark and everyone else hunts it),
 **Crossy Farm Car**, a hop-across-the-farm race where up to 8 cars dodge the same herds until the last one is flattened, and
 **Hog the Throne**, a pig party for up to 4 hogs: a few bumpy minigames, then a king-of-the-hill finale for the crown.
 
@@ -38,7 +38,7 @@ back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) W
 does not dim or lock mid-game (iOS 16.4 and later; it is taken again when the page comes back from the background), and it asks for its sound to be
 played as media, so the game is heard with the ring/silent switch on silent (iOS 17 and later).
 
-Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls and the Fable Theft Auto movement code). `npm run icons` redraws the home-screen icons.
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls, the Fable Theft Auto movement code and its host simulation run headless). `npm run icons` redraws the home-screen icons.
 `FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
@@ -71,7 +71,7 @@ client/
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
     crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
     hog/          Hog the Throne: index.js (game module: physics, minigames, netcode glue, HUD), net.js (the roster and the wire format, testable in node), hog.css
-test/             node --test: the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls and the Fable Theft Auto movement code
+test/             node --test: the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls, the Fable Theft Auto movement code and its simulation
 scripts/          make-icons.js draws client/icons/*.png with no dependencies
 ```
 
@@ -86,7 +86,7 @@ clock backs the display off a little so there is usually a later snapshot to int
 the best round trip is how far past its snapshots each sender's present is placed. A client shows a ghost of its own thrown item
 at once and hands it over to the host's copy when that arrives.
 Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
-Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. Clients predict their own body with the same movement code the host runs (`motion.js`) and reconcile against the host's acknowledged input, which hides the round trip. The city itself is generated from a fixed seed, so it never travels over the network.
+Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. Clients predict their own body with the same movement code the host runs (`motion.js`) and reconcile against the host's acknowledged input, which hides the round trip. The city itself is generated from a fixed seed, so it never travels over the network. The host's lobby picks the mode: the **sandbox** (a hit to pull off, then free roam, most cash wins) or **Most Wanted** (after a few seconds one player is the mark: it pays by the second and always has two stars on it, killing the mark pays a bounty and takes it, and the round is still scored on cash; it needs two players, so solo it is the sandbox). In either mode the host runs world events every minute or two (an armored truck that spills cash when blown open, an airdrop of cash, ammo and health over a park) that the whole room is told about, four stars put roadblocks across the road ahead of a driver and five bring the SWAT van, and everyone sees arrows at the edge of the screen for the other players, the mark and the event. A player who dies sees who did it and how, and the camera follows the killer.
 Hog the Throne is host-authoritative like Dodgeball: the host's browser runs the pig physics (cannon-es) and every CPU brain and sends 30 Hz snapshots (the pigs, the current minigame's state and the effects since the last one); the other players send their stick and HOP as a wish and each DASH press as a message, and render the snapshots interpolated a little in the past. The plan of minigames is drawn from the round's seed.
 Crossy Farm Car works like Kart: every machine simulates its own car and broadcasts 20 Hz snapshots of it. The farm is generated from the round's seed (`session.seed`) and everything that moves on it is a function of the world clock, which the host carries in its snapshots, so nobody ever sends a cow.
 

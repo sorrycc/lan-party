@@ -22,15 +22,23 @@ import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
-import { WEAPONS } from './entities.js';
+import { WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol } from './sim.js';
-import { createRemote, parseBlock, INTERP } from './remote.js';
+import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL } from './sim.js';
+import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
+const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_PER_S} a second to whoever holds it, and whoever kills them takes it, plus a $${MARK_BOUNTY} bounty.`;
+/* what the death card says for each CAUSES entry; a name is filled in when a player did it */
+const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
+const EVENT_TEXT = ['ARMORED TRUCK', 'AIRDROP'];
+/* players further than this (or off screen) get an arrow at the edge of the screen; nearer ones have their name over their head */
+const ARROW_FROM = 120;
+/* how fast a touch player's camera is pulled onto the soft-locked target while FIRE is held (per second) */
+const MAGNET = 5;
 const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car, turn yourself in'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
 const CONTROLS_TOUCH = [['LEFT SIDE', 'drag to move or drive · push all the way to run'], ['RIGHT SIDE', 'drag to look and aim'], ['FIRE', 'hold to shoot · drag on it to aim while shooting'], ['JUMP', 'jump on foot, handbrake in a car'], ['USE', 'enter or exit a car, turn yourself in'], ['WEAPON', 'next weapon · RELOAD reloads'], ['☰', 'pause, sound, detail, look sensitivity']];
 /* the on-screen hints on a touch screen: the USE and JUMP buttons already say what they do, so only the two with no button stay */
@@ -161,14 +169,15 @@ export async function create({ mount, audio, send, hooks }) {
   const qualityLabel = () => 'DETAIL: ' + (autoQuality ? 'AUTO (' + QUALITY[quality].name + ')' : QUALITY[quality].name);
   const cam = { x: 0, y: 5, z: 0, dx: 0, dy: 0, dz: 1, lx: 0, ly: 0, lz: 1 };
   /* the view model the camera, HUD and audio read; filled from the sim (host) or the snapshot store (client) */
-  const V = { me: null, subj: { x: 0, y: 0, z: 0, inCar: null, dead: false }, car: null, timeLeft: -1, phase: 0, ms: 0, vin: null, cops: [], players: [], blocks: [] };
+  const V = { me: null, subj: { x: 0, y: 0, z: 0, inCar: null, dead: false }, car: null, timeLeft: -1, phase: 0, ms: 0, vin: null, cops: [], players: [], blocks: [], md: parseMode(null) };
+  const modeName = () => MODES[V.md.mode] || 'sandbox';
   const playerColor = i => (AVATARS[(session.players[i] || {}).avatar] || AVATARS[0]).color;
   function hostView() {
     const P = me.ped;
     V.blocks = sim.players.map(p => parseBlock(sim.block(p))); V.me = V.blocks[myIdx];
     V.subj.x = P ? P.x : 0; V.subj.y = P ? P.y : 0; V.subj.z = P ? P.z : 0; V.subj.inCar = P ? P.inCar : null; V.subj.dead = !P || P.dead; V.car = P ? P.inCar : null;
     V.timeLeft = sim.S.unlimited ? -1 : sim.S.timeLeft; V.phase = sim.S.phase === 'over' ? 1 : 0; V.ms = MISSION_STATES.indexOf(sim.mission.state);
-    const v = sim.mission.vinny; V.vin = v && !v.released ? { x: v.x, z: v.z, dead: v.dead } : null;
+    const v = sim.mission.vinny; V.vin = v && !v.released ? { x: v.x, z: v.z, dead: v.dead } : null; V.md = parseMode(sim.modeState());
     V.cops.length = 0; for (const c of sim.cops) if (!c.dead && !c.released) V.cops.push({ x: c.x, z: c.z, car: false }); for (const c of sim.cars) if (c.ai === 'cop' && !c.dead) V.cops.push({ x: c.x, z: c.z, car: true });
     V.players.length = 0; sim.players.forEach((p, i) => V.players.push({ name: p.name, color: playerColor(i), x: p.ped ? p.ped.x : 0, y: p.ped ? p.ped.y : 0, z: p.ped ? p.ped.z : 0, gone: p.gone, dead: p.dead, me: i === myIdx }));
     clock = sim.S.clockH;
@@ -177,7 +186,7 @@ export async function create({ mount, audio, send, hooks }) {
     const R = remote.R; V.blocks = R.P; V.me = R.P[myIdx] || null;
     const e = V.me ? remote.get(V.me.pedId) : null, car = V.me && V.me.carId >= 0 ? remote.get(V.me.carId) : null;
     V.subj.x = e ? e.x : 0; V.subj.y = e ? e.y : 0; V.subj.z = e ? e.z : 0; V.subj.inCar = car || null; V.subj.dead = !e || e.dead; V.car = car || null;
-    V.timeLeft = R.timeLeft; V.phase = R.phase; V.ms = R.ms; V.vin = R.vin ? { x: R.vin[0], z: R.vin[1], dead: !!R.vin[2] } : null;
+    V.timeLeft = R.timeLeft; V.phase = R.phase; V.ms = R.ms; V.vin = R.vin ? { x: R.vin[0], z: R.vin[1], dead: !!R.vin[2] } : null; V.md = R.md;
     V.cops.length = 0; for (const en of R.ents.values()) { if (en.cls === 'ped' && en.kind === 'cop' && !en.dead) V.cops.push({ x: en.x, z: en.z, car: false }); else if (en.cls === 'car' && en.type.cop && en.lights && !en.dead) V.cops.push({ x: en.x, z: en.z, car: true }); }
     V.players.length = 0; session.players.forEach((p, i) => { const b = R.P[i], pe = b ? remote.get(b.pedId) : null; V.players.push({ name: p.name, color: playerColor(i), x: pe ? pe.x : 0, y: pe ? pe.y : 0, z: pe ? pe.z : 0, gone: !!(b && b.gone), dead: !!(b && b.dead), me: i === myIdx }); });
     if (R.got) clock = R.clock;
@@ -186,6 +195,7 @@ export async function create({ mount, audio, send, hooks }) {
   /* ---- events from the simulation (host: as they happen; client: from the snapshots) -> local effects and sounds */
   const floatText = (text, color) => floats.push({ text, color, t: 0 });
   const mine = idx => idx === myIdx;
+  const nameOf = idx => ((session && session.players[idx]) || {}).name || '?';
   function onEvent(ev) {
     const mx = V.subj.x, mz = V.subj.z, d2 = (x, z) => dist2(x, z, mx, mz), near = (x, z) => d2(x, z) < 350 * 350, vol = (x, z, range) => clamp(1 - Math.sqrt(d2(x, z)) / range, 0, 1);
     switch (ev[0]) {
@@ -212,6 +222,11 @@ export async function create({ mount, audio, send, hooks }) {
       case 'reload': if (mine(ev[1])) sfx.reload(); break;
       case 'passed': sfx.passed(); break;
       case 'over': showOver(); break;
+      case 'kill': { const [, who, whom] = ev; if (!mine(who) && !mine(whom)) floatText(nameOf(who) + ' WASTED ' + nameOf(whom), 0xdddddd); break; }
+      case 'mark': { const [, who, why] = ev; if (mine(who)) { floatText(why === 'start' ? 'YOU ARE THE MOST WANTED. STAY ALIVE.' : 'YOU TOOK THE MARK. STAY ALIVE.', 0xffe14d); sfx.wanted(); }
+        else { floatText(nameOf(who) + ' IS THE MOST WANTED', 0xffe14d); sfx.cleared(); } break; }
+      case 'wevent': { floatText(ev[4], 0x3dff7a); sfx.cleared(); break; }
+      case 'wland': { const [, x, z] = ev; if (near(x, z)) { fx.burst.dust(x, 0.5, z); fx.burst.crash(x, 1, z, 10); } sfx.crash(vol(x, z, 200)); break; }
     }
   }
 
@@ -340,7 +355,7 @@ export async function create({ mount, audio, send, hooks }) {
     const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY', tap = touch ? 'TAP' : 'CLICK';
     if (kind === 'grab') {
       ov.title.innerHTML = 'FABLE THEFT AUTO <b>5.1</b>'; ov.sub.textContent = `LOS PIXELES  ·  ${tap} TO PLAY`;
-      const f = document.createElement('div'); f.textContent = 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
+      const f = document.createElement('div'); f.textContent = modeName() === 'mostWanted' ? 'MOST WANTED: CARRY THE MARK, HUNT THE MARK' : 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
     } else if (kind === 'paused') {
       ov.title.textContent = 'PAUSED'; ov.sub.textContent = (online ? 'THE CITY KEEPS RUNNING WITHOUT YOU  ·  ' : '') + `${tap} TO RESUME`;
       button('RESUME', 'good', grab);
@@ -350,9 +365,10 @@ export async function create({ mount, audio, send, hooks }) {
       button(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { showStats = !showStats; showOverlay('paused'); });
       if (restart) { button(!online ? 'RESTART' : 'RESTART FOR EVERYONE', '', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
     } else {
+      const mw = modeName() === 'mostWanted';
       ov.title.textContent = "TIME'S UP"; ov.sub.textContent = 'FINAL STANDINGS  ·  MOST CASH WINS';
       const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) })).sort((a, c) => (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
-      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td><td class="n cash">$${r.b.cash}</td><td class="n kills">${r.b.kills} kills</td></tr>`).join('');
+      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td><td class="n cash">$${r.b.cash}</td><td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
       if (restart) { button('PLAY AGAIN', 'primary', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
       else ov.foot.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
     }
@@ -391,27 +407,49 @@ export async function create({ mount, audio, send, hooks }) {
     eng.siren.frequency.setTargetAtTime(Math.floor(t * 2.5) % 2 ? 620 : 900, ctx.currentTime, 0.05);
   }
   /* whether a shot now would soft-lock a pedestrian (the host's rule, aimTol): the crosshair and the FIRE button turn red */
-  let aimLock = false;
+  let aimLock = false; const aimAt = { x: 0, y: 0, z: 0 }; // the soft-locked pedestrian's chest, while aimLock
   function findAimLock() {
     const me = V.me; aimLock = false;
     if (!me || me.dead || me.carId >= 0 || state !== 'play' || !(isHost ? sim : remote)) return;
     const w = WEAPONS[me.curW], list = isHost ? sim.peds : remote.ents.values(), ox = cam.x, oy = cam.y, oz = cam.z, vx = cam.dx, vy = cam.dy, vz = cam.dz;
-    const friendly = !session || !session.opts || session.opts.friendlyFire !== false;
+    const friendly = modeName() === 'mostWanted' || !session || !session.opts || session.opts.friendlyFire !== false;
+    let best = 1e9;
     for (const p of list) { if (p.cls !== 'ped' || p.id === me.pedId || p.dead || p.inCar || p.released || (!friendly && p.kind === 'player')) continue;
       const ddx = p.x - ox, ddz = p.z - oz; if (ddx * ddx + ddz * ddz > w.range * w.range) continue;
       for (const hy of [0.3, 1.0, 1.6]) { const dy = p.y + hy - oy, d = Math.hypot(ddx, dy, ddz); if (d < 1.5) continue;
         const ang = Math.acos(clamp((ddx * vx + dy * vy + ddz * vz) / d, -1, 1));
-        if (ang < aimTol(d, touch) && W.hasLOS(V.subj.x, V.subj.z, p.x, p.z)) { aimLock = true; return; } } }
+        if (ang < aimTol(d, touch) && ang < best && W.hasLOS(V.subj.x, V.subj.z, p.x, p.z)) { best = ang; aimLock = true; aimAt.x = p.x; aimAt.y = p.y + 1.0; aimAt.z = p.z; break; } } }
+  }
+  /* a thumb is a blunt aiming tool: while FIRE is held the camera is pulled onto the locked target, on top of the drag */
+  function magnetise(dt) {
+    if (!touch || !fireHeld || !aimLock || state !== 'play') return;
+    const dx = aimAt.x - cam.x, dz = aimAt.z - cam.z, k = Math.min(1, MAGNET * dt);
+    camYaw += angDiff(Math.atan2(dx, dz), camYaw) * k;
+    camPitch = clamp(lerp(camPitch, Math.atan2(cam.y - aimAt.y, Math.hypot(dx, dz)), k), -0.45, 1.1);
+  }
+  /* who got me and how, read off my block the moment I die: the camera follows a player killer, the card names the cause */
+  let death = null; const deathSubj = { x: 0, y: 0, z: 0, inCar: null, dead: false };
+  function noteDeath() {
+    const me = V.me; if (!me) { death = { killer: -1, line1: 'WASTED', line2: '', t: 0 }; return; }
+    const k = me.killer, cause = CAUSES[me.cause] || '', P = k >= 0 ? V.players[k] : null;
+    const dist = P ? Math.round(Math.hypot(P.x - V.subj.x, P.z - V.subj.z)) : 0;
+    let line1 = 'WASTED', line2 = CAUSE_TEXT[cause] || '';
+    if (P) { line1 = (cause === 'runover' ? 'RUN OVER BY ' : cause === 'explosion' ? 'BLOWN UP BY ' : 'WASTED BY ') + P.name.toUpperCase(); line2 = (CAUSE_TEXT[cause] && cause !== 'runover' && cause !== 'explosion' ? CAUSE_TEXT[cause] + '  ·  ' : '') + dist + ' M'; }
+    death = { killer: P ? k : -1, line1, line2, t: 0 };
   }
   function localFrame(dt) {
     if (lockPending > 0) { lockPending -= dt; if (lockPending <= 0 && !document.pointerLockElement && state === 'play') fallbackMouse = true; }
-    touchLook();
-    if (V.subj.dead) { camYaw += dt * 0.35; camPitch = lerp(camPitch, 0.75, dt); }
+    touchLook(); magnetise(dt);
+    if (V.subj.dead && !wasDead) noteDeath(); wasDead = V.subj.dead; if (!V.subj.dead) death = null;
+    let subj = V.subj;
+    if (V.subj.dead) { camYaw += dt * 0.35; camPitch = lerp(camPitch, 0.55, dt); if (death) death.t += dt;
+      const K = death && death.killer >= 0 ? V.players[death.killer] : null; if (K && !K.gone) { deathSubj.x = K.x; deathSubj.y = K.y; deathSubj.z = K.z; subj = deathSubj; } } // the camera circles whoever did it
     else if (V.car && mouseIdle > 1.0) { const c = V.car; const target = c.vF < -1 ? c.yaw + PI : c.yaw; camYaw += angDiff(target, camYaw) * Math.min(1, 2.2 * dt); camPitch = lerp(camPitch, 0.22, dt); }
-    computeCamera(W, V.subj, camYaw, camPitch, cam); camera.position.set(cam.x, cam.y, cam.z); camera.lookAt(cam.lx, cam.ly, cam.lz);
+    computeCamera(W, subj, camYaw, camPitch, cam); camera.position.set(cam.x, cam.y, cam.z); camera.lookAt(cam.lx, cam.ly, cam.lz);
     findAimLock();
     W.dayNight(clock, V.subj.x, V.subj.z, camera); W.animate(dt, t, camera); fx.update(dt); carAmbient(dt); updateAudio();
     W.plazaMarker.visible = V.ms < 2; W.plazaMarker.rotation.y += dt; W.plazaMarker.material.opacity = 0.3 + Math.sin(roundT * 4) * 0.15;
+    { const we = V.md.we, m = W.eventMarker; m.visible = !!we; if (we) { const fall = we.kind === 1 && !we.landed ? clamp((we.t - (AIRDROP_T - AIRDROP_FALL)) / AIRDROP_FALL, 0, 1) : 0; m.position.set(we.x, 20 + fall * 60, we.z); m.rotation.y += dt * 1.5; m.material.opacity = 0.3 + Math.sin(roundT * 5) * 0.15; } }
     W.sprayMarker.rotation.y -= dt; W.sprayMarker.material.opacity = (V.me && V.me.wanted > 0 ? 0.4 : 0.18) + Math.sin(roundT * 3) * 0.1;
     const d = districtAt(V.subj.x, V.subj.z), s = streetAt(V.subj.x, V.subj.z);
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
@@ -442,6 +480,9 @@ export async function create({ mount, audio, send, hooks }) {
     for (const c of V.cops) { if (c.car) { hctx.fillStyle = Math.floor(t * 6) % 2 ? '#4d7fff' : '#ff4d4d'; hctx.fillRect(wx(c.x) - 5, wx(c.z) - 5, 10, 10); } else { hctx.fillStyle = '#4d7fff'; hctx.beginPath(); hctx.arc(wx(c.x), wx(c.z), 4, 0, TAU); hctx.fill(); } }
     if (V.vin && !V.vin.dead && MISSION_STATES[V.ms] === 'hit') { hctx.fillStyle = '#ff4d4d'; hctx.beginPath(); hctx.arc(wx(V.vin.x), wx(V.vin.z), 5, 0, TAU); hctx.fill(); }
     for (const p of V.players) if (!p.me && !p.gone) { hctx.fillStyle = hex(p.color); hctx.fillRect(wx(p.x) - 5, wx(p.z) - 5, 10, 10); hctx.strokeStyle = '#fff'; hctx.lineWidth = 1.5; hctx.strokeRect(wx(p.x) - 5, wx(p.z) - 5, 10, 10); }
+    { const mk = V.md.mark, P = mk >= 0 ? V.players[mk] : null; // the mark: a pulsing yellow ring, on me too
+      if (P && !P.gone) { hctx.strokeStyle = '#ffe14d'; hctx.lineWidth = 3; hctx.beginPath(); hctx.arc(wx(P.x), wx(P.z), 9 + Math.sin(t * 6) * 2, 0, TAU); hctx.stroke(); } }
+    if (V.md.we) { const e = V.md.we, ex = wx(e.x), ez = wx(e.z); hctx.fillStyle = '#3dff7a'; hctx.beginPath(); hctx.moveTo(ex, ez - 9); hctx.lineTo(ex + 9, ez); hctx.lineTo(ex, ez + 9); hctx.lineTo(ex - 9, ez); hctx.closePath(); hctx.fill(); }
     hctx.restore();
     hctx.save(); hctx.translate(cx, cy); hctx.fillStyle = '#ffffff'; hctx.beginPath(); hctx.moveTo(0, -9); hctx.lineTo(6, 7); hctx.lineTo(0, 4); hctx.lineTo(-6, 7); hctx.closePath(); hctx.fill(); hctx.restore();
     const th = camYaw + PI, nx = Math.sin(th), ny = -Math.cos(th);
@@ -456,6 +497,27 @@ export async function create({ mount, audio, send, hooks }) {
       const sx = (V3.x + 1) / 2 * Wd, sy = (1 - V3.y) / 2 * Hd, sc = s * clamp(1.4 - d / 60, 0.55, 1.1);
       ptext(hctx, p.name, sx, sy - 7 * sc, sc, p.dead ? '#888888' : hex(p.color), 'center'); }
   }
+  /* arrows at the edge of the screen (or a tag over a far target) for the other players, the mark and the world event */
+  function drawEdgeArrows(Wd, Hd, s, L, R, T, B) {
+    if (V.subj.dead) return;
+    const mk = V.md.mark, we = V.md.we, cx = Wd / 2, cy = Hd / 2, sc = s * 0.8;
+    const one = (x, y, z, color, label, always) => {
+      const d = Math.hypot(x - V.subj.x, z - V.subj.z); if (d < 3) return;
+      V3.set(x, y + 2.2, z).project(camera);
+      const behind = V3.z > 1, on = !behind && V3.x > -1 && V3.x < 1 && V3.y > -1 && V3.y < 1;
+      const text = label + ' ' + Math.round(d) + 'M';
+      if (on && d < ARROW_FROM && !always) return; // its name is over its head already
+      if (on) { const sx = (V3.x + 1) / 2 * Wd, sy = (1 - V3.y) / 2 * Hd; hctx.fillStyle = hex(color); hctx.beginPath(); hctx.moveTo(sx, sy + 6); hctx.lineTo(sx - 5, sy - 3); hctx.lineTo(sx + 5, sy - 3); hctx.closePath(); hctx.fill(); ptext(hctx, text, sx, sy - 12 * sc, sc, hex(color), 'center'); return; }
+      let dx = (V3.x + 1) / 2 * Wd - cx, dy = (1 - V3.y) / 2 * Hd - cy; if (behind) { dx = -dx; dy = -dy; }
+      const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+      const k = Math.min((cx - (L + 44)) / Math.abs(dx || 1e-6), (cy - (T + s * 34)) / Math.abs(dy || 1e-6), (cx - (Wd - R + 44 + s * 52)) / Math.abs(dx || 1e-6), (cy - (Hd - B + 60)) / Math.abs(dy || 1e-6));
+      const px = cx + dx * k, py = cy + dy * k, a = Math.atan2(dy, dx);
+      hctx.save(); hctx.translate(px, py); hctx.rotate(a); hctx.fillStyle = hex(color); hctx.beginPath(); hctx.moveTo(10, 0); hctx.lineTo(-6, -7); hctx.lineTo(-6, 7); hctx.closePath(); hctx.fill(); hctx.restore();
+      ptext(hctx, text, px - dx * 16, py - dy * 16 - 3 * sc, sc, hex(color), 'center');
+    };
+    for (let i = 0; i < V.players.length; i++) { const p = V.players[i]; if (p.me || p.gone || p.dead) continue; const isMark = i === mk; one(p.x, p.y, p.z, isMark ? 0xffe14d : p.color, isMark ? 'MARK ' + p.name : p.name, isMark); }
+    if (we) one(we.x, 0, we.z, 0x3dff7a, EVENT_TEXT[we.kind] || 'EVENT', true);
+  }
   function drawHUD() {
     const Wd = innerWidth, Hd = innerHeight; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
     const s = Math.max(2, Math.round(Wd / 640)), me = V.me, short = Hd < 560; // short: a phone in landscape
@@ -464,7 +526,7 @@ export async function create({ mount, audio, send, hooks }) {
     const dead = me.dead, inCar = me.carId >= 0, deadT = dead ? Math.max(0, 5.5 - me.wastedT) : 0;
     const lowHp = me.health < 30 && !dead ? 0.12 + 0.08 * Math.sin(t * 6) : 0;
     if (dmgFlash > 0 || lowHp) { const a = clamp(dmgFlash * 0.65 + lowHp, 0, 0.85); const g = hctx.createRadialGradient(Wd / 2, Hd / 2, Hd * 0.2, Wd / 2, Hd / 2, Hd * 0.8); g.addColorStop(0, `rgba(190,0,0,${a * 0.35})`); g.addColorStop(1, `rgba(190,0,0,${a})`); hctx.fillStyle = g; hctx.fillRect(0, 0, Wd, Hd); }
-    drawNames(Wd, Hd, s);
+    drawNames(Wd, Hd, s); drawEdgeArrows(Wd, Hd, s, L, R, T, B);
     if (!inCar && !dead && state === 'play') { // the crosshair: red and a little wider while a shot would lock onto someone
       const g = aimLock ? 4 : 3, l = aimLock ? 7 : 6; hctx.fillStyle = aimLock ? '#ff4040' : '#ffffff';
       hctx.fillRect(Wd / 2 - 1, Hd / 2 - g - l, 2, l); hctx.fillRect(Wd / 2 - 1, Hd / 2 + g, 2, l); hctx.fillRect(Wd / 2 - g - l, Hd / 2 - 1, l, 2); hctx.fillRect(Wd / 2 + g, Hd / 2 - 1, l, 2); }
@@ -484,25 +546,30 @@ export async function create({ mount, audio, send, hooks }) {
     ptext(hctx, 'KILLS ' + me.kills, rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
     if (V.timeLeft >= 0) ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right');
     // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
-    { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro';
+    { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark;
       hctx.fillStyle = 'rgba(0,0,0,0.5)';
-      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(BRIEF, Math.floor(tw / (6 * s * 0.8)));
-      const objLines = wrapText('> ' + OBJECTIVES[ms], Math.floor(tw / (6 * s * 0.9)));
+      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
+      const objective = !mw ? OBJECTIVES[ms] : mk < 0 ? 'The mark is drawn in a moment. Find a car.' : mk === myIdx ? `You are the mark. Stay alive: +$${MARK_CASH_PER_S} a second.` : `Hunt ${nameOf(mk)}. The kill pays $${MARK_BOUNTY} and the mark.`;
+      const objLines = wrapText('> ' + objective, Math.floor(tw / (6 * s * 0.9)));
       hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
-      ptext(hctx, 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
+      ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
       for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
-      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
+      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
+    // the world event banner, under the wanted flash
+    if (V.md.we) { const e = V.md.we, left = fmtClock(Math.max(0, e.t)), txt = e.kind === 1 ? (e.landed ? 'AIRDROP DOWN  ·  ' + left : 'AIRDROP LANDS IN ' + Math.ceil(Math.max(0, e.t - (AIRDROP_T - AIRDROP_FALL)))) : (e.landed ? 'TRUCK OPEN  ·  ' + left : 'ARMORED TRUCK  ·  ' + left);
+      ptext(hctx, txt, Wd / 2, T + s * 2, s * 0.9, '#3dff7a', 'center'); }
     // bottom-left: minimap + area name
     const msz = Math.min(short ? 140 : 230, Math.round(Wd * 0.2)); drawMinimap(L, B - msz, msz);
     if (areaT > 0) { const a = clamp(areaT, 0, 1); hctx.globalAlpha = a; ptext(hctx, curDistrict, L + msz + 18, B - s * 20, s * 1.6, '#ffe14d'); ptext(hctx, curStreet, L + msz + 18, B - s * 8, s, '#ffffff'); hctx.globalAlpha = 1; }
     const hint = (touch ? HINT_TOUCH : HINT)[me.hint] || '';
     if (hint && !dead && state === 'play') ptext(hctx, hint, Wd / 2, B - s * 12 + 4, s, '#ffffff', 'center');
     // centre messages
-    if (MISSION_STATES[V.ms] === 'intro' && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1);
+    if ((MISSION_STATES[V.ms] === 'intro' || modeName() === 'mostWanted') && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1); const mw = modeName() === 'mostWanted';
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
-      ptext(hctx, 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
+      ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, 'WANTED LEVEL ' + '*'.repeat(me.wanted), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
-    if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center'); }
+    if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
+      if (death && deadT > 0.8) { ptext(hctx, death.line1, Wd / 2, Hd / 2 + sc * 4, s * 1.2, '#ffffff', 'center'); if (death.line2) ptext(hctx, death.line2, Wd / 2, Hd / 2 + sc * 4 + s * 12, s * 0.9, '#bbbbbb', 'center'); } }
     if (MISSION_STATES[V.ms] === 'passed') { hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
       ptext(hctx, 'MISSION PASSED', Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, 'RESPECT +', Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
     floats.forEach((f, i) => { const a = clamp(2.5 - f.t, 0, 1); hctx.globalAlpha = a; ptext(hctx, f.text, Wd / 2, Hd * 0.62 - f.t * 30 - i * s * 10, s * 1.1, hex(f.color), 'center'); hctx.globalAlpha = 1; });
@@ -584,9 +651,10 @@ export async function create({ mount, audio, send, hooks }) {
       sim = createSim({ W, session: s, opts: s.opts || {}, onEvent }); me = sim.players[myIdx];
       clients = s.players.filter(p => p.id !== myId).map(p => ({ id: p.id, known: new Set(), pl: sim.playerOf(p.id) }));
       hostView();
+      if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
-    root.classList.remove('over'); touchKey = ''; aimLock = false;
+    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
   }
   function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); tc.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }

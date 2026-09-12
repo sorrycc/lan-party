@@ -537,6 +537,9 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
   plazaMarker.scale.set(1.2, 40, 1.2); plazaMarker.position.set(PLAZA.x, 20, PLAZA.z); scene.add(plazaMarker);
   const sprayMarker = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({ color: 0x2fd0ff, transparent: true, opacity: 0.4 }));
   sprayMarker.scale.set(1.2, 40, 1.2); sprayMarker.position.set(SPRAY.x, 26, SPRAY.z); scene.add(sprayMarker);
+  /* a tall translucent column like the two above, for whatever the game wants to point at (a world event, a checkpoint); hidden until placed */
+  function makeMarker(color) { const m = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4 })); m.scale.set(1.2, 40, 1.2); m.visible = false; scene.add(m); return m; }
+  const eventMarker = makeMarker(0x3dff7a);
 
   /* ---- per-frame scenery animation (Ferris wheel, clouds, boats, waves) - identical, purely cosmetic, on every machine */
   const M = new THREE.Matrix4(), M2 = new THREE.Matrix4(), M3 = new THREE.Matrix4();
@@ -592,7 +595,7 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
   }
 
   return {
-    THREE, scene, sun, hemi, plazaMarker, sprayMarker, mapCanvas,
+    THREE, scene, sun, hemi, plazaMarker, sprayMarker, eventMarker, makeMarker, mapCanvas,
     aabbs, nearAabbs, hasLOS,
     pedPools, carBody, carCabin, carWheel, carLight, partPool, decalPool, pickPool, bulletPool, gunPool,
     animate, dayNight,

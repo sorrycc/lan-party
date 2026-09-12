@@ -9,11 +9,14 @@ import { KINDS, PF, CF, CAR_TYPES, WEAPONS, PedView, CarView, drawPickup, PICK_C
 export const INTERP = 0.08;
 
 /* the per-player block the host packs in sim.js (`block`) */
-export const parseBlock = b => ({ pedId: b[0], health: b[1], wanted: b[2], cash: b[3], kills: b[4], curW: b[5], ammo: b[6], reserve: b[7], reloadT: b[8], dead: !!b[9], wastedT: b[10], carId: b[11], hint: b[12], camPitch: b[13], god: !!b[14], gone: !!b[15], ack: b[16] | 0 });
+export const parseBlock = b => ({ pedId: b[0], health: b[1], wanted: b[2], cash: b[3], kills: b[4], curW: b[5], ammo: b[6], reserve: b[7], reloadT: b[8], dead: !!b[9], wastedT: b[10], carId: b[11], hint: b[12], camPitch: b[13], god: !!b[14], gone: !!b[15], ack: b[16] | 0,
+  killer: b[17] === undefined ? -1 : b[17], cause: b[18] | 0, markT: b[19] || 0 });
+/* the shared mode state the host packs (`modeState`): { mode index, the mark's player index, seconds held, the world event or null } */
+export const parseMode = m => m ? { mode: m[0] | 0, mark: m[1], markT: m[2] || 0, we: m[3] ? { kind: m[3][0], x: m[3][1], z: m[3][2], t: m[3][3], landed: !!m[3][4] } : null } : { mode: 0, mark: -1, markT: 0, we: null };
 
 export function createRemote({ W }) {
   const ents = new Map();
-  const R = { ents, P: [], clock: 9.4, timeLeft: -1, phase: 0, ms: 0, vin: null, got: false };
+  const R = { ents, P: [], clock: 9.4, timeLeft: -1, phase: 0, ms: 0, vin: null, md: parseMode(null), got: false };
   function drop(e) { if (e.cls === 'pick') W.pickPool.release(e.i); else e.view.release(); ents.delete(e.id); }
   function apply(m) {
     const now = nowSec();
@@ -35,7 +38,7 @@ export function createRemote({ W }) {
       ents.set(a[0], { id: a[0], cls: 'pick', i, kind, x: a[2], z: a[3], t: Math.random() * 6 });
     }
     if (m.P) R.P = m.P.map(parseBlock);
-    if (m.c !== undefined) R.clock = m.c; if (m.tl !== undefined) R.timeLeft = m.tl; if (m.ph !== undefined) R.phase = m.ph; if (m.ms !== undefined) R.ms = m.ms; if (m.vin !== undefined) R.vin = m.vin;
+    if (m.c !== undefined) R.clock = m.c; if (m.tl !== undefined) R.timeLeft = m.tl; if (m.ph !== undefined) R.phase = m.ph; if (m.ms !== undefined) R.ms = m.ms; if (m.vin !== undefined) R.vin = m.vin; if (m.md !== undefined) R.md = parseMode(m.md);
     R.got = true;
     return m.ev || [];
   }

@@ -9,7 +9,7 @@ import { AVATARS } from '../../core/avatars.js';
 import { makeRng } from '../../core/math.js';
 import { PI, groundY } from './world.js';
 
-export const KINDS = ['civ', 'cop', 'guard', 'vinny', 'player'];
+export const KINDS = ['civ', 'cop', 'guard', 'vinny', 'player', 'swat']; // indexed on the wire, so only ever append
 export const kindIdx = k => KINDS.indexOf(k);
 
 /* ped state flags on the wire */
@@ -31,7 +31,11 @@ export const CAR_TYPES = [
   { name: 'van', w: 2.2, l: 5.2, bh: 0.95, ch: 1.0, cl: 0.74, cz: -0.06, acc: 8.5, max: 23, brake: 17, mass: 1.45, colors: [0xffffff, 0x3a7ad1, 0xd1d1d1, 0x7a3a8a, 0x2a2a2a] },
   { name: 'cop', w: 2.0, l: 4.6, bh: 0.75, ch: 0.62, cl: 0.46, cz: -0.06, acc: 14, max: 31, brake: 22, mass: 1.1, colors: [0x111111], cabin: 0xf4f4f4, cop: true },
   { name: 'ambulance', w: 2.2, l: 5.4, bh: 1.0, ch: 1.05, cl: 0.72, cz: -0.08, acc: 9, max: 24, brake: 18, mass: 1.5, colors: [0xffffff], cabin: 0xe02020, ambulance: true },
-];
+  /* the armored truck of the world event: slow, heavy, takes four cars' worth of damage and spills cash when it goes */
+  { name: 'armored', w: 2.3, l: 5.6, bh: 1.05, ch: 0.8, cl: 0.5, cz: -0.1, acc: 8, max: 22, brake: 16, mass: 2.2, colors: [0x3a4a3a], cabin: 0x2a2f2a, armored: true, hp: 400 },
+  /* the SWAT van that comes at five stars: a cop car with four SWAT inside */
+  { name: 'swat', w: 2.3, l: 5.4, bh: 1.0, ch: 0.95, cl: 0.7, cz: -0.06, acc: 12, max: 29, brake: 20, mass: 1.8, colors: [0x101418], cabin: 0x101418, cop: true, swat: true, hp: 160 },
+]; // indexed on the wire, so only ever append
 CAR_TYPES.forEach((t, i) => { t.idx = i; });
 
 const PART_DEF = { // [pivot xyz, offset xyz, size xyz]
@@ -58,6 +62,7 @@ export function pedCols(THREE, kind, style) {
   if (kind === 'cop') return [skin, 0x1a2a5a, 0x2a3f8f, 0x2a3f8f, 0x2a3f8f, 0x1a2040, 0x1a2040];
   if (kind === 'guard') return [skin, 0x111111, 0x151515, 0x151515, 0x151515, 0x151515, 0x151515];
   if (kind === 'vinny') return [skin, 0xf4f4f4, 0xf4f4f4, 0xf4f4f4, 0xf4f4f4, 0xf4f4f4, 0xf4f4f4];
+  if (kind === 'swat') return [skin, 0x111111, 0x1c2430, 0x1c2430, 0x1c2430, 0x161a22, 0x161a22];
   if (kind === 'player') { const av = AVATARS[style] || AVATARS[0]; return [0xc68642, 0x1a1a1a, av.color, 0xc68642, 0xc68642, 0x2a2f45, 0x2a2f45]; }
   const shirt = new THREE.Color().setHSL(rnd(), rr(0.5, 0.9), rr(0.35, 0.6)).getHex(); const pants = pick(PANTS); const sleeves = rnd() < 0.5 ? shirt : skin;
   return [skin, pick(HAIRS), shirt, sleeves, sleeves, pants, pants];
@@ -163,3 +168,7 @@ export function drawPickup(W, i, x, z, t) {
 export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : kind === 'bribe' ? 0x4d8bff : 0xff4d4d;
 /* indexed on the wire, so only ever append */
 export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe'];
+/* how a player died, indexed on the wire (the per-player block); the first three are the weapon keys */
+export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat'];
+/* the world events, indexed on the wire */
+export const EVENT_KINDS = ['truck', 'airdrop'];
