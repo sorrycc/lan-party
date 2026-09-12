@@ -50,6 +50,7 @@
   text-shadow: 0 2px 0 rgba(0,0,0,.45); box-shadow: 0 4px 14px rgba(0,0,0,.35); text-align: center; }
 .gta.touch .tbtn, .gta.touch .pill { display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .gta.touch.over .ctl { display: none; } /* round over: the scoreboard wants the screen */
+.gta.noguns .fire, .gta.noguns .weapon, .gta.noguns .reload { display: none; } /* a round without guns has nothing to shoot with */
 .gta .tbtn { width: 92px; height: 92px; border-radius: 50%; }
 .gta .tbtn.on, .gta .pill.on { transform: scale(.94); background: rgba(255,225,77,.45); border-color: #ffe14d; }
 .gta .fire { right: var(--edge-r); bottom: var(--edge-b); width: 104px; height: 104px; }

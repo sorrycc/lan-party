@@ -512,3 +512,62 @@ test('the route shown: the rest of this leg from the intersection ahead and the 
   const X6 = nodeXZ([6, 6]);
   assert.deepEqual(nodeAhead(X6.x, X6.z + 1, 0, 1), [6, 6], 'just past a node still counts as at it'); assert.deepEqual(nodeAhead(X6.x, X6.z + 5, 0, 1), [6, 7]); assert.deepEqual(nodeAhead(X6.x + 20, X6.z, 1, 0), [7, 6]); assert.deepEqual(nodeAhead(X6.x + 20, X6.z, -1, 0), [6, 6]);
 });
+
+/* ---- the lobby's knobs: laps, guns, the starting kit, traffic, police */
+import { lapsOf, LOADOUTS, TRAFFIC_LEVELS, COP_LEVELS } from '../client/games/gta/sim.js';
+import { GAMES } from '../client/games/registry.js';
+
+test('the lobby offers laps, guns, a starting kit, traffic and police, and the defaults are the old game', () => {
+  const opts = GAMES.find(g => g.id === 'gta').options, keys = Object.fromEntries(opts.map(o => [o.key, o]));
+  assert.equal(keys.laps.default, 3); assert.equal(keys.guns.default, true); assert.equal(keys.loadout.default, 'basic'); assert.equal(keys.traffic.default, 'normal'); assert.equal(keys.cops.default, 'normal');
+  for (const c of keys.loadout.choices) assert.ok(LOADOUTS[c.value], c.value); for (const c of keys.traffic.choices) assert.ok(TRAFFIC_LEVELS[c.value], c.value); for (const c of keys.cops.choices) assert.ok(COP_LEVELS[c.value], c.value);
+  assert.equal(lapsOf({}), LAPS); assert.equal(lapsOf({ laps: 5 }), 5); assert.equal(lapsOf({ laps: '2' }), 2);
+  const sim = make(2); assert.equal(sim.laps, LAPS); assert.equal(sim.guns, true); assert.deepEqual(sim.kit, LOADOUTS.basic); assert.equal(sim.debug.MAX_TRAFFIC, 40);
+});
+
+test('a one-lap race is over at the first crossing of the line, and the HUD numbers follow', () => {
+  const sim = make(1, { mode: 'race', laps: 1 }); const pl = sim.players[0], n = sim.course.length;
+  assert.equal(sim.laps, 1); run(sim, COUNTDOWN_T + 0.1);
+  for (let k = 1; k < n; k++) { goTo(sim, pl, k); run(sim, 0.05); } assert.equal(pl.place, 0);
+  goTo(sim, pl, 0); run(sim, 0.1); assert.equal(pl.place, 1); assert.equal(pl.lap, 1); run(sim, 0.1); assert.equal(sim.S.phase, 'over');
+});
+
+test('guns off: nobody owns or fires a gun, no crates grow, nothing drops off a cop, and the weapon keys are dead', () => {
+  const sim = make(2, { guns: false }); const [a, b] = sim.players;
+  assert.equal(sim.guns, false); assert.deepEqual(a.weapons.map(w => w.owned), [false, false, false, false, false]);
+  assert.equal(sim.spots.filter(s => s.kind !== 'bribe').length, 0, 'no weapon crates'); assert.equal(sim.spots.length, 6, 'the bribes are still hidden around');
+  run(sim, 0.5); sim.clearEvents(); a.weapons[0].ammo = 12; a.weapons[0].owned = true; // even a gun smuggled in does not fire
+  sim.debug.fireWeapon(a); assert.equal(a.weapons[0].ammo, 12); assert.ok(!snapshot(sim, 0).ev.some(e => e[0] === 'shot'));
+  sim.action(a, 'weapon', 1); assert.equal(a.curW, 0); sim.action(a, 'reload'); assert.equal(a.reloadT, 0);
+  assert.equal(sim.debug.spawnPickup(a.ped.x, a.ped.z, 'ammo', 1), null); assert.equal(sim.debug.spawnPickup(a.ped.x, a.ped.z, 'rpg', 3), null);
+  assert.ok(sim.debug.spawnPickup(a.ped.x + 5, a.ped.z, 'cash', 10), 'cash still lies around');
+  sim.debug.killPlayer(a, b, 'runover'); assert.equal(b.kills, 1, 'a car is still a weapon');
+  assert.ok(sim.pickups.every(p => p.kind === 'cash' || p.kind === 'bribe' || p.kind === 'health'), 'nothing to shoot with in the street');
+});
+
+test('the starting kit: a pistol-only round drops the shotgun on the wire for the next one along; an all-guns round keeps the rocket through a death', () => {
+  const sim = make(2, { loadout: 'pistol' }); const [a, b] = sim.players;
+  assert.deepEqual(a.weapons.map(w => w.owned), [true, false, false, false, false]); assert.equal(parseBlock(snapshot(sim, 0).P[0]).owned, 0b1);
+  sim.debug.takeWeapon(a, 'shotgun', 9); assert.ok(a.weapons[1].owned); assert.equal(a.curW, 1, 'a shotgun is a find now');
+  a.godT = 0; sim.debug.killPlayer(a, b, 'runover');
+  assert.ok(!a.weapons[1].owned, 'the shotgun is left in the street'); const drop = sim.pickups.find(p => p.kind === 'shotgun'); assert.ok(drop && drop.amount === 9);
+  const m = snapshot(sim, 1), entry = m.k.find(e => e[0] === drop.id); assert.ok(entry && PICK_KINDS[entry[1]] === 'shotgun', 'the kind survives the wire');
+  b.ped.x = drop.x; b.ped.z = drop.z; run(sim, 0.1); assert.ok(b.weapons[1].owned && b.weapons[1].ammo === 6 && b.weapons[1].reserve === 3, 'and the other one picks it up');
+  const all = make(1, { loadout: 'all' }); const pl = all.players[0];
+  assert.deepEqual(pl.weapons.map(w => w.owned), [true, true, true, true, true]); assert.equal(pl.weapons[4].ammo, 1);
+  pl.weapons[4].ammo = 0; pl.godT = 0; all.debug.killPlayer(pl, null, 'cop'); run(all, 6); assert.ok(!pl.ped.dead);
+  assert.ok(pl.weapons[4].owned && pl.weapons[4].ammo === 1, 'the rocket is part of the kit: back after the hospital, reloaded'); assert.equal(all.pickups.filter(p => p.kind === 'rpg' && !p.spot).length, 0, 'nothing dropped (the crates in the parks are not drops)');
+});
+
+test('traffic and police scale with the lobby, and a full room on the heaviest settings fits the pools', () => {
+  const light = make(1, { traffic: 'light' }), heavy = make(8, { traffic: 'heavy', cops: 'hard' }), soft = make(8, { cops: 'soft' }), normal = make(8);
+  assert.equal(light.debug.MAX_TRAFFIC, 20); assert.equal(heavy.debug.MAX_TRAFFIC, 70);
+  assert.equal(heavy.debug.MAX_COPS, Math.round(normal.debug.MAX_COPS * 1.5)); assert.equal(soft.debug.MAX_COP_CARS, Math.round(normal.debug.MAX_COP_CARS * 0.5));
+  assert.ok(heavy.cars.filter(c => c.ai === 'traffic').length > normal.cars.filter(c => c.ai === 'traffic').length, 'more cars on the road from the start');
+  for (const pl of heavy.players) heavy.debug.addWanted(pl, 5); run(heavy, 3);
+  assert.ok(heavy.cops.length > 0 && heavy.cars.some(c => c.ai === 'cop'), 'the hard police force turned up');
+  run(heavy, 17); // everyone is wasted and back by now, with the traffic topped up around the hospital
+  const CAR_POOL = 230, PED_POOL = 320;
+  assert.ok(heavy.cars.length < CAR_POOL, 'cars ' + heavy.cars.length); assert.ok(heavy.peds.length < PED_POOL, 'peds ' + heavy.peds.length);
+  assert.ok(heavy.cars.filter(c => c.ai === 'traffic').length <= heavy.debug.MAX_TRAFFIC, 'a respawn tops the traffic up only to the cap');
+});

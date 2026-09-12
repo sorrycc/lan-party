@@ -197,9 +197,9 @@ export function drawPickup(W, i, x, z, t) {
   const { M, M2 } = _pm; const gy = groundY(x, z);
   M.makeTranslation(x, gy + 0.7 + Math.sin(t * 3) * 0.15, z); M.multiply(M2.makeRotationY(t * 2)); M.multiply(M2.makeScale(0.55, 0.55, 0.55)); W.pickPool.set(i, M);
 }
-export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : kind === 'bribe' ? 0x4d8bff : kind === 'sniper' ? 0xf4f4ff : kind === 'rpg' ? 0xff7a20 : 0xff4d4d;
+export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : kind === 'bribe' ? 0x4d8bff : kind === 'sniper' ? 0xf4f4ff : kind === 'rpg' ? 0xff7a20 : kind === 'health' ? 0xff4d4d : 0xc8c8d8; // the last: a basic gun dropped by someone who started without it
 /* indexed on the wire, so only ever append; the last two are the weapon crates (their amount is the rounds inside) */
-export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe', 'sniper', 'rpg'];
+export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe', 'sniper', 'rpg', 'pistol', 'shotgun', 'smg']; // the basic guns only lie in the street when a lobby kit left someone without them
 /* how a player died, indexed on the wire (the per-player block); the weapon keys are among them */
 export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg', 'crash']; // crash: thrown off a motorcycle
 /* the world events, indexed on the wire */

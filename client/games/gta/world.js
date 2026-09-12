@@ -229,7 +229,7 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
   const glowPool = new ChunkedPool(THREE, scene, BOX, basicMat, 300, false, false);
   // dynamic pools (peds, cars, effects, pickups, guns)
   const pedPools = ['head', 'hair', 'torso', 'armL', 'armR', 'legL', 'legR'].map(() => new Pool(THREE, scene, BOX, lambert, 320));
-  const carBody = new Pool(THREE, scene, BOX, lambert, 170), carCabin = new Pool(THREE, scene, BOX, lambert, 170), carWheel = new Pool(THREE, scene, WHEEL_GEO, lambert, 680), carLight = new Pool(THREE, scene, BOX, basicMat, 1020, false, false);
+  const carBody = new Pool(THREE, scene, BOX, lambert, 230), carCabin = new Pool(THREE, scene, BOX, lambert, 230), carWheel = new Pool(THREE, scene, WHEEL_GEO, lambert, 920), carLight = new Pool(THREE, scene, BOX, basicMat, 1380, false, false); // room for heavy traffic and a hard police force on top of the parked cars
   const partPool = new Pool(THREE, scene, BOX, basicMat, 600, false, false);
   const decalPool = new Pool(THREE, scene, QUAD, new THREE.MeshLambertMaterial({ color: 0xffffff, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }), 600, false, true);
   const pickPool = new Pool(THREE, scene, BOX, basicMat, 80, false, false);

@@ -14,7 +14,7 @@
 import { makeRng } from '../../core/math.js';
 import { X, NB, HALF, PITCH, streetAt } from './world.js';
 
-export const LAPS = 3, CHECKPOINTS = 6;
+export const LAPS = 3, CHECKPOINTS = 6; // LAPS is the default; the lobby's RACE LAPS option overrides it (lapsOf in sim.js)
 export const START_NODE = [3, 8]; // the intersection the grid faces (Ender Ave, heading +z)
 export const CP_RADIUS = 9;        // within this of an intersection's centre counts as through it
 const MIN_GAP = 3;                 // blocks between any two checkpoints (Manhattan), and from the start
