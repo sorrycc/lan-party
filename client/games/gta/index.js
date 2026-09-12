@@ -28,6 +28,7 @@ import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, 
 import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
+import { createReplay, REPLAY_DELAY } from './replay.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 
 const NET_HZ = 30;
@@ -488,6 +489,8 @@ export async function create({ mount, audio, send, hooks }) {
   }
   /* who got me and how, read off my block the moment I die: the camera follows a player killer, the card names the cause */
   let death = null; const deathSubj = { x: 0, y: 0, z: 0, inCar: null, dead: false };
+  /* the killcam (replay.js): the last seconds before a death by another player's hand, played back from behind the killer once the fall has been seen */
+  const replay = createReplay(); let killcamT = -1;
   function noteDeath() {
     const me = V.me; if (!me) { death = { killer: -1, line1: 'WASTED', line2: '', t: 0 }; return; }
     const k = me.killer, cause = CAUSES[me.cause] || '', P = k >= 0 ? V.players[k] : null;
@@ -520,14 +523,18 @@ export async function create({ mount, audio, send, hooks }) {
   function localFrame(dt) {
     if (lockPending > 0) { lockPending -= dt; if (lockPending <= 0 && !document.pointerLockElement && state === 'play') fallbackMouse = true; }
     touchLook(); magnetise(dt);
-    if (V.subj.dead && !wasDead) noteDeath(); wasDead = V.subj.dead; if (!V.subj.dead) death = null;
-    let subj = V.subj;
-    if (V.subj.dead) { camYaw += dt * 0.35; camPitch = lerp(camPitch, 0.55, dt); if (death) death.t += dt;
-      const K = death && death.killer >= 0 ? V.players[death.killer] : null; if (K && !K.gone) { deathSubj.x = K.x; deathSubj.y = K.y; deathSubj.z = K.z; subj = deathSubj; } } // the camera circles whoever did it
+    if (V.subj.dead && !wasDead) { noteDeath(); killcamT = death && death.killer >= 0 ? REPLAY_DELAY : -1; } wasDead = V.subj.dead; if (!V.subj.dead) { death = null; killcamT = -1; replay.stop(); }
+    let subj = V.subj, rf = null;
+    if (V.subj.dead) { if (death) death.t += dt;
+      if (killcamT > 0) { killcamT -= dt; if (killcamT <= 0) replay.start(death.killer, t); } // the fall is seen live, then the last seconds again from behind the killer
+      if (replay.active) { rf = replay.frame(dt); if (!rf || !rf.cam) { replay.stop(); rf = null; } }
+      if (rf) { for (const st of rf.states) st.view.draw(st, dt, t); W.dirtyDynamic(); subj = rf.cam.subj; camYaw = rf.cam.yaw; camPitch = rf.cam.pitch; if (rf.done) replay.stop(); }
+      else { camYaw += dt * 0.35; camPitch = lerp(camPitch, 0.55, dt);
+        const K = death && death.killer >= 0 ? V.players[death.killer] : null; if (K && !K.gone) { deathSubj.x = K.x; deathSubj.y = K.y; deathSubj.z = K.z; subj = deathSubj; } } } // the camera circles whoever did it
     else if (V.car && mouseIdle > 1.0) { const c = V.car; const target = c.vF < -1 ? c.yaw + PI : c.yaw; camYaw += angDiff(target, camYaw) * Math.min(1, 2.2 * dt); camPitch = lerp(camPitch, 0.22, dt); }
     computeCamera(W, subj, camYaw, camPitch, cam); camera.position.set(cam.x, cam.y, cam.z); camera.lookAt(cam.lx, cam.ly, cam.lz);
     findAimLock();
-    W.dayNight(clock, V.subj.x, V.subj.z, camera); W.animate(dt, t, camera); fx.update(dt); carAmbient(dt); updateAudio();
+    W.dayNight(clock, subj.x, subj.z, camera); W.animate(dt, t, camera); fx.update(dt); carAmbient(dt); updateAudio();
     W.plazaMarker.visible = V.ms < 2; W.plazaMarker.rotation.y += dt; W.plazaMarker.material.opacity = 0.3 + Math.sin(roundT * 4) * 0.15;
     { const we = V.md.we, m = W.eventMarker; m.visible = !!we; if (we) { const fall = we.kind === 1 && !we.landed ? clamp((we.t - (AIRDROP_T - AIRDROP_FALL)) / AIRDROP_FALL, 0, 1) : 0; m.position.set(we.x, 20 + fall * 60, we.z); m.rotation.y += dt * 1.5; m.material.opacity = 0.3 + Math.sin(roundT * 5) * 0.15; } }
     W.sprayMarker.rotation.y -= dt; W.sprayMarker.material.opacity = (V.me && V.me.wanted > 0 ? 0.4 : 0.18) + Math.sin(roundT * 3) * 0.1;
@@ -706,7 +713,10 @@ export async function create({ mount, audio, send, hooks }) {
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
       ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, 'WANTED LEVEL ' + '*'.repeat(me.wanted), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
-    if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
+    if (dead && replay.active) { const bar = Math.round(Hd * 0.09); hctx.fillStyle = '#000000'; hctx.fillRect(0, 0, Wd, bar); hctx.fillRect(0, Hd - bar, Wd, bar); // letterboxed: the last seconds again, from behind the killer
+      ptext(hctx, 'KILLCAM', Wd / 2, bar + s * 6, s * 1.6, '#ff6060', 'center'); ptext(hctx, 'THROUGH THE EYES OF ' + nameOf(replay.killer).toUpperCase(), Wd / 2, bar + s * 22, s, hex(playerColor(replay.killer)), 'center');
+      hctx.fillStyle = '#ff6060'; hctx.fillRect(0, Hd - bar, Math.round(Wd * replay.progress), 3); }
+    else if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
       if (death && deadT > 0.8) { ptext(hctx, death.line1, Wd / 2, Hd / 2 + sc * 4, s * 1.2, '#ffffff', 'center'); if (death.line2) ptext(hctx, death.line2, Wd / 2, Hd / 2 + sc * 4 + s * 12, s * 0.9, '#bbbbbb', 'center'); } }
     if (MISSION_STATES[V.ms] === 'passed') { hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
       ptext(hctx, 'MISSION PASSED', Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, 'RESPECT +', Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
@@ -767,16 +777,18 @@ export async function create({ mount, audio, send, hooks }) {
     const raw = Math.min(0.1, real); t += raw; roundT += raw; fps = lerp(fps, 1 / Math.max(raw, 1e-3), 0.05);
     const t0 = performance.now(), inp = readInput();
     if (isHost) {
+      sim.S.draw = !replay.active; // the killcam draws the views from its own frames
       if (online || state === 'play' || state === 'over') { sim.setInput(me, inp); const steps = raw > 0.034 ? 2 : 1, dt = raw / steps; for (let k = 0; k < steps; k++) sim.update(dt); }
       if (online) hostNetTick(raw); else sim.clearEvents();
       hostView();
     } else {
       if (remote.R.got) inp.q = pred.step(inp.m, camYaw, localArm > 0, raw, remote.R.P[myIdx], remote, t0, inp.x, inp.z);
       clientSendInput(inp, raw);
-      if (remote.R.got) { clock += raw / 45; remote.update(raw, t, myIdx, camPitch, pred.local()); }
+      if (remote.R.got) { clock += raw / 45; remote.update(raw, t, myIdx, camPitch, pred.local(), !replay.active); }
       clientView();
       if (state === 'play' && fireHeld) localShot(true);
     }
+    if (V.me) replay.record(t, (isHost ? sim : remote).ents.values(), V.blocks);
     const t1 = performance.now();
     localFrame(raw); syncTouch();
     renderer.render(scene, camera);
@@ -804,7 +816,7 @@ export async function create({ mount, audio, send, hooks }) {
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
     laps = lapsOf(s.opts || {}); guns = gunsOn(s.opts || {}); root.classList.toggle('noguns', !guns); // the HUD's copy of the lobby's knobs; the touch FIRE, WEAPON and RELOAD buttons go with the guns
     course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; legs = course ? planLap(course) : null; routeCp = -1; goT = 0; lastCount = -1; finishT = 0; // the course and the lap plan come from the seed on every machine
-    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
+    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; killcamT = -1; replay.reset(); W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
   }
   function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); tc.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }

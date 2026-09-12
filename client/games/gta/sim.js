@@ -82,7 +82,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const MAX_COPS = Math.round((nPlayers <= 1 ? SOLO_COPS : Math.min(MAX_COPS_ROOM, COPS_PER_PLAYER * nPlayers)) * copK), MAX_COP_CARS = Math.round((nPlayers <= 1 ? SOLO_COP_CARS : Math.min(MAX_COP_CARS_ROOM, COP_CARS_PER_PLAYER * nPlayers)) * copK);
   const MAX_TRAFFIC = Math.round(40 * trafficK), TRAFFIC_TOPUP = Math.ceil(2 * trafficK); // cars driving around, and how many are added per half second
   /* phase: 'countdown' (the race grid, nobody moves) | 'play' | 'over' */
-  const S = { clockH: START_CLOCK[opts.time] ?? START_CLOCK.morning, timeLeft: (Number(opts.minutes) || 0) * 60, unlimited: !(Number(opts.minutes) > 0), phase: mode === 'race' ? 'countdown' : 'play', t: 0, spawnT: 0 };
+  const S = { clockH: START_CLOCK[opts.time] ?? START_CLOCK.morning, timeLeft: (Number(opts.minutes) || 0) * 60, unlimited: !(Number(opts.minutes) > 0), phase: mode === 'race' ? 'countdown' : 'play', t: 0, spawnT: 0, draw: true }; // draw: false while the killcam draws the views from its own frames
   const mission = { state: mode === 'sandbox' ? 'intro' : 'done', t: 0, vinny: null, guards: [], hostile: false, passedT: 0, killer: null };
   /* the race: the course (from the seed, the same on every machine), the countdown, then the grace once someone has finished */
   const course = mode === 'race' ? raceCourse(session.seed) : null, legs = course ? planLap(course) : null; // the planned lap decides which way a respawned car faces
@@ -231,7 +231,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.y = groundY(this.x, this.z);
       this.draw(dt);
     }
-    draw(dt) { this.view.draw(this, dt); }
+    draw(dt) { if (S.draw) this.view.draw(this, dt); }
   }
 
   /* ============================================================ cars */
@@ -363,7 +363,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       }
       if (this.burn > 0) this.burn -= dt;
     }
-    draw(dt) { this.lights = !this.dead && (this.ai === 'cop' || !!this.type.ambulance); this.view.draw(this, dt, S.t); }
+    draw(dt) { this.lights = !this.dead && (this.ai === 'cop' || !!this.type.ambulance); if (S.draw) this.view.draw(this, dt, S.t); }
   }
   function collideCars() {
     for (let i = 0; i < cars.length; i++) { const A = cars[i]; if (A.released) continue;
