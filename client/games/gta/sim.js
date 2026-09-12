@@ -61,7 +61,9 @@ const THROW_IMP = 7, THROW_DMG = 3;
 const EVENT_GAP = [70, 110], TRUCK_T = 150, TRUCK_CASH = 12;
 export const AIRDROP_T = 75, AIRDROP_FALL = 10;
 /* the driving jobs: seconds to reach a waiting fare or patient, the base fare and the rate per metre, the bonus for a fast run, what each delivery in a row adds */
-export const JOB_PICKUP_T = 60, TAXI_PAY = [30, 0.6], AMB_PAY = [60, 0.8], JOB_TIP = 0.5, JOB_STREAK = 25;
+export const JOB_PICKUP_T = 60, TAXI_PAY = [30, 0.6], AMB_PAY = [60, 0.8], JOB_TIP = 0.5, JOB_STREAK = 25, STREAK_NEWS = 3;
+/* what the room is told about through the feed, besides kills: `news` events carry one of these, a player index (or -1) and a detail */
+export const NEWS = ['gun', 'stars', 'escape', 'busted', 'truck', 'drop', 'streak', 'left'];
 const AMB_BAY = { x: HOSPITAL.x, z: HOSPITAL.z + ROAD / 2 + SW / 2 - 2.5 }; // the road outside the hospital's front door
 const SPAWN_ROAD = 3, SPAWN_BLOCK = 7; // the players line up on Ender Ave beside block (3,7), four per sidewalk
 export const SPAWNS = Array.from({ length: 8 }, (_, i) => { const side = i < 4 ? -1 : 1, z = X(SPAWN_BLOCK) + 12 + (i % 4) * 8;
@@ -88,6 +90,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   /* the current world event (one at a time): kind, where it is, how long it has left; the truck's car or the airdrop's landing timer */
   const WE = { kind: null, x: 0, z: 0, t: 0, nextT: rr(EVENT_GAP[0], EVENT_GAP[1]), car: null, landT: 0, landed: false };
   const emit = (ev, x, z) => { events.push({ e: ev, x, z }); onEvent(ev); };
+  /* a line for the feed on every screen: what happened (NEWS), to whom (a player index, or -1), and a detail */
+  const news = (kind, idx, extra) => emit(['news', kind, idx, extra]);
   const camTmp = {};
 
   /* ============================================================ players */
@@ -432,6 +436,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const i = WEAPONS.findIndex(w => w.key === key), w = pl.weapons[i]; if (!w) return;
     if (w.owned) { w.reserve += rounds; return; }
     w.owned = true; w.ammo = Math.min(w.mag, rounds); w.reserve = rounds - w.ammo; switchWeapon(pl, i);
+    if (!w.basic) news('gun', pl.idx, key); // a sniper or a rocket in someone's hands is worth knowing about
   }
   /* a dead player leaves the special weapons in the street for whoever gets there first */
   function dropWeapons(pl) {
@@ -541,9 +546,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     dropWeapons(pl);
     emit(['wasted', pl.idx]); emit(['blood', r1(P.x), r1(P.z)], P.x, P.z);
     const wasMark = mode === 'mostWanted' && mark.idx === pl.idx;
+    emit(['kill', pl.killer, pl.idx, pl.cause]); // the feed on every screen: who, whom, how (the killer is -1 for the cops, the traffic, a crash)
     if (by && by !== pl) { by.kills++; by.cash += 100; emit(['float', by.idx, 'WASTED ' + pl.name.toUpperCase() + '  +$100', 0xff6060]);
-      if (by.wanted < 2 && !wasMark) addWanted(by, 1); // hunting the mark is legal
-      emit(['kill', by.idx, pl.idx, pl.cause]); }
+      if (by.wanted < 2 && !wasMark) addWanted(by, 1); } // hunting the mark is legal
     if (wasMark) { if (by && by !== pl) { by.cash += MARK_BOUNTY; emit(['float', by.idx, 'BOUNTY  +$' + MARK_BOUNTY, 0xffe14d]); setMark(by.idx, 'kill'); } else setMark(randomPlayer(pl), 'cops'); }
   }
   function respawn(pl) {
@@ -570,7 +575,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   function addWanted(pl, n) {
     if (!pl || pl.gone) return;
     const old = pl.wanted; pl.wanted = clamp(pl.wanted + n, 0, 5); pl.crimeT = 0; pl.seenT = 0; pl.peak = Math.max(pl.peak, pl.wanted);
-    if (pl.wanted > old) emit(['wanted', pl.idx, pl.wanted]);
+    if (pl.wanted > old) { emit(['wanted', pl.idx, pl.wanted]); if (pl.wanted === 5 && old < 5) news('stars', pl.idx, 5); }
   }
   /* the heat is off: no stars, no simmering heat, and the cops on this player's tail pick a new target or stand down.
      Shaking off (or buying off) a five-star chase pays a bonus the whole room hears about; turning yourself in does not. */
@@ -578,7 +583,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     pl.wanted = 0; pl.heat = 0; pl.crimeT = 0; pl.seenT = 0;
     for (const c of cars) if (c.target === pl) c.target = null;
     for (const c of cops) if (c.target === pl) c.target = null;
-    if (pl.peak >= 5 && how !== 'busted') { pl.cash += ESCAPE_BONUS; emit(['float', pl.idx, '5-STAR ESCAPE  +$' + ESCAPE_BONUS, 0xffe14d]); emit(['float', -1, pl.name.toUpperCase() + ' ESCAPED A 5-STAR CHASE', 0x7fe0ff]); }
+    if (pl.peak >= 5 && how !== 'busted') { pl.cash += ESCAPE_BONUS; emit(['float', pl.idx, '5-STAR ESCAPE  +$' + ESCAPE_BONUS, 0xffe14d]); news('escape', pl.idx, ESCAPE_BONUS); }
     pl.peak = 0;
   }
   /* Most Wanted: hand the mark to a player (-1 clears it); `why` is 'start', 'kill', 'cops' or 'left' */
@@ -617,7 +622,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const fine = Math.min(pl.cash, STAR_PRICE * pl.wanted);
     pl.cash -= fine; for (const w of pl.weapons) w.reserve = 0;
     clearWanted(pl, 'busted');
-    emit(['cleared', pl.idx, 'busted']); emit(['float', pl.idx, 'BUSTED  -$' + fine, 0x4d7fff]); emit(['float', pl.idx, 'SPARE AMMO CONFISCATED', 0xff6060]);
+    emit(['cleared', pl.idx, 'busted']); news('busted', pl.idx, fine); emit(['float', pl.idx, 'BUSTED  -$' + fine, 0x4d7fff]); emit(['float', pl.idx, 'SPARE AMMO CONFISCATED', 0xff6060]);
   }
 
   /* ============================================================ cars: enter / exit */
@@ -774,7 +779,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   function endEvent() { WE.kind = null; WE.car = null; WE.landed = false; WE.nextT = rr(EVENT_GAP[0], EVENT_GAP[1]); }
   function truckOpened(c) {
     for (let k = 0; k < TRUCK_CASH; k++) { const a = rr(0, TAU), d = rr(2.5, 6.5); spawnPickup(c.x + Math.sin(a) * d, c.z + Math.cos(a) * d, 'cash', ri(80, 160), 90); }
-    emit(['float', -1, 'THE ARMORED TRUCK IS OPEN. GRAB THE CASH!', 0x3dff7a]);
+    emit(['float', -1, 'THE ARMORED TRUCK IS OPEN. GRAB THE CASH!', 0x3dff7a]); news('truck', c.lastHitBy ? c.lastHitBy.idx : -1, streetAt(c.x, c.z));
     if (WE.car === c) { WE.t = Math.min(WE.t, 45); WE.landed = true; } // the event lingers over the spill, then ends
   }
   function updateEvents(dt) {
@@ -786,7 +791,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       for (let k = 0; k < 3; k++) { const a = k * TAU / 3 + 0.4, d = 1.6; spawnPickup(WE.x + Math.sin(a) * d, WE.z + Math.cos(a) * d, 'ammo', 1, AIRDROP_T); }
       spawnPickup(WE.x, WE.z, 'health', 40, AIRDROP_T);
       { const c = crate(rnd() < 0.5 ? 'sniper' : 'rpg'); spawnPickup(WE.x + 1.2, WE.z - 1.2, c.kind, c.amount, AIRDROP_T); } // and a weapon
-      emit(['wland', r1(WE.x), r1(WE.z)], WE.x, WE.z); alertPeds(WE.x, WE.z, 30); } }
+      emit(['wland', r1(WE.x), r1(WE.z)], WE.x, WE.z); news('drop', -1, districtAt(WE.x, WE.z)); alertPeds(WE.x, WE.z, 30); } }
     if (WE.t <= 0) endEvent();
   }
 
@@ -843,7 +848,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       emit(['float', pl.idx, (kind === 'taxi' ? 'TAKE THE FARE TO ' + streetAt(dest.x, dest.z).toUpperCase() : 'GET THE PATIENT TO THE HOSPITAL') + '  $' + j.pay, 0xf2c014]); emit(['job', pl.idx, 'pickup']); }
     else { if (dist2(c.x, c.z, j.x, j.z) > 9 * 9) return;
       j.n++; const tip = j.t > (j.dist / 8 + 20) * 0.4 ? Math.round(j.pay * JOB_TIP) : 0, streak = JOB_STREAK * (j.n - 1), total = j.pay + tip + streak;
-      pl.cash += total; releaseFare(j, true); j.stage = 'wait'; j.t = 2;
+      pl.cash += total; releaseFare(j, true); j.stage = 'wait'; j.t = 2; if (j.n >= STREAK_NEWS) news('streak', pl.idx, j.n);
       emit(['float', pl.idx, (kind === 'taxi' ? 'FARE PAID' : 'PATIENT DELIVERED') + '  +$' + total + (tip ? '  (TIP $' + tip + ')' : '') + (streak ? '  (' + j.n + ' IN A ROW +$' + streak + ')' : ''), 0x3dff7a]); emit(['job', pl.idx, 'paid']); }
   }
 
@@ -951,7 +956,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     pl.gone = true;
     if (pl.ped) { if (pl.ped.inCar) leaveCar(pl, true); pl.ped.release(); const i = peds.indexOf(pl.ped); if (i >= 0) peds.splice(i, 1); pl.ped = null; }
     for (const c of cars) if (c.target === pl) c.target = null;
-    emit(['float', -1, pl.name.toUpperCase() + ' LEFT THE CITY', 0x9fb4dc]);
+    news('left', pl.idx);
     if (mode === 'mostWanted' && mark.idx === pl.idx) setMark(randomPlayer(pl), 'left');
   }
 
@@ -1026,5 +1031,5 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
 
   return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, guns, kit, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
     /* for the tests and the console: reach into the rules directly */
-    debug: { damagePlayer, killPlayer, addWanted, clearWanted, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, throwRiders, collideCars, Ped, Car, MAX_COPS, MAX_COP_CARS, MAX_TRAFFIC } };
+    debug: { damagePlayer, killPlayer, addWanted, clearWanted, surrender, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, throwRiders, collideCars, Ped, Car, MAX_COPS, MAX_COP_CARS, MAX_TRAFFIC } };
 }

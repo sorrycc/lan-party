@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { createSim, MODES, MARK_CASH_PER_S, MARK_BOUNTY, MARK_PICK_T, MARK_STARS, ESCAPE_BONUS, AIRDROP_T, AIRDROP_FALL, aimTol } from '../client/games/gta/sim.js';
 import { parseBlock, parseMode } from '../client/games/gta/remote.js';
 import { CAUSES, EVENT_KINDS, CAR_TYPES } from '../client/games/gta/entities.js';
+import { NEWS, STREAK_NEWS } from '../client/games/gta/sim.js';
 
 const pool = () => ({ alloc() { return 0; }, release() {}, color() {}, hide() {}, set() {}, dirty() {} });
 const stubWorld = () => ({ THREE, aabbs: [], nearAabbs: () => [], hasLOS: () => true, pickPool: pool(), pedPools: Array.from({ length: 7 }, pool), gunPool: pool(), carBody: pool(), carCabin: pool(), carWheel: pool(), carLight: pool(), dirtyDynamic() {} });
@@ -570,4 +571,48 @@ test('traffic and police scale with the lobby, and a full room on the heaviest s
   const CAR_POOL = 230, PED_POOL = 320;
   assert.ok(heavy.cars.length < CAR_POOL, 'cars ' + heavy.cars.length); assert.ok(heavy.peds.length < PED_POOL, 'peds ' + heavy.peds.length);
   assert.ok(heavy.cars.filter(c => c.ai === 'traffic').length <= heavy.debug.MAX_TRAFFIC, 'a respawn tops the traffic up only to the cap');
+});
+
+/* the feed: every player's snapshot of the same tick, and the news lines of one kind in a snapshot */
+const snapsAll = sim => { sim.prepareNet(); const ms = sim.players.map((pl, i) => sim.snapshotFor({ id: 'p' + i, known: new Set(), pl })); sim.endNet(); return ms; };
+const newsIn = (m, kind) => m.ev.filter(e => e[0] === 'news' && e[1] === kind);
+
+test('every death is in the feed on every screen: who, whom and how, with no killer for the cops; WASTED itself stays private', () => {
+  const sim = make(3); const [a, b, c] = sim.players;
+  sim.debug.killPlayer(a, b, 'rpg');
+  let ms = snapsAll(sim);
+  for (const m of ms) assert.ok(m.ev.some(e => e[0] === 'kill' && e[1] === 1 && e[2] === 0 && CAUSES[e[3]] === 'rpg'), 'the rocket kill reaches everyone');
+  assert.ok(ms[0].ev.some(e => e[0] === 'wasted' && e[1] === 0), 'the victim hears it');
+  assert.ok(!ms[2].ev.some(e => e[0] === 'wasted'), 'a bystander does not');
+  sim.debug.killPlayer(c, null, 'cop');
+  ms = snapsAll(sim);
+  for (const m of ms) assert.ok(m.ev.some(e => e[0] === 'kill' && e[1] === -1 && e[2] === 2 && CAUSES[e[3]] === 'cop'), 'a cop kill is announced without a killer');
+  assert.equal(a.kills + b.kills + c.kills, 1, 'and nobody is credited with it');
+});
+
+test('the news: five stars, a five-star escape, the precinct, a special gun found, the airdrop down, the truck open, and leaving', () => {
+  const sim = make(2); const [a, b] = sim.players;
+  for (const k of ['gun', 'stars', 'escape', 'busted', 'truck', 'drop', 'streak', 'left']) assert.ok(NEWS.includes(k));
+  sim.debug.addWanted(a, 4); assert.equal(newsIn(snapshot(sim, 1), 'stars').length, 0, 'four stars are nobody\'s business');
+  sim.debug.addWanted(a, 1); let n = newsIn(snapshot(sim, 1), 'stars'); assert.equal(n.length, 1); assert.equal(n[0][2], 0);
+  sim.debug.clearWanted(a, 'lost'); let m = snapshot(sim, 1); n = newsIn(m, 'escape'); assert.equal(n.length, 1); assert.equal(n[0][2], 0); assert.equal(n[0][3], ESCAPE_BONUS);
+  assert.ok(!m.ev.some(e => e[0] === 'float' && e[1] === -1), 'the room-wide float is gone: the feed has it');
+  sim.debug.addWanted(a, 2); sim.debug.surrender(a); n = newsIn(snapshot(sim, 1), 'busted'); assert.equal(n.length, 1); assert.equal(n[0][2], 0);
+  sim.debug.takeWeapon(b, 'rpg', 3); n = newsIn(snapshot(sim, 0), 'gun'); assert.equal(n.length, 1); assert.equal(n[0][2], 1); assert.equal(n[0][3], 'rpg');
+  sim.debug.takeWeapon(b, 'rpg', 3); assert.equal(newsIn(snapshot(sim, 0), 'gun').length, 0, 'topping up is not news');
+  sim.debug.takeWeapon(b, 'shotgun', 3); assert.equal(newsIn(snapshot(sim, 0), 'gun').length, 0, 'nor is a basic gun');
+  assert.ok(sim.debug.startEvent('airdrop')); run(sim, AIRDROP_FALL + 0.5); n = newsIn(snapshot(sim, 1), 'drop'); assert.equal(n.length, 1); assert.equal(typeof n[0][3], 'string');
+  sim.WE.t = 0; run(sim, 0.1); assert.ok(sim.debug.startEvent('truck')); const truck = sim.WE.car; truck.lastHitBy = a; truck.damage(truck.hp);
+  n = newsIn(snapshot(sim, 1), 'truck'); assert.equal(n.length, 1); assert.equal(n[0][2], 0, 'credited to whoever hit it last');
+  sim.playerLeft('p1'); m = snapshot(sim, 0); n = newsIn(m, 'left'); assert.equal(n.length, 1); assert.equal(n[0][2], 1);
+  assert.ok(!m.ev.some(e => e[0] === 'float' && e[1] === -1), 'no room-wide float for that either');
+});
+
+test('a fare streak is news from the third fare on', () => {
+  const sim = make(2); const pl = takeCab(sim), c = pl.ped.inCar; run(sim, 1.8);
+  const fare = pl.job.fare; fare.x = c.x + 40; fare.z = c.z; stopAt(sim, c, fare.x + 2, fare.z); assert.equal(pl.job.stage, 'dropoff');
+  pl.job.n = STREAK_NEWS - 2; snapshot(sim, 1); stopAt(sim, c, pl.job.x + 1, pl.job.z);
+  assert.equal(pl.job.n, STREAK_NEWS - 1); assert.equal(newsIn(snapshot(sim, 1), 'streak').length, 0, 'two in a row is not news');
+  run(sim, 2.2); const f2 = pl.job.fare; f2.x = c.x + 40; f2.z = c.z; stopAt(sim, c, f2.x + 2, f2.z); snapshot(sim, 1); stopAt(sim, c, pl.job.x + 1, pl.job.z);
+  assert.equal(pl.job.n, STREAK_NEWS); const n = newsIn(snapshot(sim, 1), 'streak'); assert.equal(n.length, 1); assert.equal(n[0][2], 0); assert.equal(n[0][3], STREAK_NEWS);
 });

@@ -37,6 +37,11 @@ const briefRace = (laps, guns) => `${laps} lap${laps === 1 ? '' : 's'} through t
 /* what the death card says for each CAUSES entry; a name is filled in when a player did it */
 const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
 const PICK_TEXT = { sniper: 'SNIPER RIFLE', rpg: 'ROCKET LAUNCHER', pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG' };
+/* the feed's line for a kill: a gun draws its icon between the two names, anything else is a verb; without a killer the victim's fate */
+const KILL_VERB = { runover: 'RAN OVER', explosion: 'BLEW UP', crash: 'KNOCKED OFF THE BIKE' };
+const DIED_TEXT = { cop: 'SHOT BY THE LPPD', swat: 'SHOT BY SWAT', guard: 'SHOT BY THE BODYGUARDS', runover: 'RUN OVER', explosion: 'BLOWN UP', crash: 'CAME OFF THE BIKE' };
+/* the feed: how long a line stays, how long it takes to fade, how many show (fewer on a phone) */
+const FEED_T = 8, FEED_FADE = 1.5, FEED_LINES = 5, FEED_LINES_PHONE = 3;
 /* the letter a weapon lying in the street shows on the minimap, and its square's colour */
 const PICK_MAP = { sniper: ['S', '#f4f4ff'], rpg: ['R', '#ff7a20'], pistol: ['P', '#c8c8d8'], shotgun: ['G', '#c8c8d8'], smg: ['M', '#c8c8d8'] };
 /* the control hints that mean nothing in a round without guns */
@@ -162,7 +167,7 @@ export async function create({ mount, audio, send, hooks }) {
   let camYaw = 0, camPitch = 0.22, mouseIdle = 10, fallbackMouse = touch, lockPending = 0, lastMX = null, lastMY = null; // no pointer lock on a touch screen
   let t = 0, roundT = 0, fps = 60, clock = START_CLOCK.morning;
   let dmgFlash = 0, wantedFlash = 0, areaT = 0, curDistrict = '', curStreet = '', routeT = 0, route = [], routeTarget = null, wasDead = false;
-  const floats = [];
+  const floats = [], feed = [];
   let clicks = 0, fireHeld = false, netAcc = 0, lastIn = null, sinceIn = 0, pred = null, localFireT = 0, localArm = 0;
   let course = null, legs = null, routeCp = -1, goT = 0, lastCount = -1, finishT = 0; // the race: the checkpoints and the planned lap (from the seed), where the checkpoint sits in the shown route, the GO! flash, the last countdown number heard, the "you finished" flash
   const timing = { frame: 0, sim: 0, render: 0, hud: 0 };
@@ -210,6 +215,20 @@ export async function create({ mount, audio, send, hooks }) {
   const floatText = (text, color) => floats.push({ text, color, t: 0 });
   const mine = idx => idx === myIdx;
   const nameOf = idx => ((session && session.players[idx]) || {}).name || '?';
+  /* the feed in the top-left corner: a line is a few parts, each a coloured word or a gun icon; the newest line is on top */
+  const feedLine = (...parts) => { feed.unshift({ parts, t: 0 }); if (feed.length > 12) feed.length = 12; };
+  const pname = idx => ({ t: nameOf(idx), c: idx === myIdx ? '#ffffff' : hex(playerColor(idx)) });
+  const said = (t, c = '#dddddd') => ({ t, c });
+  const NEWS_LINE = { // what a `news` event puts in the feed
+    gun: (idx, key) => [pname(idx), said('FOUND A ' + (PICK_TEXT[key] || key), '#ffe14d'), { icon: key }],
+    stars: idx => [pname(idx), said('IS WANTED  *****', '#ffe14d')],
+    escape: (idx, bonus) => [pname(idx), said('ESCAPED A 5-STAR CHASE  +$' + bonus, '#7fe0ff')],
+    busted: idx => [pname(idx), said('WENT TO THE PRECINCT', '#4d8bff')],
+    truck: (idx, street) => idx >= 0 ? [pname(idx), said('BLEW THE TRUCK OPEN ON ' + street, '#3dff7a')] : [said('THE ARMORED TRUCK IS OPEN ON ' + street, '#3dff7a')],
+    drop: (idx, district) => [said('AIRDROP DOWN IN ' + district, '#3dff7a')],
+    streak: (idx, n) => [pname(idx), said(n + ' FARES IN A ROW', '#f2c014')],
+    left: idx => [pname(idx), said('LEFT THE CITY', '#9fb4dc')],
+  };
   function onEvent(ev) {
     const mx = V.subj.x, mz = V.subj.z, d2 = (x, z) => dist2(x, z, mx, mz), near = (x, z) => d2(x, z) < 350 * 350, vol = (x, z, range) => clamp(1 - Math.sqrt(d2(x, z)) / range, 0, 1);
     switch (ev[0]) {
@@ -235,19 +254,23 @@ export async function create({ mount, audio, send, hooks }) {
       case 'click': if (mine(ev[1])) sfx.click(); break;
       case 'enter': if (mine(ev[1])) sfx.enter(); break;
       case 'reload': if (mine(ev[1])) sfx.reload(); break;
-      case 'passed': sfx.passed(); break;
+      case 'passed': sfx.passed(); if (ev[1] >= 0) feedLine(pname(ev[1]), said('WHACKED THE SNITCH  +$5000', '#ffe14d')); break;
       case 'over': showOver(); break;
-      case 'kill': { const [, who, whom] = ev; if (!mine(who) && !mine(whom)) floatText(nameOf(who) + ' WASTED ' + nameOf(whom), 0xdddddd); break; }
+      case 'kill': { const [, killer, whom, ci] = ev, cause = CAUSES[ci] || '';
+        if (killer >= 0) feedLine(pname(killer), ICONS[cause] ? { icon: cause } : said(KILL_VERB[cause] || 'WASTED'), pname(whom));
+        else feedLine(pname(whom), said(DIED_TEXT[cause] || 'WASTED')); break; }
+      case 'news': { const line = NEWS_LINE[ev[1]]; if (line) feedLine(...line(ev[2], ev[3])); if (ev[1] === 'left') floatText(nameOf(ev[2]).toUpperCase() + ' LEFT THE CITY', 0x9fb4dc); break; }
       case 'mark': { const [, who, why] = ev; if (mine(who)) { floatText(why === 'start' ? 'YOU ARE THE MOST WANTED. STAY ALIVE.' : 'YOU TOOK THE MARK. STAY ALIVE.', 0xffe14d); sfx.wanted(); }
-        else { floatText(nameOf(who) + ' IS THE MOST WANTED', 0xffe14d); sfx.cleared(); } break; }
-      case 'wevent': { floatText(ev[4], 0x3dff7a); sfx.cleared(); break; }
+        else { floatText(nameOf(who) + ' IS THE MOST WANTED', 0xffe14d); sfx.cleared(); } feedLine(pname(who), said('IS THE MOST WANTED', '#ffe14d')); break; }
+      case 'wevent': { floatText(ev[4], 0x3dff7a); sfx.cleared(); feedLine(said(ev[4], '#3dff7a')); break; }
       case 'job': if (mine(ev[1])) { const w = ev[2]; if (w === 'paid') sfx.cash(); else if (w === 'fail') sfx.wanted(); else if (w === 'pickup') sfx.enter(); else if (w === 'start' || w === 'fare') sfx.pickup(); } break;
       case 'wland': { const [, x, z] = ev; if (near(x, z)) { fx.burst.dust(x, 0.5, z); fx.burst.crash(x, 1, z, 10); } sfx.crash(vol(x, z, 200)); break; }
       case 'go': { goT = 1.2; sfx.passed(); break; }
       case 'cp': if (mine(ev[1])) { const [, , passed, lap] = ev, n = course ? course.length : 1, k = passed % n; sfx.pickup();
         floatText(k === 0 ? (lap >= laps - 1 ? 'FINAL LAP' : 'LAP ' + (lap + 1) + ' OF ' + laps) : 'CHECKPOINT ' + k + ' OF ' + (n - 1), 0x2fd0ff); } break;
       case 'finish': { const [, who, place] = ev; if (mine(who)) { finishT = 4; sfx.passed(); floatText('YOU FINISHED ' + ordinal(place), 0xffe14d); }
-        else { floatText(nameOf(who) + ' FINISHED ' + ordinal(place), 0xffe14d); if (place === 1) { floatText('THE RACE ENDS IN ' + RACE_END_T + ' SECONDS', 0xff6060); sfx.wanted(); } } break; }
+        else { floatText(nameOf(who) + ' FINISHED ' + ordinal(place), 0xffe14d); if (place === 1) { floatText('THE RACE ENDS IN ' + RACE_END_T + ' SECONDS', 0xff6060); sfx.wanted(); } }
+        feedLine(pname(who), said('FINISHED ' + ordinal(place), '#ffe14d')); break; }
     }
   }
 
@@ -510,6 +533,7 @@ export async function create({ mount, audio, send, hooks }) {
     if (onGrid()) { const c = Math.ceil(V.md.race.t); if (c !== lastCount && c > 0 && c <= 3) sfx.click(); lastCount = c; } // the countdown beeps
     if (autoQuality && state === 'play' && roundT > 4) { if (fps < 40) { lowFpsT += dt; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; floatText('LOW FRAME RATE: ' + QUALITY[quality].name + ' DETAIL', 0x9fb4dc); } } else lowFpsT = 0; }
     for (let k = floats.length - 1; k >= 0; k--) { floats[k].t += dt; if (floats[k].t > 2.5) floats.splice(k, 1); }
+    for (let k = feed.length - 1; k >= 0; k--) { feed[k].t += dt; if (feed[k].t > FEED_T) feed.splice(k, 1); }
     if (V.phase === 1 && state !== 'over') showOver();
   }
 
@@ -652,7 +676,8 @@ export async function create({ mount, audio, send, hooks }) {
       hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
       ptext(hctx, race ? 'STREET RACE' : jt ? jt.title : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
       for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
-      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
+      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; }
+      drawFeed(px, py + s * 6, s, short || touch ? FEED_LINES_PHONE : FEED_LINES); }
     // the race: the countdown on the grid, GO!, and the finish flash
     if (race && race.state === 0) { const c = Math.ceil(race.t); hctx.fillStyle = 'rgba(0,0,0,0.35)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
       ptext(hctx, c > 3 ? 'ON THE GRID' : String(c), Wd / 2, Hd * 0.36, c > 3 ? s * 2.5 : s * 6, c > 3 ? '#ffe14d' : c === 1 ? '#ff6060' : '#ffffff', 'center'); ptext(hctx, `${laps} LAP${laps === 1 ? '' : 'S'}  ·  ${cpN} CHECKPOINTS  ·  ${guns ? 'ANYTHING GOES' : 'NO GUNS'}`, Wd / 2, Hd * 0.36 + s * (c > 3 ? 26 : 50), s * 1.1, '#ffffff', 'center'); }
@@ -680,6 +705,16 @@ export async function create({ mount, audio, send, hooks }) {
     if (touch) ptext(hctx, line, Wd / 2 + 34, sa.t + 16, s * 0.7, 'rgba(255,255,255,0.45)', 'left', false); // beside the ☰; the corner is under the FIRE button
     else ptext(hctx, line, R, B - s * 7, s * 0.7, 'rgba(255,255,255,0.45)', 'right', false);
     if (showStats) drawStats(Wd, Hd, s);
+  }
+  /* the feed: the newest `max` lines, each on its own dark strip, fading out over the last moment of its life */
+  function drawFeed(x, y, s, max) {
+    const sc = s * 0.85, is = s * 0.75, h = sc * 7, gap = s * 3, iconW = p => ICONS[p.icon][0].length * is;
+    for (let i = 0; i < Math.min(max, feed.length); i++) { const f = feed[i], a = clamp((FEED_T - f.t) / FEED_FADE, 0, 1); if (a <= 0) continue;
+      hctx.globalAlpha = a; let w = -gap; for (const p of f.parts) w += (p.icon ? iconW(p) : textW(String(p.t), sc)) + gap;
+      hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(x - 6, y - 4, w + 12, h + 8);
+      let px = x; for (const p of f.parts) { if (p.icon) { drawIcon(hctx, ICONS[p.icon], px + is, y + is, is, 'rgba(0,0,0,0.85)'); drawIcon(hctx, ICONS[p.icon], px, y, is, '#ffffff'); px += iconW(p) + gap; } else px += ptext(hctx, p.t, px, y, sc, p.c) + gap; }
+      y += h + s * 5; }
+    hctx.globalAlpha = 1;
   }
   function drawStats(Wd, Hd, s) {
     const sc = Hd < 560 ? s * 0.55 : s * 0.8, lines = [ // a phone gets a smaller face so the lines fit its width
@@ -747,7 +782,7 @@ export async function create({ mount, audio, send, hooks }) {
   function start(s) {
     stopRound();
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId; myIdx = Math.max(0, s.players.findIndex(p => p.id === myId));
-    camYaw = 0; camPitch = 0.22; mouseIdle = 10; t = 0; roundT = 0; clicks = 0; fireHeld = false; dmgFlash = 0; wantedFlash = 0; floats.length = 0; areaT = 0; curDistrict = ''; curStreet = ''; route = []; routeT = 0; lastIn = null; sinceIn = 1; netAcc = 0; lockPending = 0;
+    camYaw = 0; camPitch = 0.22; mouseIdle = 10; t = 0; roundT = 0; clicks = 0; fireHeld = false; dmgFlash = 0; wantedFlash = 0; floats.length = 0; feed.length = 0; areaT = 0; curDistrict = ''; curStreet = ''; route = []; routeT = 0; lastIn = null; sinceIn = 1; netAcc = 0; lockPending = 0;
     clock = START_CLOCK[(s.opts || {}).time] ?? START_CLOCK.morning;
     fx.reset();
     if (isHost) {
