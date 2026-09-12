@@ -28,7 +28,7 @@ export function createPredictor({ W }) {
     if (!me || me.pedId < 0) return 0;
     const pe = remote.get(me.pedId);
     if (me.pedId !== pedId) { pedId = me.pedId; synced = false; car = null; carId = -1; }
-    if (me.dead) { synced = false; car = null; carId = -1; ped.inCar = null; return 0; }
+    if (me.dead || me.seat > 0) { synced = false; car = null; carId = -1; ped.inCar = null; return 0; } // dead, or a passenger: the host's car carries me, nothing to predict
     if (!synced) { if (!pe) return 0; snapPed(pe); synced = true; }
     if (me.carId !== carId) { carId = me.carId; if (carId >= 0) { const ce = remote.get(carId); if (!ce) { carId = -1; return 0; } attachCar(ce); } else { car = null; ped.inCar = null; if (pe) snapPed(pe); } }
     seq++;

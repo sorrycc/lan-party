@@ -17,11 +17,15 @@ export const PF = { DEAD: 1, INCAR: 2, WALK: 4, RUN: 8, ARM: 16, HIT: 32, OLDDEA
 /* car state flags on the wire */
 export const CF = { DEAD: 1, SMOKE: 2, BURN: 4, LIGHTS: 8 };
 
+/* `basic` weapons are everyone's from the start; the others come out of the crates around the city (and the airdrop) and are
+   dropped again when their owner dies. `pick` is what an ammo pickup adds to the reserve; `splash` is a rocket's blast radius. */
 export const WEAPONS = [
-  { key: 'pistol', name: 'PISTOL', mag: 12, ammo: 12, reserve: 96, rate: 0.2, dmg: 34, spread: 0.012, auto: false, pellets: 1, reload: 1.1, range: 140, recoil: 0.01 },
-  { key: 'shotgun', name: 'SHOTGUN', mag: 6, ammo: 6, reserve: 30, rate: 0.7, dmg: 17, spread: 0.065, auto: false, pellets: 8, reload: 1.9, range: 45, recoil: 0.035 },
-  { key: 'smg', name: 'SMG', mag: 30, ammo: 30, reserve: 180, rate: 0.08, dmg: 13, spread: 0.032, auto: true, pellets: 1, reload: 1.5, range: 110, recoil: 0.006 },
-];
+  { key: 'pistol', name: 'PISTOL', mag: 12, ammo: 12, reserve: 96, rate: 0.2, dmg: 34, spread: 0.012, auto: false, pellets: 1, reload: 1.1, range: 140, recoil: 0.01, basic: true, pick: 24 },
+  { key: 'shotgun', name: 'SHOTGUN', mag: 6, ammo: 6, reserve: 30, rate: 0.7, dmg: 17, spread: 0.065, auto: false, pellets: 8, reload: 1.9, range: 45, recoil: 0.035, basic: true, pick: 8 },
+  { key: 'smg', name: 'SMG', mag: 30, ammo: 30, reserve: 180, rate: 0.08, dmg: 13, spread: 0.032, auto: true, pellets: 1, reload: 1.5, range: 110, recoil: 0.006, basic: true, pick: 40 },
+  { key: 'sniper', name: 'SNIPER', mag: 5, ammo: 5, reserve: 10, rate: 1.1, dmg: 120, spread: 0.002, auto: false, pellets: 1, reload: 2.4, range: 260, recoil: 0.05, pick: 3 },
+  { key: 'rpg', name: 'ROCKET', mag: 1, ammo: 1, reserve: 2, rate: 1.5, dmg: 60, spread: 0.004, auto: false, pellets: 1, reload: 2.8, range: 200, recoil: 0.08, pick: 1, splash: 7 },
+]; // indexed on the wire, so only ever append
 
 export const CAR_TYPES = [
   { name: 'sedan', w: 2.0, l: 4.4, bh: 0.75, ch: 0.62, cl: 0.46, cz: -0.06, acc: 11, max: 27, brake: 20, mass: 1.0, colors: [0xd12b2b, 0x2b5fd1, 0xf0f0f0, 0x222222, 0x8a8a8a, 0x2ba64a, 0x6a2bd1, 0xd18a2b, 0x7fb8e0] },
@@ -112,7 +116,7 @@ export class PedView {
       W.pedPools[i].set(this.idx[i], M3);
     }
     if (this.gun >= 0) {
-      if (s.gun && !s.dead) { GUN_DEF[2][2] = s.gun === 'pistol' ? 0.45 : 0.85; partMatrix(M2, M3, M, GUN_DEF, lerp(sw, aimAngle, raise)); W.gunPool.set(this.gun, M3); }
+      if (s.gun && !s.dead) { GUN_DEF[2][2] = s.gun === 'pistol' ? 0.45 : s.gun === 'sniper' ? 1.25 : s.gun === 'rpg' ? 1.1 : 0.85; partMatrix(M2, M3, M, GUN_DEF, lerp(sw, aimAngle, raise)); W.gunPool.set(this.gun, M3); }
       else W.gunPool.hide(this.gun);
     }
   }
@@ -165,10 +169,10 @@ export function drawPickup(W, i, x, z, t) {
   const { M, M2 } = _pm; const gy = groundY(x, z);
   M.makeTranslation(x, gy + 0.7 + Math.sin(t * 3) * 0.15, z); M.multiply(M2.makeRotationY(t * 2)); M.multiply(M2.makeScale(0.55, 0.55, 0.55)); W.pickPool.set(i, M);
 }
-export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : kind === 'bribe' ? 0x4d8bff : 0xff4d4d;
-/* indexed on the wire, so only ever append */
-export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe'];
-/* how a player died, indexed on the wire (the per-player block); the first three are the weapon keys */
-export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat'];
+export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ? 0xffe14d : kind === 'bribe' ? 0x4d8bff : kind === 'sniper' ? 0xf4f4ff : kind === 'rpg' ? 0xff7a20 : 0xff4d4d;
+/* indexed on the wire, so only ever append; the last two are the weapon crates (their amount is the rounds inside) */
+export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe', 'sniper', 'rpg'];
+/* how a player died, indexed on the wire (the per-player block); the weapon keys are among them */
+export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg'];
 /* the world events, indexed on the wire */
 export const EVENT_KINDS = ['truck', 'airdrop'];

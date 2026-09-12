@@ -33,16 +33,17 @@ const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
 const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_PER_S} a second to whoever holds it, and whoever kills them takes it, plus a $${MARK_BOUNTY} bounty.`;
 /* what the death card says for each CAUSES entry; a name is filled in when a player did it */
-const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
+const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
+const PICK_TEXT = { sniper: 'SNIPER RIFLE', rpg: 'ROCKET LAUNCHER' };
 const EVENT_TEXT = ['ARMORED TRUCK', 'AIRDROP'];
 /* players further than this (or off screen) get an arrow at the edge of the screen; nearer ones have their name over their head */
 const ARROW_FROM = 120;
 /* how fast a touch player's camera is pulled onto the soft-locked target while FIRE is held (per second) */
 const MAGNET = 5;
-const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot'], ['1 2 3', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit car, turn yourself in'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
-const CONTROLS_TOUCH = [['LEFT SIDE', 'drag to move or drive · push all the way to run'], ['RIGHT SIDE', 'drag to look and aim'], ['FIRE', 'hold to shoot · drag on it to aim while shooting'], ['JUMP', 'jump on foot, handbrake in a car'], ['USE', 'enter or exit a car, turn yourself in'], ['WEAPON', 'next weapon · RELOAD reloads'], ['☰', 'pause, sound, detail, look sensitivity']];
+const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot (from the passenger seat too)'], ['1-5 / Q', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit a car, ride along in a friend\'s, turn yourself in'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
+const CONTROLS_TOUCH = [['LEFT SIDE', 'drag to move or drive · push all the way to run'], ['RIGHT SIDE', 'drag to look and aim'], ['FIRE', 'hold to shoot (from the passenger seat too) · drag on it to aim while shooting'], ['JUMP', 'jump on foot, handbrake in a car'], ['USE', 'enter or exit a car, ride along in a friend\'s, turn yourself in'], ['WEAPON', 'next weapon · RELOAD reloads'], ['☰', 'pause, sound, detail, look sensitivity']];
 /* the on-screen hints on a touch screen: the USE and JUMP buttons already say what they do, so only the two with no button stay */
-const HINT_TOUCH = ['', '', '', '', HINT[4], 'TURN YOURSELF IN   $100 A STAR'];
+const HINT_TOUCH = ['', '', '', '', HINT[4], 'TURN YOURSELF IN   $100 A STAR', '', ''];
 /* graphics detail levels; the auto mode steps down when the frame rate stays low */
 const QUALITY = [{ name: 'HIGH', pr: 1.5, shadow: 2048 }, { name: 'MEDIUM', pr: 1, shadow: 1024 }, { name: 'LOW', pr: 1, shadow: 0 }];
 /* how far a thumb's drag turns the camera (radians per CSS pixel); the pitch moves a little less than the yaw */
@@ -81,6 +82,8 @@ function createSfx(audio) {
     shot(kind, vol = 1) {
       if (vol <= 0.02) return;
       if (kind === 'shotgun') { hiss(0.35, 700, 0.9 * vol); tone(140, 40, 0.2, 0.5 * vol, 'square'); }
+      else if (kind === 'sniper') { hiss(0.4, 1100, 1.0 * vol, 1.2); tone(320, 40, 0.35, 0.6 * vol, 'square'); }
+      else if (kind === 'rpg') { hiss(0.6, 350, 0.8 * vol, 0.9); tone(120, 420, 0.45, 0.4 * vol, 'sawtooth'); }
       else if (kind === 'smg') { hiss(0.08, 2400, 0.45 * vol); tone(300, 90, 0.06, 0.25 * vol, 'square'); }
       else { hiss(0.16, 1500, 0.6 * vol); tone(240, 60, 0.12, 0.35 * vol, 'square'); }
     },
@@ -215,7 +218,8 @@ export async function create({ mount, audio, send, hooks }) {
       case 'wanted': if (mine(ev[1])) { wantedFlash = 3; sfx.wanted(); } break;
       case 'float': if (ev[1] === -1 || mine(ev[1])) floatText(ev[2], ev[3]); break;
       case 'pickup': if (mine(ev[1])) { if (ev[2] === 'cash') { sfx.cash(); floatText('+$' + ev[3], 0x3dff7a); } else if (ev[2] === 'ammo') { sfx.pickup(); floatText('AMMO', 0xffe14d); }
-        else if (ev[2] === 'bribe') { sfx.cleared(); floatText(ev[3] > 0 ? 'BRIBE ACCEPTED  -1 STAR' : 'BRIBE ACCEPTED  YOU LOST THE COPS', 0x4d8bff); } else { sfx.pickup(); floatText('+HEALTH', 0xff4d4d); } } break;
+        else if (ev[2] === 'bribe') { sfx.cleared(); floatText(ev[3] > 0 ? 'BRIBE ACCEPTED  -1 STAR' : 'BRIBE ACCEPTED  YOU LOST THE COPS', 0x4d8bff); }
+        else if (PICK_TEXT[ev[2]]) { sfx.cleared(); floatText(PICK_TEXT[ev[2]] + '  ' + ev[3] + ' ROUNDS', 0xffe14d); } else { sfx.pickup(); floatText('+HEALTH', 0xff4d4d); } } break;
       case 'cleared': if (mine(ev[1])) { sfx.cleared(); wantedFlash = 0; } break;
       case 'click': if (mine(ev[1])) sfx.click(); break;
       case 'enter': if (mine(ev[1])) sfx.enter(); break;
@@ -232,7 +236,8 @@ export async function create({ mount, audio, send, hooks }) {
 
   /* ---- input */
   const act = (a, n) => { if (state !== 'play') return; if (isHost) { if (sim) sim.action(me, a, n); } else send({ t: 'a', to: hostId, a, n }); };
-  const curW = () => V.me ? V.me.curW : 0;
+  /* whether I can shoot right now: on foot, or in a car on a passenger seat (the driver drives) */
+  const canShoot = me => !!me && !me.dead && (me.carId < 0 || me.seat > 0);
   const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', ShiftLeft: 'sprint', ShiftRight: 'sprint', Space: 'space' }, {
     onKey: e => {
       if (e.code === 'Escape') { if (state === 'play' && fallbackMouse) pause(); else if (state === 'paused') grab(); return; }
@@ -242,8 +247,8 @@ export async function create({ mount, audio, send, hooks }) {
       if (state !== 'play') return;
       if (e.code === 'KeyF' || e.code === 'KeyE') act('use');
       else if (e.code === 'KeyR') act('reload');
-      else if (e.code === 'Digit1') act('weapon', 0); else if (e.code === 'Digit2') act('weapon', 1); else if (e.code === 'Digit3') act('weapon', 2);
-      else if (e.code === 'KeyQ') act('weapon', curW() + 1);
+      else if (/^Digit[1-5]$/.test(e.code)) act('weapon', +e.code[5] - 1);
+      else if (e.code === 'KeyQ') act('wnext', 1);
     },
   });
   const held = kb.held;
@@ -266,7 +271,7 @@ export async function create({ mount, audio, send, hooks }) {
   const jumpS = touch ? tc.button(tb.jump, { onDown: () => audio.init() }) : null;
   if (touch) {
     tc.button(tb.use, { onDown: () => { audio.init(); act('use'); } });
-    tc.button($('[data-weapon]'), { onDown: () => { audio.init(); act('weapon', curW() + 1); } });
+    tc.button($('[data-weapon]'), { onDown: () => { audio.init(); act('wnext', 1); } });
     tc.button(tb.reload, { onDown: () => { audio.init(); act('reload'); } });
     tb.menu.addEventListener('click', () => { audio.init(); if (state === 'play') pause(); else if (state === 'paused') grab(); });
   }
@@ -307,10 +312,12 @@ export async function create({ mount, audio, send, hooks }) {
   };
   /* a client plays its own shot the moment it clicks; the host's 'shot' event for it then only adds the tracer and the impact */
   function localShot(auto) {
-    const me = V.me; if (isHost || state !== 'play' || !me || me.dead || me.carId >= 0 || me.reloadT > 0 || localFireT > 0) return;
+    const me = V.me; if (isHost || state !== 'play' || !canShoot(me) || me.reloadT > 0 || localFireT > 0) return;
     const w = WEAPONS[me.curW]; if (w.auto !== auto || me.ammo <= 0) return;
     localFireT = w.rate; localArm = 1.6; sfx.shot(w.key, 1); camPitch -= w.recoil;
-    const fx0 = Math.sin(camYaw), fz0 = Math.cos(camYaw), sj = V.subj; fx.burst.flash(sj.x - fz0 * 0.39 + fx0 * 0.75, sj.y + 1.32 - camPitch * 0.5, sj.z + fx0 * 0.39 + fz0 * 0.75);
+    const c = V.car;
+    if (c) { const side = me.seat === 2 ? -1 : 1, back = me.seat >= 2 ? -1 : 0.2, fx0 = Math.sin(c.yaw), fz0 = Math.cos(c.yaw); fx.burst.flash(c.x - fz0 * side * (c.type.w / 2 + 0.2) + fx0 * back, c.y + 0.7 + c.type.bh, c.z + fx0 * side * (c.type.w / 2 + 0.2) + fz0 * back); } // out of my window
+    else { const fx0 = Math.sin(camYaw), fz0 = Math.cos(camYaw), sj = V.subj; fx.burst.flash(sj.x - fz0 * 0.39 + fx0 * 0.75, sj.y + 1.32 - camPitch * 0.5, sj.z + fx0 * 0.39 + fz0 * 0.75); }
   }
   const onMouseUp = e => { if (e.button === 0) fireHeld = false; };
   const onMouseMove = e => {
@@ -321,7 +328,7 @@ export async function create({ mount, audio, send, hooks }) {
     if (!document.pointerLockElement && !fallbackMouse) return;
     camYaw -= dx * 0.0022; camPitch = clamp(camPitch + dy * 0.0018, -0.45, 1.1); mouseIdle = 0;
   };
-  const onWheel = e => { if (state === 'play') act('weapon', curW() + (e.deltaY > 0 ? 1 : -1)); };
+  const onWheel = e => { if (state === 'play') act('wnext', e.deltaY > 0 ? 1 : -1); };
   const onContext = e => e.preventDefault();
   /* a lock request can fail (Chrome refuses one right after an Esc exit): go back to the card so the next click retries;
      only a browser that never grants the lock at all drops into the mouse-delta fallback */
@@ -399,7 +406,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
   function updateAudio() {
     if (!eng) return; const ctx = eng.ctx, c = V.car, playing = state === 'play' || (online && state !== 'idle');
-    const thr = c ? ((held.up || held.down) && state === 'play' ? 1 : 0) : 0;
+    const thr = c && V.me && V.me.seat === 0 ? ((held.up || held.down) && state === 'play' ? 1 : 0) : 0;
     eng.gain.gain.setTargetAtTime(playing && c && !c.dead ? 0.045 + thr * 0.03 : 0, ctx.currentTime, 0.1);
     if (c) eng.osc.frequency.setTargetAtTime(45 + c.speed * 5.5 + thr * 20, ctx.currentTime, 0.05);
     let near = 0; for (const cp of V.cops) if (cp.car) near = Math.max(near, 1 - Math.hypot(cp.x - V.subj.x, cp.z - V.subj.z) / 160);
@@ -410,7 +417,7 @@ export async function create({ mount, audio, send, hooks }) {
   let aimLock = false; const aimAt = { x: 0, y: 0, z: 0 }; // the soft-locked pedestrian's chest, while aimLock
   function findAimLock() {
     const me = V.me; aimLock = false;
-    if (!me || me.dead || me.carId >= 0 || state !== 'play' || !(isHost ? sim : remote)) return;
+    if (!canShoot(me) || state !== 'play' || !(isHost ? sim : remote)) return;
     const w = WEAPONS[me.curW], list = isHost ? sim.peds : remote.ents.values(), ox = cam.x, oy = cam.y, oz = cam.z, vx = cam.dx, vy = cam.dy, vz = cam.dz;
     const friendly = modeName() === 'mostWanted' || !session || !session.opts || session.opts.friendlyFire !== false;
     let best = 1e9;
@@ -482,6 +489,8 @@ export async function create({ mount, audio, send, hooks }) {
     for (const p of V.players) if (!p.me && !p.gone) { hctx.fillStyle = hex(p.color); hctx.fillRect(wx(p.x) - 5, wx(p.z) - 5, 10, 10); hctx.strokeStyle = '#fff'; hctx.lineWidth = 1.5; hctx.strokeRect(wx(p.x) - 5, wx(p.z) - 5, 10, 10); }
     { const mk = V.md.mark, P = mk >= 0 ? V.players[mk] : null; // the mark: a pulsing yellow ring, on me too
       if (P && !P.gone) { hctx.strokeStyle = '#ffe14d'; hctx.lineWidth = 3; hctx.beginPath(); hctx.arc(wx(P.x), wx(P.z), 9 + Math.sin(t * 6) * 2, 0, TAU); hctx.stroke(); } }
+    { const list = isHost ? sim.pickups : remote.ents.values(); // the weapon crates lying around (a letter on a square)
+      for (const p of list) { if (p.cls !== 'pick' || (p.kind !== 'sniper' && p.kind !== 'rpg')) continue; const px = wx(p.x), pz = wx(p.z); hctx.fillStyle = p.kind === 'rpg' ? '#ff7a20' : '#f4f4ff'; hctx.fillRect(px - 6, pz - 6, 12, 12); ptext(hctx, p.kind === 'rpg' ? 'R' : 'S', px, pz - 3.5, 1.5, '#000000', 'center', false); } }
     if (V.md.we) { const e = V.md.we, ex = wx(e.x), ez = wx(e.z); hctx.fillStyle = '#3dff7a'; hctx.beginPath(); hctx.moveTo(ex, ez - 9); hctx.lineTo(ex + 9, ez); hctx.lineTo(ex, ez + 9); hctx.lineTo(ex - 9, ez); hctx.closePath(); hctx.fill(); }
     hctx.restore();
     hctx.save(); hctx.translate(cx, cy); hctx.fillStyle = '#ffffff'; hctx.beginPath(); hctx.moveTo(0, -9); hctx.lineTo(6, 7); hctx.lineTo(0, 4); hctx.lineTo(-6, 7); hctx.closePath(); hctx.fill(); hctx.restore();
@@ -527,7 +536,7 @@ export async function create({ mount, audio, send, hooks }) {
     const lowHp = me.health < 30 && !dead ? 0.12 + 0.08 * Math.sin(t * 6) : 0;
     if (dmgFlash > 0 || lowHp) { const a = clamp(dmgFlash * 0.65 + lowHp, 0, 0.85); const g = hctx.createRadialGradient(Wd / 2, Hd / 2, Hd * 0.2, Wd / 2, Hd / 2, Hd * 0.8); g.addColorStop(0, `rgba(190,0,0,${a * 0.35})`); g.addColorStop(1, `rgba(190,0,0,${a})`); hctx.fillStyle = g; hctx.fillRect(0, 0, Wd, Hd); }
     drawNames(Wd, Hd, s); drawEdgeArrows(Wd, Hd, s, L, R, T, B);
-    if (!inCar && !dead && state === 'play') { // the crosshair: red and a little wider while a shot would lock onto someone
+    if (canShoot(me) && state === 'play') { // the crosshair: red and a little wider while a shot would lock onto someone
       const g = aimLock ? 4 : 3, l = aimLock ? 7 : 6; hctx.fillStyle = aimLock ? '#ff4040' : '#ffffff';
       hctx.fillRect(Wd / 2 - 1, Hd / 2 - g - l, 2, l); hctx.fillRect(Wd / 2 - 1, Hd / 2 + g, 2, l); hctx.fillRect(Wd / 2 - g - l, Hd / 2 - 1, l, 2); hctx.fillRect(Wd / 2 + g, Hd / 2 - 1, l, 2); }
     // top-right: stars, clock, cash, health, weapon, kills, round timer
@@ -543,6 +552,7 @@ export async function create({ mount, audio, send, hooks }) {
     drawIcon(hctx, icon, rx - s * 50, y + s * 2, s * 1, '#ffffff');
     ptext(hctx, me.reloadT > 0 ? 'RELOAD' : me.ammo + '/' + me.reserve, rx - s * 2, y + s * 3, s, me.reloadT > 0 ? '#ffe14d' : '#ffffff', 'right'); y += s * 14;
     ptext(hctx, w.name, rx, y, s * 0.8, '#bbbbbb', 'right'); y += s * 9;
+    for (let k = 0; k < WEAPONS.length; k++) { const owned = me.owned & (1 << k); ptext(hctx, String(k + 1), rx - (WEAPONS.length - 1 - k) * s * 8, y, s * 0.9, k === me.curW ? '#ffe14d' : owned ? '#ffffff' : 'rgba(255,255,255,0.2)', 'right'); } y += s * 9; // the weapons I carry, by their key
     ptext(hctx, 'KILLS ' + me.kills, rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
     if (V.timeLeft >= 0) ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right');
     // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
@@ -602,14 +612,14 @@ export async function create({ mount, audio, send, hooks }) {
   let touchKey = '';
   function syncTouch() {
     if (!touch) return;
-    const me = V.me, inCar = !!(me && me.carId >= 0), hint = me ? me.hint : 0, w = WEAPONS[me ? me.curW : 0];
-    const useLabel = hint === 1 ? 'EXIT' : hint === 2 ? 'JACK' : hint === 3 ? 'ENTER' : hint === 5 ? 'TURN IN' : 'USE';
+    const me = V.me, inCar = !!(me && me.carId >= 0), driving = inCar && me.seat === 0, hint = me ? me.hint : 0, w = WEAPONS[me ? me.curW : 0];
+    const useLabel = hint === 1 || hint === 6 ? 'EXIT' : hint === 2 ? 'JACK' : hint === 3 ? 'ENTER' : hint === 7 ? 'GET IN' : hint === 5 ? 'TURN IN' : 'USE';
     const reloading = !!(me && me.reloadT > 0), canReload = !!(me && !reloading && me.ammo < w.mag && me.reserve > 0), ammo = !me ? '' : reloading ? '…' : String(me.ammo);
-    const key = `${inCar}|${useLabel}|${w.key}|${canReload}|${ammo}|${aimLock}`;
+    const key = `${driving}|${useLabel}|${w.key}|${canReload}|${ammo}|${aimLock}`;
     if (key === touchKey) return; touchKey = key;
     tb.use.textContent = useLabel; tb.use.classList.toggle('hot', useLabel !== 'USE');
-    tb.jump.textContent = inCar ? 'HANDBRAKE' : 'JUMP'; tb.jump.classList.toggle('car', inCar);
-    tb.fire.classList.toggle('dim', inCar); tb.fire.classList.toggle('lock', aimLock); tb.ammo.textContent = ammo;
+    tb.jump.textContent = driving ? 'HANDBRAKE' : 'JUMP'; tb.jump.classList.toggle('car', driving);
+    tb.fire.classList.toggle('dim', driving); tb.fire.classList.toggle('lock', aimLock); tb.ammo.textContent = ammo;
     tb.wname.textContent = w.name; tb.wicon.clearRect(0, 0, 48, 24); drawIcon(tb.wicon, ICONS[w.key], 0, 0, 3, '#ffffff');
     tb.reload.classList.toggle('hot', canReload);
   }

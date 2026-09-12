@@ -74,9 +74,10 @@ test('Most Wanted needs two players: solo it is the sandbox', () => {
 test('the airdrop lands ten seconds in with its pickups, the armored truck spills cash when it goes', () => {
   const sim = make(2);
   assert.ok(sim.debug.startEvent('airdrop')); assert.equal(sim.WE.kind, 'airdrop');
-  const loot = () => sim.pickups.filter(p => p.kind !== 'bribe').length; // the bribes grow on their own
-  const before = loot(); run(sim, AIRDROP_FALL - 0.5); assert.equal(sim.WE.landed, false);
-  run(sim, 1); assert.equal(sim.WE.landed, true); assert.equal(loot(), before + 12, 'cash, ammo and health around the crate');
+  const loot = () => sim.pickups.filter(p => p.kind === 'cash' || p.kind === 'ammo' || p.kind === 'health').length; // the bribes and the weapon crates grow on their own
+  const guns = () => sim.pickups.filter(p => p.kind === 'sniper' || p.kind === 'rpg').length;
+  run(sim, 0.1); const before = loot(), gunsBefore = guns(); run(sim, AIRDROP_FALL - 0.6); assert.equal(sim.WE.landed, false); // the crate spots have grown their crates by now
+  run(sim, 1); assert.equal(sim.WE.landed, true); assert.equal(loot(), before + 12, 'cash, ammo and health around the crate'); assert.equal(guns(), gunsBefore + 1, 'and a weapon');
   let md = parseMode(snapshot(sim, 0).md); assert.equal(md.we.kind, EVENT_KINDS.indexOf('airdrop')); assert.ok(md.we.landed); assert.ok(md.we.t < AIRDROP_T - AIRDROP_FALL);
   assert.equal(sim.debug.startEvent('truck'), false, 'one event at a time');
   sim.WE.t = 0; run(sim, 0.1); assert.equal(sim.WE.kind, null);
@@ -101,4 +102,102 @@ test('four stars and driving: a roadblock waits at the next intersection', () =>
 test('a thumb gets a wider soft lock than a mouse', () => {
   for (const d of [5, 20, 60]) assert.ok(aimTol(d, true) > aimTol(d, false) * 1.5);
   assert.ok(aimTol(100, true) >= 0.16);
+});
+
+/* ---- phase 3: the weapon crates, the rocket, the drops and the passengers */
+import { WEAPONS, PICK_KINDS } from '../client/games/gta/entities.js';
+import { createPredictor } from '../client/games/gta/predict.js';
+
+const wIdx = key => WEAPONS.findIndex(w => w.key === key);
+
+test('everyone starts with the three basic guns; a crate hands over a special one and switches to it', () => {
+  const sim = make(1); const pl = sim.players[0];
+  assert.deepEqual(pl.weapons.map(w => w.owned), [true, true, true, false, false]);
+  assert.equal(parseBlock(snapshot(sim, 0).P[0]).owned, 0b111);
+  sim.action(pl, 'weapon', wIdx('sniper')); assert.equal(pl.curW, 0, 'cannot switch to a gun you do not have');
+  sim.action(pl, 'wnext', 1); assert.equal(pl.curW, 1); sim.action(pl, 'wnext', 1); sim.action(pl, 'wnext', 1); assert.equal(pl.curW, 0, 'next cycles over the owned guns only');
+  sim.action(pl, 'wnext', -1); assert.equal(pl.curW, 2, 'and back');
+  sim.debug.takeWeapon(pl, 'sniper', 8);
+  const sn = pl.weapons[wIdx('sniper')]; assert.ok(sn.owned); assert.equal(sn.ammo, 5); assert.equal(sn.reserve, 3); assert.equal(pl.curW, wIdx('sniper'), 'drawn at once');
+  assert.equal(parseBlock(snapshot(sim, 0).P[0]).owned, 0b1111);
+  sim.debug.takeWeapon(pl, 'sniper', 4); assert.equal(sn.reserve, 7, 'a second crate tops up the reserve');
+  const crates = sim.spots.filter(s => s.kind !== 'bribe'); assert.equal(crates.length, 4, 'two sniper and two rocket spots');
+  run(sim, 0.1); for (const c of crates) assert.ok(c.p && c.p.kind === c.kind && c.p.amount > 0, 'each spot grows its crate');
+  assert.ok(PICK_KINDS.indexOf('rpg') > PICK_KINDS.indexOf('bribe'), 'appended on the wire');
+});
+
+test('an ammo pickup feeds the guns you carry, and a dead player drops the special ones for the next one along', () => {
+  const sim = make(2); const [a, b] = sim.players;
+  sim.debug.takeWeapon(a, 'rpg', 3); const rpg = a.weapons[wIdx('rpg')];
+  const p = sim.debug.spawnPickup(a.ped.x, a.ped.z, 'ammo', 1); run(sim, 0.1); assert.ok(p.released, 'walked over it');
+  assert.equal(rpg.reserve, 2 + 1); assert.equal(b.weapons[wIdx('rpg')].reserve, 0, 'nothing for a gun you do not have');
+  const before = sim.pickups.filter(k => k.kind === 'rpg').length;
+  sim.debug.killPlayer(a, b, 'smg');
+  assert.equal(rpg.owned, false); assert.equal(a.curW, 0, 'back to the pistol');
+  const drop = sim.pickups.filter(k => k.kind === 'rpg'); assert.equal(drop.length, before + 1); assert.equal(drop[drop.length - 1].amount, 4, 'every round it had');
+  assert.equal(parseBlock(snapshot(sim, 0).P[0]).owned, 0b111);
+});
+
+test('a rocket blows up what it hits and everything around it', () => {
+  const sim = make(1); const pl = sim.players[0], P = pl.ped;
+  sim.debug.takeWeapon(pl, 'rpg', 3);
+  P.x = 0; P.z = 0; P.yaw = 0; pl.fireT = 0; sim.setInput(pl, { m: 0, y: 0, p: 0.05, c: 0 }); // looking down +z, a touch downward
+  const target = new sim.debug.Ped('civ', 0, 14), bystander = new sim.debug.Ped('civ', 3.5, 14), far = new sim.debug.Ped('civ', 0, 40); sim.peds.push(target, bystander, far);
+  const car = new sim.debug.Car(CAR_TYPES[0], 4, 17, 0); sim.cars.push(car);
+  sim.debug.fireWeapon(pl);
+  const m = snapshot(sim, 0);
+  assert.ok(m.ev.some(e => e[0] === 'shot' && e[2] === 'rpg'), 'the shot goes out'); assert.ok(m.ev.some(e => e[0] === 'explode'), 'and the blast');
+  assert.ok(target.dead, 'the one in the crosshair'); assert.ok(bystander.dead || bystander.health < 40, 'the one next to it'); assert.ok(!far.dead && far.health === 40, 'not the one down the street');
+  assert.ok(car.health < car.hp, 'the parked car took the blast'); assert.equal(pl.weapons[wIdx('rpg')].ammo, 0);
+});
+
+test('a friend rides along: no jacking, a seat on the wire, shots out of the window, and out again on either side', () => {
+  const sim = make(2); const [a, b] = sim.players;
+  sim.action(a, 'use'); const car = a.ped.inCar; assert.ok(car && car.driver === a.ped, 'A takes the wheel of the car beside the spawn');
+  b.ped.x = car.x + 2; b.ped.z = car.z; run(sim, 0.05);
+  assert.equal(b.hint, 7, 'GET IN, not JACK');
+  sim.action(b, 'use');
+  assert.equal(b.ped.inCar, car); assert.equal(b.ped.seat, 1); assert.equal(car.driver, a.ped, 'A is still driving'); assert.deepEqual(car.riders, [b.ped]);
+  let blk = parseBlock(snapshot(sim, 1).P[1]); assert.equal(blk.carId, car.id); assert.equal(blk.seat, 1);
+  assert.equal(parseBlock(snapshot(sim, 0).P[0]).seat, 0);
+  sim.setInput(a, { m: 1, y: 0, p: 0.22, c: 0 }); run(sim, 2); // A drives off
+  assert.ok(car.speed > 3); assert.ok(Math.hypot(b.ped.x - car.x, b.ped.z - car.z) < 1, 'B goes where the car goes');
+  sim.setInput(a, { m: 0, y: 0, p: 0.22, c: 0 }); a.fireT = 0; b.fireT = 0;
+  const shots = () => snapshot(sim, 1).ev.filter(e => e[0] === 'shot').length;
+  sim.debug.fireWeapon(a); assert.equal(shots(), 0, 'the driver drives');
+  sim.debug.fireWeapon(b); assert.equal(shots(), 1, 'the passenger shoots');
+  const cull = sim.cars.indexOf(car) >= 0; assert.ok(cull);
+  sim.action(a, 'use'); assert.equal(a.ped.inCar, null); assert.equal(car.driver, null); assert.equal(b.ped.inCar, car, 'B stays in the car when A gets out');
+  run(sim, 0.5); assert.equal(b.ped.inCar, car);
+  sim.action(b, 'use'); assert.equal(b.ped.inCar, null); assert.equal(b.ped.seat, 0); assert.deepEqual(car.riders, []);
+  assert.ok(Math.hypot(a.ped.x - b.ped.x, a.ped.z - b.ped.z) > 3, 'they got out on opposite sides');
+  sim.action(b, 'use'); assert.equal(car.driver, b.ped, 'an empty seat at the wheel is taken as the driver');
+});
+
+test('three ride along at most; the fourth finds the door shut', () => {
+  const sim = make(5); const [a, ...rest] = sim.players;
+  sim.action(a, 'use'); const car = a.ped.inCar; assert.ok(car);
+  for (const p of rest) { p.ped.x = car.x + 2; p.ped.z = car.z; }
+  run(sim, 0.05); for (const p of rest) sim.action(p, 'use');
+  assert.equal(car.riders.length, 3); assert.deepEqual(car.riders.map(r => r.seat), [1, 2, 3]);
+  assert.notEqual(rest[3].ped.inCar, car, 'no seat left for the fourth');
+});
+
+test('the car dying puts everyone out, riders included', () => {
+  const sim = make(2); const [a, b] = sim.players;
+  sim.action(a, 'use'); const car = a.ped.inCar; b.ped.x = car.x + 2; b.ped.z = car.z; run(sim, 0.05); sim.action(b, 'use'); assert.equal(b.ped.seat, 1);
+  a.godT = 0; b.godT = 0; car.damage(car.hp);
+  assert.ok(car.dead); assert.ok(a.ped.dead && b.ped.dead, 'the blast takes both'); assert.equal(a.ped.inCar, null); assert.equal(b.ped.inCar, null); assert.deepEqual(car.riders, []);
+});
+
+test('a passenger is not predicted: the predictor steps aside until the seat is empty again', () => {
+  const W = { nearAabbs: () => [] }; const pred = createPredictor({ W });
+  const ents = new Map([[5, { id: 5, cls: 'ped', x: 1, y: 0, z: 2, yaw: 0 }], [9, { id: 9, cls: 'car', x: 1, y: 0, z: 2, yaw: 0, vF: 0, steer: 0, type: CAR_TYPES[0] }]]);
+  const remote = { ents, get: id => ents.get(id) };
+  const me = { pedId: 5, dead: false, carId: -1, seat: 0, ack: 0 };
+  assert.ok(pred.step(0, 0, false, 1 / 60, me, remote, 0) > 0, 'on foot: predicting');
+  me.carId = 9; me.seat = 1;
+  assert.equal(pred.step(1, 0, false, 1 / 60, me, remote, 0), 0, 'riding: not predicting'); assert.equal(pred.local(), null, 'the host\'s car carries me');
+  me.carId = -1; me.seat = 0;
+  assert.ok(pred.step(0, 0, false, 1 / 60, me, remote, 0) > 0, 'out again: predicting from the host\'s position');
 });
