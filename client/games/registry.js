@@ -51,6 +51,15 @@ export const GAMES = [
     options: [],
     load: () => import('./crossy/index.js'),
   },
+  {
+    id: 'hog', title: 'Hog the Throne', tagline: 'PIG PARTY · MINIGAMES · ONE THRONE · UP TO 4 HOGS',
+    minPlayers: 1, maxPlayers: 4,
+    options: [
+      { key: 'rounds', type: 'select', label: 'MINIGAMES BEFORE THE THRONE', default: 3, choices: [{ value: 2, label: '2 rounds' }, { value: 3, label: '3 rounds' }, { value: 4, label: '4 rounds' }] },
+      { key: 'fillAI', type: 'bool', label: 'FILL EMPTY SLOTS WITH CPU', default: true },
+    ],
+    load: () => import('./hog/index.js'),
+  },
 ];
 
 /* Message types owned by the lobby protocol. Games must not use these as their own `t` values;

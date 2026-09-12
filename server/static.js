@@ -1,5 +1,5 @@
 /* Static file handler: serves everything under `root` (path-traversal safe) plus a few aliased files
-   that live outside it, such as three.js from node_modules. */
+   that live outside it, such as three.js and cannon-es from node_modules. */
 import fs from 'node:fs';
 import path from 'node:path';
 

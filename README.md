@@ -3,8 +3,9 @@
 Browser party games for everyone on the same Wi-Fi. One person runs the server, everyone else opens a URL.
 Ships with **Frostline Kart**, a snowy kart racer with shells, bananas and item boxes, coins, Grand Prix cups, CPU karts and up to 8 players, **Dodgeball 3v3**,
 a top-down gym dodgeball match where friends pick a side (or join the host's) and CPU bodies fill the rest,
-**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city, and
-**Crossy Farm Car**, a hop-across-the-farm race where up to 8 cars dodge the same herds until the last one is flattened.
+**Fable Theft Auto 5.1**, a voxel crime sandbox where up to 8 players share one procedurally generated city,
+**Crossy Farm Car**, a hop-across-the-farm race where up to 8 cars dodge the same herds until the last one is flattened, and
+**Hog the Throne**, a pig party for up to 4 hogs: a few bumpy minigames, then a king-of-the-hill finale for the crown.
 
 ## Run
 
@@ -16,7 +17,7 @@ npm start
 The server prints the addresses it is reachable on, for example:
 
 ```
-LAN party server running with 4 game(s): Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1, Crossy Farm Car
+LAN party server running with 5 game(s): Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1, Crossy Farm Car, Hog the Throne
 Open one of these on every machine:
   http://localhost:3000   (this machine)
   http://192.168.8.112:3000
@@ -37,7 +38,7 @@ back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) W
 does not dim or lock mid-game (iOS 16.4 and later; it is taken again when the page comes back from the background), and it asks for its sound to be
 played as media, so the game is heard with the ring/silent switch on silent (iOS 17 and later).
 
-Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart wire format, the QR encoder, the touch controls and the Fable Theft Auto movement code). `npm run icons` redraws the home-screen icons.
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls and the Fable Theft Auto movement code). `npm run icons` redraws the home-screen icons.
 `FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
@@ -45,7 +46,7 @@ Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (th
 ```
 server/
   index.js        HTTP + WebSocket bootstrap, prints the LAN addresses
-  static.js       serves client/ (path-traversal safe) plus three.js from node_modules
+  static.js       serves client/ (path-traversal safe) plus three.js and cannon-es from node_modules
   rooms.js        rooms and lobby state machine; knows nothing about any particular game
 client/
   index.html      the shell: menu, lobby, and an empty #stage the game mounts into
@@ -69,7 +70,8 @@ client/
                   motion.js (walking and driving from keys or a thumb stick, shared by host and prediction), sim.js (the host's simulation),
                   remote.js (a client's copy), predict.js (a client's own body), fx.js, font.js, gta.css
     crossy/       Crossy Farm Car: index.js (game module) + crossy.css (its HUD)
-test/             node --test: the snapshot clock, the Kart wire format, the QR encoder, the touch controls and the Fable Theft Auto movement code
+    hog/          Hog the Throne: index.js (game module: physics, minigames, netcode glue, HUD), net.js (the roster and the wire format, testable in node), hog.css
+test/             node --test: the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls and the Fable Theft Auto movement code
 scripts/          make-icons.js draws client/icons/*.png with no dependencies
 ```
 
@@ -85,6 +87,7 @@ the best round trip is how far past its snapshots each sender's present is place
 at once and hands it over to the host's copy when that arrives.
 Dodgeball is host-authoritative: the host's browser simulates everything, the other players send their input to the host and render its 30 Hz snapshots.
 Fable Theft Auto is host-authoritative too, with delta snapshots: the host sends each player only the pedestrians, cars and pickups near them that changed since the last tick, plus a per-player HUD block and the one-shot events (shots, crashes, deaths) every machine turns into its own particles and sounds. Clients predict their own body with the same movement code the host runs (`motion.js`) and reconcile against the host's acknowledged input, which hides the round trip. The city itself is generated from a fixed seed, so it never travels over the network.
+Hog the Throne is host-authoritative like Dodgeball: the host's browser runs the pig physics (cannon-es) and every CPU brain and sends 30 Hz snapshots (the pigs, the current minigame's state and the effects since the last one); the other players send their stick and HOP as a wish and each DASH press as a message, and render the snapshots interpolated a little in the past. The plan of minigames is drawn from the round's seed.
 Crossy Farm Car works like Kart: every machine simulates its own car and broadcasts 20 Hz snapshots of it. The farm is generated from the round's seed (`session.seed`) and everything that moves on it is a function of the world clock, which the host carries in its snapshots, so nobody ever sends a cow.
 
 ## Adding a game
@@ -131,6 +134,21 @@ Rules of the road:
 - `avatar` is an index into `core/avatars.js`. Map it to whatever your game needs (the kart game maps it to a kart skin).
 - Message names `create join joined lobby opt start end leave left closed error` belong to the lobby. Anything else is relayed as-is; add `to: <playerId>` to send to one player only.
 - Detach every `window` listener and cancel your animation frame in `stop()`/`destroy()`. The shell unmounts the game when the room closes or the player returns to the menu.
+
+## Hog the Throne
+
+Up to 4 hogs; empty slots are CPU pigs when the host leaves "fill empty slots with CPU" on (a lone player always gets one to bump).
+WASD / arrows to move, Space to hop (hold it to keep hopping), Shift or E to butt-dash, M to toggle sound, R to play again (host), Esc to leave.
+The host picks **MINIGAMES BEFORE THE THRONE** (2, 3 or 4) in the lobby or under SOLO OPTIONS; they are drawn from Whirly Bacon (hop the spinning
+bar, last pig standing), Balloon Butt (butt-dash pigs to pop their three balloons, keep yours), Crumble Cake (the floor is cake and it falls; falling
+with it is out) and Truffle Rush (snort up the most truffles; a dash makes a pig drop up to three). Each minigame banks bonus seconds for the finale,
+**The Throne**: a king-of-the-hill hill with a throne on top; the pig that sat on it longest, bonus included, hogs it. A pig knocked off the world in
+the finale respawns at the edge. A player who drops out mid-game is taken over by a CPU.
+
+On a touch screen (iPhone, iPad, any tablet) the left part of the screen is a thumb stick: touch anywhere there and drag; it centres when the finger
+lifts. **HOP** (hold to keep hopping) and **DASH** sit under the right thumb; a press that cannot do anything shakes the button. The ☰ button opens a
+card with sound and, for the host, play again and leave. On a touch screen the player chips sit under the round title, out of the thumbs' way;
+a phone held upright is asked to rotate, and on a phone in landscape everything is a size smaller. The renderer runs without antialiasing and with a smaller shadow map on phones and tablets.
 
 ## Frostline Kart
 

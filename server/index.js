@@ -13,11 +13,12 @@ const PORT = Number(process.env.PORT) || 3000;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLIENT = path.join(ROOT, 'client');
 const THREE_PATH = path.join(ROOT, 'node_modules', 'three', 'build', 'three.module.js');
+const CANNON_PATH = path.join(ROOT, 'node_modules', 'cannon-es', 'dist', 'cannon-es.js');
 
 function lanAddresses() { const out = []; for (const list of Object.values(os.networkInterfaces())) for (const a of list) if (a.family === 'IPv4' && !a.internal) out.push(a.address); return out; }
 const addrHint = () => { const a = lanAddresses(); return a.length ? `http://${a[0]}:${PORT}` : `http://localhost:${PORT}`; };
 
-const server = http.createServer(createStaticHandler({ root: CLIENT, aliases: { '/lib/three.module.js': THREE_PATH } }));
+const server = http.createServer(createStaticHandler({ root: CLIENT, aliases: { '/lib/three.module.js': THREE_PATH, '/lib/cannon-es.js': CANNON_PATH } }));
 const wss = new WebSocketServer({ server });
 createRooms({ addrHint }).attach(wss);
 
@@ -27,4 +28,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  http://localhost:${PORT}   (this machine)`);
   for (const a of lanAddresses()) console.log(`  http://${a}:${PORT}`);
   if (!fs.existsSync(THREE_PATH)) console.log('WARNING: three.js not found - run `npm install` first.');
+  if (!fs.existsSync(CANNON_PATH)) console.log('WARNING: cannon-es not found - run `npm install` first.');
 });

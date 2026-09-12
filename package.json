@@ -3,13 +3,14 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Browser party games over the LAN. Ships with Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1 and Crossy Farm Car.",
+  "description": "Browser party games over the LAN. Ships with Frostline Kart, Dodgeball 3v3, Fable Theft Auto 5.1, Crossy Farm Car and Hog the Throne.",
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test \"test/**/*.test.mjs\"",
     "icons": "node scripts/make-icons.js"
   },
   "dependencies": {
+    "cannon-es": "^0.20.0",
     "three": "0.169.0",
     "ws": "^8.18.0"
   }
