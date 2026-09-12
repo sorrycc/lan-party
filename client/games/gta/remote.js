@@ -48,7 +48,7 @@ export function createRemote({ W }) {
   /* `local`, when given, is the predictor's view of my own body: { pedId, ped: { x, y, z, yaw, moving }, carId, car: { x, y, z, yaw, steer, vF } } */
   function update(dt, t, myIdx, localCamPitch, local) {
     const rt = nowSec() - INTERP;
-    R.P.forEach((P, i) => { const e = ents.get(P.pedId); if (!e) return; e.camPitch = i === myIdx ? localCamPitch : P.camPitch; e.gun = P.carId < 0 && !P.dead ? WEAPONS[P.curW].key : null; });
+    R.P.forEach((P, i) => { const e = ents.get(P.pedId); if (!e) return; e.camPitch = i === myIdx ? localCamPitch : P.camPitch; e.gun = P.carId < 0 && !P.dead ? WEAPONS[P.curW].key : null; e.seat = P.seat; e.inCar = P.carId >= 0 ? ents.get(P.carId) || true : false; });
     for (const e of ents.values()) {
       if (e.cls === 'pick') { e.t += dt; drawPickup(W, e.i, e.x, e.z, e.t); continue; }
       const smp = sampleSnaps(e.buf, rt); if (!smp) continue; const { a, b, f } = smp;
@@ -59,7 +59,7 @@ export function createRemote({ W }) {
       if (e.cls === 'ped') {
         e.y = mine ? mine.y : a.y !== undefined ? (b && b.y !== undefined ? lerp(a.y, b.y, f) : a.y) : groundY(e.x, e.z);
         const dead = !!(fl & PF.DEAD); if (dead && !e.dead) e.deadT = (fl & PF.OLDDEAD) ? 5 : 0; e.dead = dead; if (dead) e.deadT += dt;
-        e.inCar = !!(fl & PF.INCAR); e.down = !!(fl & PF.DOWN); e.moving = mine ? mine.moving : (fl & PF.RUN) ? 5 : (fl & PF.WALK) ? 1.5 : 0; e.armRaise = lerp(e.armRaise, (fl & PF.ARM) ? 1 : 0, Math.min(1, 8 * dt)); e.hitT = (fl & PF.HIT) ? 0.25 : 0;
+        if (!(fl & PF.INCAR)) e.inCar = false; else if (!e.inCar) e.inCar = true; e.ride = !!(fl & PF.RIDE); e.down = !!(fl & PF.DOWN); // a player's inCar is its car (set above, the saddle pose needs the type); anyone else's is just a flag e.moving = mine ? mine.moving : (fl & PF.RUN) ? 5 : (fl & PF.WALK) ? 1.5 : 0; e.armRaise = lerp(e.armRaise, (fl & PF.ARM) ? 1 : 0, Math.min(1, 8 * dt)); e.hitT = (fl & PF.HIT) ? 0.25 : 0;
         e.view.draw(e, dt);
       } else {
         if (mine) { e.steer = mine.steer; e.vF = mine.vF; } else { e.steer = b ? lerp(a.steer, b.steer, f) : a.steer; e.vF = b ? lerp(a.vF, b.vF, f) : a.vF; } e.speed = Math.abs(e.vF);

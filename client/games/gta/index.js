@@ -22,7 +22,7 @@ import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
-import { WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
+import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T } from './sim.js';
 import { raceCourse, nodeXZ, LAPS, ordinal } from './race.js';
@@ -328,7 +328,7 @@ export async function create({ mount, audio, send, hooks }) {
     const w = WEAPONS[me.curW]; if (w.auto !== auto || me.ammo <= 0) return;
     localFireT = w.rate; localArm = 1.6; sfx.shot(w.key, 1); camPitch -= w.recoil;
     const c = V.car;
-    if (c) { const side = me.seat === 2 ? -1 : 1, back = me.seat >= 2 ? -1 : 0.2, fx0 = Math.sin(c.yaw), fz0 = Math.cos(c.yaw); fx.burst.flash(c.x - fz0 * side * (c.type.w / 2 + 0.2) + fx0 * back, c.y + 0.7 + c.type.bh, c.z + fx0 * side * (c.type.w / 2 + 0.2) + fz0 * back); } // out of my window
+    if (c) { const { side, back } = seatOffset(c.type, me.seat), out = side * (c.type.w / 2 + 0.2), fx0 = Math.sin(c.yaw), fz0 = Math.cos(c.yaw); fx.burst.flash(c.x - fz0 * out + fx0 * back, c.y + c.type.bh + (c.type.bike ? 1.25 : 0.7), c.z + fx0 * out + fz0 * back); } // out of my window (over the rider's shoulder on a bike)
     else { const fx0 = Math.sin(camYaw), fz0 = Math.cos(camYaw), sj = V.subj; fx.burst.flash(sj.x - fz0 * 0.39 + fx0 * 0.75, sj.y + 1.32 - camPitch * 0.5, sj.z + fx0 * 0.39 + fz0 * 0.75); }
   }
   const onMouseUp = e => { if (e.button === 0) fireHeld = false; };
@@ -422,7 +422,7 @@ export async function create({ mount, audio, send, hooks }) {
     if (!eng) return; const ctx = eng.ctx, c = V.car, playing = state === 'play' || (online && state !== 'idle');
     const thr = c && V.me && V.me.seat === 0 ? ((held.up || held.down) && state === 'play' ? 1 : 0) : 0;
     eng.gain.gain.setTargetAtTime(playing && c && !c.dead ? 0.045 + thr * 0.03 : 0, ctx.currentTime, 0.1);
-    if (c) eng.osc.frequency.setTargetAtTime(45 + c.speed * 5.5 + thr * 20, ctx.currentTime, 0.05);
+    if (c) eng.osc.frequency.setTargetAtTime((45 + c.speed * 5.5 + thr * 20) * (c.type.bike ? 1.9 : c.type.bus ? 0.7 : 1), ctx.currentTime, 0.05); // a bike whines, a bus rumbles
     let near = 0; for (const cp of V.cops) if (cp.car) near = Math.max(near, 1 - Math.hypot(cp.x - V.subj.x, cp.z - V.subj.z) / 160);
     eng.sirenGain.gain.setTargetAtTime(playing ? clamp(near, 0, 1) * 0.035 : 0, ctx.currentTime, 0.1);
     eng.siren.frequency.setTargetAtTime(Math.floor(t * 2.5) % 2 ? 620 : 900, ctx.currentTime, 0.05);

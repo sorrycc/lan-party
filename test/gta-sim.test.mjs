@@ -361,3 +361,77 @@ test('everyone home ends the race at once; a wasted racer is back at the wheel a
   assert.equal(pl.place, 1); run(sim, 0.1); assert.equal(sim.S.phase, 'over', 'the only racer is home: no grace to wait out');
   assert.equal(sim.WE.kind, null, 'no world events on a race day');
 });
+
+/* ---- phase 6: the bus and the motorcycle */
+import { carOffs, driveInput, stepCar, IN } from '../client/games/gta/motion.js';
+import { seatsOf, seatOffset } from '../client/games/gta/entities.js';
+
+const BUS = CAR_TYPES.find(t => t.bus), BIKE = CAR_TYPES.find(t => t.bike), SEDAN = CAR_TYPES[0];
+/* a car of the sim's own class, added to the city */
+const addCar = (sim, T, x, z, yaw) => { const c = new sim.debug.Car(T, x, z, yaw); c.hand = false; sim.cars.push(c); return c; };
+/* put the player beside a vehicle and press F */
+const board = (sim, pl, c) => { pl.ped.x = c.x + c.type.w / 2 + 1; pl.ped.z = c.z; run(sim, 0.05); sim.action(pl, 'use'); };
+
+test('a car collides along spheres down its length: two for a sedan, enough for a bus that its side has no gap', () => {
+  assert.deepEqual(carOffs(SEDAN).length, 2); assert.equal(carOffs(SEDAN)[1], SEDAN.l / 2 - (SEDAN.w / 2 + 0.12), 'the sedan is as it was');
+  for (const T of CAR_TYPES) if (!T.bus) assert.equal(carOffs(T).length, 2, T.name + ' keeps its two spheres');
+  const offs = carOffs(BUS), r = BUS.w / 2 + 0.12; assert.ok(offs.length >= 4, 'the bus has more');
+  for (let i = 1; i < offs.length; i++) assert.ok(offs[i] - offs[i - 1] <= 2 * r, 'neighbouring spheres overlap');
+  assert.equal(offs[0], -offs[offs.length - 1], 'symmetric');
+});
+
+test('a sedan across the middle of a bus is pushed off it (with two spheres it would have sunk in)', () => {
+  const sim = make(1);
+  const bus = addCar(sim, BUS, 300, 300, 0), car = addCar(sim, SEDAN, 300 + 1.8, 300, Math.PI / 2); // the bus along z, the sedan nose-on into its side, well inside it
+  const x0 = car.x; sim.debug.collideCars();
+  assert.ok(car.x > x0 + 0.3, 'the sedan is pushed out sideways'); assert.ok(bus.x < 300, 'and the bus a little the other way, being heavier');
+});
+
+test('the bus takes seven riders, a bike one pillion, and every seat has its own window', () => {
+  assert.equal(seatsOf(BUS), 7); assert.equal(seatsOf(BIKE), 1); assert.equal(seatsOf(SEDAN), 3);
+  const seen = new Set(); for (let s = 1; s <= 7; s++) { const { side, back } = seatOffset(BUS, s); assert.ok(Math.abs(side) === 1); assert.ok(back > -BUS.l / 2 && back <= 0.2); seen.add(side + ':' + back.toFixed(2)); }
+  assert.equal(seen.size, 7, 'no two seats in the same place');
+  assert.equal(seatOffset(BIKE, 1).side, 0); assert.ok(seatOffset(BIKE, 1).back < 0, 'the pillion sits behind the rider');
+  const sim = make(3); const [a, b, c] = sim.players; const bike = addCar(sim, BIKE, 300, 300, 0);
+  board(sim, a, bike); assert.equal(a.ped.inCar, bike); assert.equal(a.ped.seat, 0);
+  board(sim, b, bike); assert.equal(b.ped.inCar, bike); assert.equal(b.ped.seat, 1, 'one rides pillion');
+  board(sim, c, bike); assert.notEqual(c.ped.inCar, bike, 'no room for a third');
+});
+
+test('a rider is drawn in the saddle: the block says the seat and the ped entry carries the RIDE flag, off the bike it is gone', () => {
+  const sim = make(1); const pl = sim.players[0]; const bike = addCar(sim, BIKE, 300, 300, 0);
+  board(sim, pl, bike); run(sim, 0.1);
+  let e = entryOf(sim, 0, pl.ped.id); assert.ok(e[6] & PF.RIDE, 'riding'); assert.ok(e[6] & PF.INCAR); assert.equal(parseBlock(snapshot(sim, 0).P[0]).seat, 0);
+  sim.action(pl, 'use'); run(sim, 0.1);
+  e = entryOf(sim, 0, pl.ped.id); assert.equal(e[6] & PF.RIDE, 0); assert.equal(e[6] & PF.INCAR, 0);
+  const sim2 = make(1); const p2 = sim2.players[0]; sim2.action(p2, 'use'); run(sim2, 0.1); // the sports car by the spawn
+  assert.ok(p2.ped.inCar && !p2.ped.inCar.type.bike); assert.equal(entryOf(sim2, 0, p2.ped.id)[6] & PF.RIDE, 0, 'in a car nobody is in a saddle');
+});
+
+test('a hard hit throws the riders off a bike and hurts them; a nudge does not', () => {
+  const sim = make(2); const [a, b] = sim.players; a.godT = b.godT = 0;
+  const bike = addCar(sim, BIKE, 300, 300, 0); board(sim, a, bike); board(sim, b, bike); assert.equal(bike.riders.length, 1);
+  const nudge = addCar(sim, SEDAN, 300, 300 + 3.2, Math.PI); nudge.vz = -1.5; sim.debug.collideCars(); // a slow tap from ahead
+  assert.equal(a.ped.inCar, bike, 'still in the saddle after a tap'); sim.cars.splice(sim.cars.indexOf(nudge), 1); nudge.release();
+  const truck = addCar(sim, SEDAN, 300, 300 + 3.2, Math.PI); truck.vz = -14; sim.debug.collideCars(); // a car into the bike head-on
+  assert.equal(a.ped.inCar, null, 'the rider is thrown'); assert.equal(b.ped.inCar, null, 'the pillion too'); assert.deepEqual(bike.riders, []); assert.equal(bike.driver, null);
+  assert.ok(a.ped.health < 100 && b.ped.health < 100, 'and hurt'); assert.ok(a.ped.vy > 0, 'into the air'); assert.equal(a.ped.ride, false);
+});
+
+test('the bike turns tighter than a sedan and the bus wider, at the same speed', () => {
+  const W = { nearAabbs: () => [] }; const DT = 1 / 60;
+  const drive = T => { const r = T.w / 2 + 0.12; const c = { type: T, x: 0, y: 0, z: 0, yaw: 0, vx: 0, vz: 0, angVel: 0, steer: 0, throttle: 0, hand: false, vF: 0, speed: 0, fx: 0, fz: 1, rx: -1, rz: 0, dead: false, r, off: T.l / 2 - r, offs: carOffs(T), mass: T.mass };
+    for (let i = 0; i < 60; i++) { driveInput(c, IN.UP, DT); stepCar(W, c, DT, null); } c.vx = 0; c.vz = 10; c.vF = 10; // a second of gas, then the same speed for all
+    for (let i = 0; i < 60; i++) { driveInput(c, IN.UP | IN.LEFT, DT); c.vF = 10; c.vx = c.fx * 10; c.vz = c.fz * 10; stepCar(W, c, DT, null); } return Math.abs(c.yaw); };
+  const bike = drive(BIKE), sedan = drive(SEDAN), bus = drive(BUS);
+  assert.ok(bike > sedan * 1.2, 'the bike is nimble'); assert.ok(bus < sedan * 0.75, 'the bus lumbers');
+});
+
+test('motorcycles wait parked around the city and by the Ferris wheel, buses roll in the traffic, and a player alone keeps the old police force', () => {
+  const sim = make(1);
+  assert.ok(sim.cars.filter(c => c.type.bike && c.parked).length >= 3, 'bikes to take');
+  assert.ok(sim.cars.every(c => !(c.type.bike && c.ai === 'traffic')), 'no riderless bikes in the traffic');
+  let buses = 0; for (let k = 0; k < 40; k++) { run(sim, 0.5); buses += sim.cars.filter(c => c.type.bus && c.ai === 'traffic').length; if (buses) break; }
+  assert.ok(buses > 0, 'a bus in the traffic within twenty seconds');
+  assert.equal(sim.debug.MAX_COPS, 24); assert.equal(sim.debug.MAX_COP_CARS, 8); assert.equal(make(2).debug.MAX_COPS, 32);
+});

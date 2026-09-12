@@ -5,7 +5,7 @@
    had predicted for the same input and shifts its state by the difference. Small differences are hidden with a
    visual offset that decays over a few frames; big ones (a respawn, a car crash the client could not see) snap. */
 import { angDiff, groundY } from './world.js';
-import { stepOnFoot, driveInput, stepCar } from './motion.js';
+import { stepOnFoot, driveInput, stepCar, carOffs } from './motion.js';
 
 export function createPredictor({ W }) {
   const ped = { cls: 'ped', x: 0, y: 0, z: 0, yaw: 0, vy: 0, moving: 0, jumpLatch: false, r: 0.42, stuck: 0, inCar: null };
@@ -17,7 +17,7 @@ export function createPredictor({ W }) {
   function attachCar(e) {
     const T = e.type, r = T.w / 2 + 0.12;
     car = { cls: 'car', type: T, x: e.x, y: e.y, z: e.z, yaw: e.yaw, vx: Math.sin(e.yaw) * e.vF, vz: Math.cos(e.yaw) * e.vF, angVel: 0, steer: e.steer || 0, throttle: 0, hand: false, vF: e.vF, speed: Math.abs(e.vF),
-      fx: Math.sin(e.yaw), fz: Math.cos(e.yaw), rx: -Math.cos(e.yaw), rz: Math.sin(e.yaw), dead: false, r, off: T.l / 2 - r, mass: T.mass, released: false };
+      fx: Math.sin(e.yaw), fz: Math.cos(e.yaw), rx: -Math.cos(e.yaw), rz: Math.sin(e.yaw), dead: false, r, off: T.l / 2 - r, offs: carOffs(T), mass: T.mass, released: false };
     ped.inCar = car; vis.x = vis.z = vis.yaw = 0; hist.length = 0;
   }
   const otherCars = remote => { const out = []; for (const e of remote.ents.values()) if (e.cls === 'car' && e.id !== carId) out.push(e); return out; };

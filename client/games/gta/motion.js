@@ -36,6 +36,13 @@ export function pushOutOfCars(e, r, isPlayer, cars) {
   return pushed;
 }
 
+/* a car collides along a row of spheres down its length (radius r = half its width and a bit): two for anything sedan-sized,
+   more for a bus, so a long side has no gap a car could sink into. Returns the sphere centres as offsets from the car's centre. */
+export function carOffs(T) {
+  const r = T.w / 2 + 0.12, off = T.l / 2 - r, n = Math.max(2, Math.round(off / r) + 1);
+  return Array.from({ length: n }, (_, i) => i === n - 1 ? off : -off + 2 * off * i / (n - 1));
+}
+
 /* one frame of a player's on-foot movement: p = { x, y, z, yaw, vy, moving, jumpLatch, r, stuck, inCar } */
 export function stepOnFoot(W, p, bits, camYaw, aiming, dt, cars, sx = 0, sz = 0) {
   const fx = Math.sin(camYaw), fz = Math.cos(camYaw), rx = -fz, rz = fx;
@@ -79,7 +86,7 @@ export function stepCar(W, c, dt, crashes) {
   const grip = c.hand ? 1.3 : offroad ? 5 : 9;
   vR *= Math.exp(-grip * dt);
   const steerEff = c.steer * clamp(Math.abs(vF) / 6, 0, 1) * (c.hand ? 1.6 : 1) * (1 - clamp((Math.abs(vF) - 16) / 45, 0, 0.5));
-  c.yaw += steerEff * 2.4 * dt * (vF < 0 ? -1 : 1) + c.angVel * dt;
+  c.yaw += steerEff * (T.turn || 2.4) * dt * (vF < 0 ? -1 : 1) + c.angVel * dt;
   c.angVel *= Math.exp(-3.5 * dt);
   c.vx = fx * vF + rx * vR; c.vz = fz * vF + rz * vR;
   c.x += c.vx * dt; c.z += c.vz * dt;
@@ -90,9 +97,9 @@ export function stepCar(W, c, dt, crashes) {
   return offroad;
 }
 export function carCollideWorld(W, c, crashes) {
-  const list = W.nearAabbs(c.x, c.z), r = c.r;
-  for (const s of [-1, 1]) {
-    const cx = c.x + c.fx * c.off * s, cz = c.z + c.fz * c.off * s;
+  const list = W.nearAabbs(c.x, c.z), r = c.r, offs = c.offs || [-c.off, c.off];
+  for (const o of offs) {
+    const cx = c.x + c.fx * o, cz = c.z + c.fz * o;
     for (let k = 0; k < list.length; k++) { const b = list[k]; if (b.h < 0.6) continue;
       const nx = clamp(cx, b.x0, b.x1), nz = clamp(cz, b.z0, b.z1); let dx = cx - nx, dz = cz - nz; const d2 = dx * dx + dz * dz;
       if (d2 >= r * r) continue;
@@ -103,7 +110,7 @@ export function carCollideWorld(W, c, crashes) {
       const pen = r - d; c.x += dx * pen; c.z += dz * pen;
       const vn = c.vx * dx + c.vz * dz;
       if (vn < 0) { const imp = -vn; c.vx -= dx * vn * 1.25; c.vz -= dz * vn * 1.25; c.vx *= 0.9; c.vz *= 0.9;
-        const rxv = c.fx * c.off * s, rzv = c.fz * c.off * s; c.angVel += (rzv * dx * imp - rxv * dz * imp) * 0.35 / c.mass;
+        const rxv = c.fx * o, rzv = c.fz * o; c.angVel += (rzv * dx * imp - rxv * dz * imp) * 0.35 / c.mass;
         if (imp > 3 && crashes) crashes.push({ x: nx, z: nz, imp }); }
     }
   }

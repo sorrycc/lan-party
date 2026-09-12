@@ -2,7 +2,7 @@
    describe them. A "view" owns pool slots and draws whatever state object it is given, so the host draws its
    simulated entities and a client draws its interpolated copies through the same code.
 
-   State fields read by PedView.draw:  x y z yaw dead deadT inCar moving hitT armRaise kind camPitch gun
+   State fields read by PedView.draw:  x y z yaw dead deadT inCar moving hitT armRaise kind camPitch gun down ride seat
    State fields read by CarView.draw:  x y z yaw steer speed dead lights */
 import { lerp } from '../../core/math.js';
 import { AVATARS } from '../../core/avatars.js';
@@ -13,7 +13,7 @@ export const KINDS = ['civ', 'cop', 'guard', 'vinny', 'player', 'swat']; // inde
 export const kindIdx = k => KINDS.indexOf(k);
 
 /* ped state flags on the wire */
-export const PF = { DEAD: 1, INCAR: 2, WALK: 4, RUN: 8, ARM: 16, HIT: 32, OLDDEAD: 64, DOWN: 128 }; // DOWN: lying hurt but alive (a patient waiting for the ambulance)
+export const PF = { DEAD: 1, INCAR: 2, WALK: 4, RUN: 8, ARM: 16, HIT: 32, OLDDEAD: 64, DOWN: 128, RIDE: 256 }; // DOWN: lying hurt but alive (a patient waiting for the ambulance); RIDE: on a motorcycle, drawn in the saddle
 /* car state flags on the wire */
 export const CF = { DEAD: 1, SMOKE: 2, BURN: 4, LIGHTS: 8 };
 
@@ -39,8 +39,21 @@ export const CAR_TYPES = [
   { name: 'armored', w: 2.3, l: 5.6, bh: 1.05, ch: 0.8, cl: 0.5, cz: -0.1, acc: 8, max: 22, brake: 16, mass: 2.2, colors: [0x3a4a3a], cabin: 0x2a2f2a, armored: true, hp: 400 },
   /* the SWAT van that comes at five stars: a cop car with four SWAT inside */
   { name: 'swat', w: 2.3, l: 5.4, bh: 1.0, ch: 0.95, cl: 0.7, cz: -0.06, acc: 12, max: 29, brake: 20, mass: 1.8, colors: [0x101418], cabin: 0x101418, cop: true, swat: true, hp: 160 },
+  /* the bus: twice a sedan's length (so it collides along four spheres, see motion.js carOffs), slow to turn, hard to stop, seven ride along */
+  { name: 'bus', w: 2.5, l: 10.5, bh: 1.25, ch: 1.35, cl: 0.94, cz: 0, acc: 6.5, max: 21, brake: 13, mass: 3.2, turn: 1.5, colors: [0x2f8fd1, 0xd18a2b, 0x3fa04a], cabin: 0x9fd0ff, bus: true, hp: 220, seats: 7 },
+  /* the motorcycle: quick and nimble, light as a feather in a crash, the rider sits in the open and is thrown by a hard hit; one rides pillion */
+  { name: 'bike', w: 0.8, l: 2.3, bh: 0.42, ch: 0.28, cl: 0.34, cz: -0.12, acc: 19, max: 39, brake: 22, mass: 0.35, turn: 3.4, colors: [0xd12b2b, 0x222222, 0xffe14d, 0x2b5fd1, 0xf0f0f0], bike: true, hp: 60, seats: 1 },
 ]; // indexed on the wire, so only ever append
 CAR_TYPES.forEach((t, i) => { t.idx = i; });
+/* how many ride along besides the driver */
+export const seatsOf = T => T.seats !== undefined ? T.seats : 3;
+/* where a seat is in the car: `side` is +1 for the right window, -1 for the left (0 on a bike), `back` is along the length from the
+   centre. Seat 1 is the front right, then the rows behind alternate left / right; a bike's pillion sits behind the rider. */
+export function seatOffset(T, seat) {
+  if (T.bike) return { side: 0, back: seat > 0 ? -0.55 : 0 };
+  if (seat <= 1) return { side: 1, back: 0.2 };
+  return { side: seat % 2 ? 1 : -1, back: Math.max(0.2 - Math.floor(seat / 2) * 1.2, -(T.l / 2 - 0.9)) };
+}
 
 const PART_DEF = { // [pivot xyz, offset xyz, size xyz]
   head: [[0, 1.55, 0], [0, 0, 0], [0.5, 0.5, 0.5]],
@@ -96,11 +109,13 @@ export class PedView {
   draw(s, dt) {
     if (this.released) return;
     const W = this.W, M = this.M, M2 = this.M2, M3 = this.M3;
-    if (s.inCar) { this.hide(); return; }
-    let bodyPitch = 0, y = s.y;
+    const ride = !!(s.inCar && s.ride); // in the saddle of a motorcycle, in the open; in any other car out of sight
+    if (s.inCar && !ride) { this.hide(); return; }
+    let bodyPitch = 0, y = s.y, x = s.x, z = s.z;
     if (s.dead) { bodyPitch = -PI / 2 * Math.min(1, s.deadT * 4); y = s.y + 0.28 * Math.min(1, s.deadT * 4); }
     else if (s.down) { bodyPitch = -PI / 2; y = s.y + 0.28; } // a patient lies where it fell
-    M.makeTranslation(s.x, y, s.z); M.multiply(M2.makeRotationY(s.yaw)); if (bodyPitch) M.multiply(M2.makeRotationX(bodyPitch));
+    else if (ride) { const T = s.inCar.type, back = T ? seatOffset(T, s.seat || 0).back : 0; x += Math.sin(s.yaw) * back; z += Math.cos(s.yaw) * back; y = s.y + 0.32; bodyPitch = 0.18; } // pillion behind the rider, seat height, a lean over the bars
+    M.makeTranslation(x, y, z); M.multiply(M2.makeRotationY(s.yaw)); if (bodyPitch) M.multiply(M2.makeRotationX(bodyPitch));
     if (s.moving > 0) this.phase += dt * (s.moving > 3 ? 11 : 6.5); else this.phase = lerp(this.phase, Math.round(this.phase / PI) * PI, Math.min(1, 10 * dt));
     const amp = s.moving > 3 ? 1.1 : s.moving > 0 ? 0.7 : 0;
     const sw = Math.sin(this.phase) * amp * (s.moving > 0 ? 1 : 0);
@@ -108,7 +123,8 @@ export class PedView {
     const aimAngle = -PI / 2 + (s.kind === 'player' ? (s.camPitch || 0) : 0);
     for (let i = 0; i < 7; i++) {
       const name = PART_NAMES[i]; let rot = 0;
-      if (name === 'armL') rot = -sw * (1 - raise * 0.5); else if (name === 'armR') rot = lerp(sw, aimAngle, raise);
+      if (ride) { if (name === 'armL' || name === 'armR') rot = -1.1; else if (name === 'legL' || name === 'legR') rot = -1.35; } // hands on the bars, knees up
+      else if (name === 'armL') rot = -sw * (1 - raise * 0.5); else if (name === 'armR') rot = lerp(sw, aimAngle, raise);
       else if (name === 'legL') rot = sw; else if (name === 'legR') rot = -sw;
       const def = PART_DEF[name]; let scaleY = 1;
       if (name === 'hair' && s.kind === 'vinny') scaleY = 2.2;
@@ -147,9 +163,20 @@ export class CarView {
     M.makeTranslation(s.x, s.y, s.z); M.multiply(M2.makeRotationY(s.yaw));
     const roll = Math.max(-0.06, Math.min(0.06, -s.steer * s.speed * 0.004)); if (roll) M.multiply(M2.makeRotationZ(roll));
     const set = (pool, idx, x, y, z, sx, sy, sz, ry = 0, rx = 0) => { M3.makeTranslation(x, y, z); if (ry) M3.multiply(M2.makeRotationY(ry)); if (rx) M3.multiply(M2.makeRotationX(rx)); M3.multiply(M2.makeScale(sx, sy, sz)); M3.premultiply(M); pool.set(idx, M3); };
+    const steerA = s.steer * 0.5;
+    if (T.bike) { // a slim frame, the tank as the cabin, two wheels in line, one lamp each end, and a lean into the turn
+      const lean = Math.max(-0.35, Math.min(0.35, s.steer * Math.min(1, s.speed / 12) * 0.45)); if (lean) M.multiply(M2.makeRotationZ(-lean));
+      set(W.carBody, this.ib, 0, 0.35 + T.bh / 2, 0, T.w * 0.45, T.bh, T.l * 0.8);
+      set(W.carCabin, this.ic, 0, 0.35 + T.bh + T.ch / 2, T.l * T.cz, T.w * 0.6, T.ch, T.l * T.cl);
+      set(W.carWheel, this.iw[0], 0, 0.38, T.l * 0.36, 0.8, 1, 1, steerA, this.wheelSpin); set(W.carWheel, this.iw[1], 0, 0.38, -T.l * 0.36, 0.8, 1, 1, 0, this.wheelSpin);
+      W.carWheel.hide(this.iw[2]); W.carWheel.hide(this.iw[3]);
+      const ly = 0.35 + T.bh * 0.8;
+      set(W.carLight, this.il[0], 0, ly, T.l / 2 + 0.03, 0.26, 0.2, 0.1); W.carLight.hide(this.il[1]);
+      set(W.carLight, this.il[2], 0, ly, -T.l / 2 - 0.03, 0.26, 0.16, 0.1); W.carLight.hide(this.il[3]); W.carLight.hide(this.il[4]); W.carLight.hide(this.il[5]);
+      return;
+    }
     set(W.carBody, this.ib, 0, 0.35 + T.bh / 2, 0, T.w, T.bh, T.l);
     set(W.carCabin, this.ic, 0, 0.35 + T.bh + T.ch / 2, T.l * T.cz, T.w * 0.86, T.ch, T.l * T.cl);
-    const steerA = s.steer * 0.5;
     for (let k = 0; k < 4; k++) { const sx = k % 2 ? 1 : -1, front = k < 2; set(W.carWheel, this.iw[k], sx * (T.w / 2 - 0.05), 0.38, (front ? 1 : -1) * T.l * 0.32, 1, 1, 1, front ? steerA : 0, this.wheelSpin); }
     const ly = 0.35 + T.bh * 0.6;
     set(W.carLight, this.il[0], -T.w * 0.34, ly, T.l / 2 + 0.03, 0.42, 0.22, 0.1); set(W.carLight, this.il[1], T.w * 0.34, ly, T.l / 2 + 0.03, 0.42, 0.22, 0.1);
@@ -174,7 +201,7 @@ export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ?
 /* indexed on the wire, so only ever append; the last two are the weapon crates (their amount is the rounds inside) */
 export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe', 'sniper', 'rpg'];
 /* how a player died, indexed on the wire (the per-player block); the weapon keys are among them */
-export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg'];
+export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg', 'crash']; // crash: thrown off a motorcycle
 /* the world events, indexed on the wire */
 export const EVENT_KINDS = ['truck', 'airdrop'];
 /* the driving jobs (taxi fares, ambulance patients) and their stages, indexed on the wire (the per-player block) */
