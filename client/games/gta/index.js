@@ -70,11 +70,19 @@ const HTML = `<canvas class="gl"></canvas><canvas class="hud"></canvas><div clas
 <div class="pill ctl weapon" data-weapon><canvas width="48" height="24"></canvas><b data-wname>PISTOL</b></div>
 <div class="pill ctl reload" data-reload>RELOAD</div>
 <div class="menu-btn ctl" data-menu>☰</div>
-<div class="overlay" hidden><div class="card"><h1 data-title></h1><div class="sub" data-sub></div><div class="controls" data-controls></div><table class="score" data-score hidden></table><div class="foot" data-foot></div></div></div>
+<div class="overlay" hidden><div class="card"><h1 data-title></h1><div class="sub" data-sub></div><div class="controls" data-controls></div><table class="score" data-score hidden></table><table class="score awards" data-awards hidden></table><div class="foot" data-foot></div></div></div>
 <div class="rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>FABLE THEFT AUTO PLAYS IN LANDSCAPE</small></div></div>`;
 const rr = (a, b) => a + Math.random() * (b - a);
 const r2 = v => Math.round(v * 100) / 100, r3 = v => Math.round(v * 1000) / 1000;
 const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+/* the results card's awards: what the host's key is called and how its value reads (the extra is the nemesis's victim or the driver's distance) */
+const AWARDS = {
+  lap: ['FASTEST LAP', v => `${fmtClock(v)}.${Math.floor((v % 1) * 10)}`], killer: ['MOST KILLS', v => `${v} KILL${v === 1 ? '' : 'S'}`],
+  nemesis: ['NEMESIS', (v, x, nameOf) => `WASTED ${nameOf(x).toUpperCase()} ${v} TIMES`], victim: ['MOST WASTED', v => `${v} DEATHS`],
+  fugitive: ['LONGEST CHASE', v => `${fmtClock(v)} ON THE RUN`], cabbie: ['BEST CABBIE', v => `${v} FARES IN A ROW`],
+  speed: ['SPEED DEMON', v => `${Math.round(v)} KM/H`], driver: ['SAFEST DRIVER', (v, km) => `${v === 0 ? 'NO' : v} CRASH${v === 1 ? '' : 'ES'} IN ${km} KM`],
+  loot: ['BIGGEST LOOTER', v => `$${v} PICKED UP`],
+};
 
 /* ============================================================ sound - the original synth on the shell's shared AudioContext */
 function createSfx(audio) {
@@ -130,7 +138,7 @@ export async function create({ mount, audio, send, hooks }) {
   const root = document.createElement('div'); root.className = 'gta' + (touch ? ' touch' : ''); root.innerHTML = HTML; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
   const glCanvas = $('canvas.gl'), hudCanvas = $('canvas.hud'), hctx = hudCanvas.getContext('2d');
-  const ov = { el: $('.overlay'), title: $('[data-title]'), sub: $('[data-sub]'), controls: $('[data-controls]'), score: $('[data-score]'), foot: $('[data-foot]') };
+  const ov = { el: $('.overlay'), title: $('[data-title]'), sub: $('[data-sub]'), controls: $('[data-controls]'), score: $('[data-score]'), awards: $('[data-awards]'), foot: $('[data-foot]') };
   /* the safe-area insets (notch, home indicator) as numbers, read off an element the stylesheet pads with them, so the canvas HUD keeps clear */
   const saEl = $('.sa'), sa = { t: 0, r: 0, b: 0, l: 0 }; let saStale = true; // the probe has no size while the shell still hides the stage: measured again until it has
   const measureSafeArea = () => { const r = saEl.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return; saStale = false; sa.t = Math.max(0, r.top); sa.l = Math.max(0, r.left); sa.r = Math.max(0, innerWidth - r.right); sa.b = Math.max(0, innerHeight - r.bottom); };
@@ -162,6 +170,7 @@ export async function create({ mount, audio, send, hooks }) {
 
   /* ---- session + local state */
   let laps = LAPS, guns = true; // the round's lobby options that the HUD needs (RACE LAPS, GUNS)
+  let awards = []; // the round's awards, from the host's `over` event: [key, player index, value, extra?]
   let sim = null, remote = null, session = null, isHost = false, online = false, hostId = null, myId = null, myIdx = 0, me = null, clients = [];
   let state = 'idle'; // idle | grab (click to play) | play | paused | over
   let camYaw = 0, camPitch = 0.22, mouseIdle = 10, fallbackMouse = touch, lockPending = 0, lastMX = null, lastMY = null; // no pointer lock on a touch screen
@@ -255,7 +264,7 @@ export async function create({ mount, audio, send, hooks }) {
       case 'enter': if (mine(ev[1])) sfx.enter(); break;
       case 'reload': if (mine(ev[1])) sfx.reload(); break;
       case 'passed': sfx.passed(); if (ev[1] >= 0) feedLine(pname(ev[1]), said('WHACKED THE SNITCH  +$5000', '#ffe14d')); break;
-      case 'over': showOver(); break;
+      case 'over': awards = Array.isArray(ev[1]) ? ev[1] : []; showOver(); break;
       case 'kill': { const [, killer, whom, ci] = ev, cause = CAUSES[ci] || '';
         if (killer >= 0) feedLine(pname(killer), ICONS[cause] ? { icon: cause } : said(KILL_VERB[cause] || 'WASTED'), pname(whom));
         else feedLine(pname(whom), said(DIED_TEXT[cause] || 'WASTED')); break; }
@@ -397,7 +406,7 @@ export async function create({ mount, audio, send, hooks }) {
   /* ---- overlays: click to play / paused / time's up */
   function button(label, cls, fn) { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; ov.foot.appendChild(b); return b; }
   function showOverlay(kind) {
-    ov.el.hidden = false; ov.foot.innerHTML = ''; ov.score.hidden = kind !== 'over'; ov.controls.hidden = kind === 'over' || (kind === 'paused' && touch); // the touch pause card is short: HOW TO PLAY unfolds the list
+    ov.el.hidden = false; ov.foot.innerHTML = ''; ov.score.hidden = kind !== 'over'; ov.awards.hidden = kind !== 'over' || !awards.length; ov.controls.hidden = kind === 'over' || (kind === 'paused' && touch); // the touch pause card is short: HOW TO PLAY unfolds the list
     ov.controls.innerHTML = (touch ? CONTROLS_TOUCH : CONTROLS).filter(([k]) => guns || !GUN_KEYS.has(k)).map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('');
     const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY', tap = touch ? 'TAP' : 'CLICK';
     if (kind === 'grab') {
@@ -418,6 +427,7 @@ export async function create({ mount, audio, send, hooks }) {
         .sort((a, c) => race ? ((a.b.rank || 99) - (c.b.rank || 99)) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
       const raceCell = b => b.place ? `<td class="n mark">FINISHED ${ordinal(b.place)}</td>` : `<td class="n">LAP ${Math.min(laps, b.lap + 1)}/${laps}  ·  CP ${b.next === 0 ? n - 1 : b.next - 1}/${n - 1}</td>`;
       ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
+      ov.awards.innerHTML = awards.map(([key, idx, v, x]) => { const a = AWARDS[key]; return a ? `<tr class="${idx === myIdx ? 'me' : ''}"><td class="aw">${a[0]}</td><td><span class="sw" style="background:${hex(playerColor(idx))}"></span>${esc(nameOf(idx))}</td><td class="n mark">${esc(a[1](v, x, nameOf))}</td></tr>` : ''; }).join('');
       if (restart) { button('PLAY AGAIN', 'primary', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
       else ov.foot.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
     }
@@ -782,7 +792,7 @@ export async function create({ mount, audio, send, hooks }) {
   function start(s) {
     stopRound();
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId; myIdx = Math.max(0, s.players.findIndex(p => p.id === myId));
-    camYaw = 0; camPitch = 0.22; mouseIdle = 10; t = 0; roundT = 0; clicks = 0; fireHeld = false; dmgFlash = 0; wantedFlash = 0; floats.length = 0; feed.length = 0; areaT = 0; curDistrict = ''; curStreet = ''; route = []; routeT = 0; lastIn = null; sinceIn = 1; netAcc = 0; lockPending = 0;
+    camYaw = 0; camPitch = 0.22; mouseIdle = 10; t = 0; roundT = 0; clicks = 0; fireHeld = false; dmgFlash = 0; wantedFlash = 0; floats.length = 0; feed.length = 0; awards = []; areaT = 0; curDistrict = ''; curStreet = ''; route = []; routeT = 0; lastIn = null; sinceIn = 1; netAcc = 0; lockPending = 0;
     clock = START_CLOCK[(s.opts || {}).time] ?? START_CLOCK.morning;
     fx.reset();
     if (isHost) {

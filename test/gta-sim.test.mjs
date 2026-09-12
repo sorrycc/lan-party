@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { createSim, MODES, MARK_CASH_PER_S, MARK_BOUNTY, MARK_PICK_T, MARK_STARS, ESCAPE_BONUS, AIRDROP_T, AIRDROP_FALL, aimTol } from '../client/games/gta/sim.js';
 import { parseBlock, parseMode } from '../client/games/gta/remote.js';
 import { CAUSES, EVENT_KINDS, CAR_TYPES } from '../client/games/gta/entities.js';
-import { NEWS, STREAK_NEWS } from '../client/games/gta/sim.js';
+import { NEWS, STREAK_NEWS, AWARD_KEYS, AWARDS_SHOWN } from '../client/games/gta/sim.js';
 
 const pool = () => ({ alloc() { return 0; }, release() {}, color() {}, hide() {}, set() {}, dirty() {} });
 const stubWorld = () => ({ THREE, aabbs: [], nearAabbs: () => [], hasLOS: () => true, pickPool: pool(), pedPools: Array.from({ length: 7 }, pool), gunPool: pool(), carBody: pool(), carCabin: pool(), carWheel: pool(), carLight: pool(), dirtyDynamic() {} });
@@ -614,5 +614,50 @@ test('a fare streak is news from the third fare on', () => {
   pl.job.n = STREAK_NEWS - 2; snapshot(sim, 1); stopAt(sim, c, pl.job.x + 1, pl.job.z);
   assert.equal(pl.job.n, STREAK_NEWS - 1); assert.equal(newsIn(snapshot(sim, 1), 'streak').length, 0, 'two in a row is not news');
   run(sim, 2.2); const f2 = pl.job.fare; f2.x = c.x + 40; f2.z = c.z; stopAt(sim, c, f2.x + 2, f2.z); snapshot(sim, 1); stopAt(sim, c, pl.job.x + 1, pl.job.z);
-  assert.equal(pl.job.n, STREAK_NEWS); const n = newsIn(snapshot(sim, 1), 'streak'); assert.equal(n.length, 1); assert.equal(n[0][2], 0); assert.equal(n[0][3], STREAK_NEWS);
+  assert.equal(pl.job.n, STREAK_NEWS); assert.equal(pl.streakBest, STREAK_NEWS, 'the best streak is kept for the awards'); const n = newsIn(snapshot(sim, 1), 'streak'); assert.equal(n.length, 1); assert.equal(n[0][2], 0); assert.equal(n[0][3], STREAK_NEWS);
+});
+
+/* ---------------------------------------------------------------- the round's awards */
+const overIn = m => m.ev.find(e => e[0] === 'over');
+const endNow = sim => { sim.S.timeLeft = 0.05; run(sim, 0.2); assert.equal(sim.S.phase, 'over'); };
+
+test('the round keeps a tally: deaths and who did it, chases, fares in a row, loot, crashes at the wheel, distance and top speed', () => {
+  const sim = make(3); const [a, b, c] = sim.players; a.godT = b.godT = c.godT = 0;
+  sim.debug.spawnPickup(a.ped.x, a.ped.z, 'cash', 150); const cash0 = a.cash; run(sim, 0.2);
+  assert.equal(a.cash, cash0 + 150); assert.equal(a.loot, 150, 'cash off the street is loot');
+  sim.debug.addWanted(b, 2); run(sim, 2); assert.ok(b.chaseT > 1.9 && b.chaseT < 2.2, 'a chase is timed while the stars are up');
+  sim.debug.killPlayer(b, a, 'pistol'); assert.equal(b.chaseT, 0); assert.ok(b.chaseBest > 1.9, 'a death ends the chase and keeps its length');
+  assert.equal(b.deaths, 1); assert.equal(a.kills, 1); assert.deepEqual(a.killsOf, [0, 1, 0]);
+  sim.debug.killPlayer(a, null, 'cop'); assert.equal(a.deaths, 1); assert.deepEqual(b.killsOf, [0, 0, 0], 'the cops are nobody');
+  const car = addCar(sim, SEDAN, 300, 300, 0); board(sim, c, car); assert.equal(car.driver, c.ped);
+  const ram = addCar(sim, SEDAN, 300, 300 + 4.2, Math.PI); ram.vz = -12; sim.debug.collideCars();
+  assert.ok(c.crashes >= 1, 'a crash at the wheel is the driver\'s'); assert.equal(a.crashes, 0);
+  sim.setInput(c, { m: 1, y: 0, p: 0.22, c: 0 }); run(sim, 2);
+  assert.ok(c.driven > 2 && c.topSpeed > 3, 'metres and the top speed add up while driving'); assert.equal(a.driven, 0);
+});
+
+test('the awards ride once in the over event, in order of importance, at most six, each with a bar to clear', () => {
+  const sim = make(3); const [a, b, c] = sim.players; a.godT = b.godT = c.godT = 0;
+  sim.debug.killPlayer(a, b, 'smg'); run(sim, 6); sim.debug.killPlayer(a, b, 'shotgun'); run(sim, 6); sim.debug.killPlayer(a, c, 'rpg'); run(sim, 6); sim.debug.killPlayer(a, b, 'sniper'); sim.debug.killPlayer(b, c, 'pistol');
+  b.chaseBest = 45; a.chaseBest = 20; c.streakBest = 3; a.streakBest = 1; a.driven = 1234; a.crashes = 2; b.driven = 900; b.crashes = 0; c.driven = 100; c.crashes = 0; a.loot = 260;
+  endNow(sim);
+  const m = snapshot(sim, 2), ov = overIn(m); assert.ok(ov, 'the over event reaches everyone'); const aw = ov[1];
+  assert.equal(overIn(snapshot(sim, 0)), undefined, 'and only once');
+  assert.deepEqual(aw.map(x => x[0]), ['killer', 'nemesis', 'victim', 'fugitive', 'cabbie', 'driver'], 'six of the seven earned, in AWARD_KEYS order, the loot dropped');
+  assert.equal(aw.length, AWARDS_SHOWN); for (const k of aw.map(x => x[0])) assert.ok(AWARD_KEYS.includes(k));
+  const by = Object.fromEntries(aw.map(x => [x[0], x]));
+  assert.deepEqual(by.killer, ['killer', 1, 3], 'B has three kills, C two');
+  assert.deepEqual(by.nemesis, ['nemesis', 1, 3, 0], 'B wasted A three times');
+  assert.deepEqual(by.victim, ['victim', 0, 4]);
+  assert.deepEqual(by.fugitive, ['fugitive', 1, 45]); assert.deepEqual(by.cabbie, ['cabbie', 2, 3]);
+  assert.deepEqual(by.driver, ['driver', 1, 0, 0.9], 'the fewest crashes among those who drove far enough: B, not C');
+});
+
+test('a quiet room hands out nothing, a race day leads with the fastest lap', () => {
+  const quiet = make(2); endNow(quiet); assert.deepEqual(overIn(snapshot(quiet, 0))[1], []);
+  const sim = make(1, { mode: 'race', laps: 1 }); const pl = sim.players[0], n = sim.course.length; run(sim, COUNTDOWN_T + 0.1);
+  sim.setInput(pl, { m: 1, y: 0, p: 0.22, c: 0 }); run(sim, 1.5); assert.ok(pl.driven > 3 && pl.topSpeed > 3);
+  for (let k = 1; k < n; k++) { goTo(sim, pl, k); run(sim, 0.05); } goTo(sim, pl, 0); run(sim, 0.1);
+  assert.ok(pl.lapBest > 1.5 && pl.lapBest < 3, 'the lap was timed from the green light to the line'); run(sim, 0.2); assert.equal(sim.S.phase, 'over');
+  const aw = overIn(snapshot(sim, 0))[1]; assert.equal(aw[0][0], 'lap'); assert.equal(aw[0][1], 0); assert.ok(Math.abs(aw[0][2] - pl.lapBest) < 0.06, 'to a tenth');
 });

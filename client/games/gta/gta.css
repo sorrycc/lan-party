@@ -25,6 +25,7 @@
 .gta .score .sw { display: inline-block; width: 16px; height: 16px; border-radius: 5px; vertical-align: middle; margin-right: 8px; border: 2px solid rgba(255,255,255,.5); }
 .gta .score .n { text-align: right; font-variant-numeric: tabular-nums; }
 .gta .score .cash { color: #3dff7a; } .gta .score .kills { color: #ff6060; } .gta .score .mark { color: #ffe14d; }
+.gta .score.awards { margin-top: 2px; } .gta .score .aw { color: #ffe14d; font-size: 13px; letter-spacing: 2px; white-space: nowrap; }
 .gta .score .left { font-size: 11px; letter-spacing: 1px; color: #8fa3c8; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 .gta .foot { display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; font-size: 15px; color: #dbe9ff; letter-spacing: 2px; }
 .gta .foot .btn { touch-action: manipulation; }
@@ -86,7 +87,7 @@
   .gta .overlay .sub { font-size: 10px; letter-spacing: 2px; margin-bottom: 8px; }
   .gta .controls { font-size: 11px; gap: 2px 10px; margin-bottom: 10px; }
   .gta .controls kbd { font-size: 10px; padding: 1px 6px; min-width: 36px; }
-  .gta .score { font-size: 14px; margin-bottom: 8px; } .gta .score td { padding: 3px 8px; }
+  .gta .score { font-size: 14px; margin-bottom: 8px; } .gta .score td { padding: 3px 8px; } .gta .score .aw { font-size: 10px; letter-spacing: 1px; }
   .gta .foot { gap: 8px; font-size: 12px; } .gta .foot .btn.small { font-size: 12px; padding: 6px 10px; }
   .gta .pad { width: 40%; } .gta .pad .ring { width: 108px; height: 108px; margin: -54px 0 0 -54px; } .gta .pad .knob { width: 46px; height: 46px; margin: -23px 0 0 -23px; transform: translate(calc(var(--sx) * 30px), calc(var(--sy) * 30px)); }
   .gta .look { width: 60%; }
