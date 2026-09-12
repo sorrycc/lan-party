@@ -542,6 +542,11 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
   /* a tall translucent column like the two above, for whatever the game wants to point at (a world event, a checkpoint); hidden until placed */
   function makeMarker(color) { const m = new THREE.Mesh(BOX, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4 })); m.scale.set(1.2, 40, 1.2); m.visible = false; scene.add(m); return m; }
   const eventMarker = makeMarker(0x3dff7a);
+  /* a flat arrow on the road (the race's sat-nav lays a trail of them); its tip points along +z at yaw 0, so rotation.y takes a
+     heading like a car's. One shared material, so a pulse set on any arrow's material pulses them all. Hidden until placed. */
+  const ARROW = (() => { const sh = new THREE.Shape(); sh.moveTo(-0.8, 2.2); sh.lineTo(0.8, 2.2); sh.lineTo(0.8, -0.4); sh.lineTo(2.1, -0.4); sh.lineTo(0, -3); sh.lineTo(-2.1, -0.4); sh.lineTo(-0.8, -0.4); sh.closePath(); return new THREE.ShapeGeometry(sh); })();
+  const arrowMat = new THREE.MeshBasicMaterial({ color: 0x2fd0ff, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  function makeArrow() { const m = new THREE.Mesh(ARROW, arrowMat); m.rotation.order = 'YXZ'; m.rotation.x = -PI / 2; m.position.y = 0.06; m.visible = false; scene.add(m); return m; }
 
   /* ---- per-frame scenery animation (Ferris wheel, clouds, boats, waves) - identical, purely cosmetic, on every machine */
   const M = new THREE.Matrix4(), M2 = new THREE.Matrix4(), M3 = new THREE.Matrix4();
@@ -597,7 +602,7 @@ export function buildWorld({ THREE, scene, seed = 20260903 }) {
   }
 
   return {
-    THREE, scene, sun, hemi, plazaMarker, sprayMarker, eventMarker, makeMarker, mapCanvas,
+    THREE, scene, sun, hemi, plazaMarker, sprayMarker, eventMarker, makeMarker, makeArrow, mapCanvas,
     aabbs, nearAabbs, hasLOS,
     pedPools, carBody, carCabin, carWheel, carLight, partPool, decalPool, pickPool, bulletPool, gunPool,
     animate, dayNight,

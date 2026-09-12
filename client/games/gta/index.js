@@ -25,7 +25,7 @@ import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute,
 import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T } from './sim.js';
-import { raceCourse, nodeXZ, LAPS, ordinal } from './race.js';
+import { raceCourse, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
@@ -461,6 +461,17 @@ export async function create({ mount, audio, send, hooks }) {
   /* where the route on the minimap, the yellow square and the marker column point: the race's next checkpoint, else my job's
      fare or destination, else the mission's target. { x, z, color, label, marker } or null (`marker`: a column and an edge arrow too). */
   const goalMarker = W.makeMarker(0xf2c014);
+  /* the race's sat-nav: a trail of arrows on the road along the route (race.js raceGuide) and the next turn for the HUD */
+  const guideArrows = Array.from({ length: 40 }, () => W.makeArrow()); let guide = null;
+  function layGuide() {
+    let n = 0; guide = null;
+    if (course && V.me && !V.me.place && !V.subj.dead && V.md.race && V.md.race.state > 0 && route.length && state !== 'over') {
+      const yaw = V.car ? V.car.yaw : camYaw, g = raceGuide(route, V.subj.x, V.subj.z, Math.sin(yaw), Math.cos(yaw)); guide = g.turn;
+      guideArrows[0].material.opacity = 0.55 + Math.sin(roundT * 6) * 0.2;
+      for (const a of g.arrows) { if (n >= guideArrows.length) break; const m = guideArrows[n++]; m.visible = true; m.position.x = a.x; m.position.z = a.z; m.rotation.y = a.yaw; const sc = a.big ? 1.7 : 1; m.scale.set(sc, sc, sc); }
+    }
+    for (; n < guideArrows.length; n++) guideArrows[n].visible = false;
+  }
   function goalOf() {
     const me = V.me, j = me && me.job, jt = j && JOB_TEXT[j.kind];
     if (course && me && !me.place) { const cp = nodeXZ(course[me.next]); return { x: cp.x, z: cp.z, color: 0x2fd0ff, label: me.next === 0 ? 'FINISH' : 'CP ' + me.next, marker: true }; }
@@ -486,6 +497,7 @@ export async function create({ mount, audio, send, hooks }) {
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
     if (routeT <= 0) { routeT = 0.6; const g = goalOf(); route = g ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(g.x, g.z)) : []; routeTarget = g; }
+    layGuide();
     { const g = routeTarget, m = goalMarker; m.visible = !!(g && g.marker); if (m.visible) { m.position.set(g.x, 20, g.z); m.material.color.setHex(g.color); m.rotation.y += dt * 1.2; m.material.opacity = 0.35 + Math.sin(roundT * 4) * 0.15; } }
     areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt; goT -= dt; finishT -= dt;
     if (onGrid()) { const c = Math.ceil(V.md.race.t); if (c !== lastCount && c > 0 && c <= 3) sfx.click(); lastCount = c; } // the countdown beeps
@@ -529,6 +541,26 @@ export async function create({ mount, audio, send, hooks }) {
     const ax = cx + nx * (size / 2 - 14), ay = cy + ny * (size / 2 - 14);
     hctx.fillStyle = '#ff3333'; hctx.beginPath(); hctx.arc(ax, ay, 9, 0, TAU); hctx.fill(); ptext(hctx, 'N', ax, ay - 5, 2, '#ffffff', 'center', false);
     hctx.strokeStyle = '#ffffff'; hctx.lineWidth = 2; hctx.strokeRect(x, y, size, size);
+  }
+  /* the next turn: a chunky arrow (straight, left, right or a U) and the distance, with the road it turns onto under it */
+  function drawTurnArrow(cx, cy, r, kind) {
+    hctx.save(); hctx.translate(cx, cy); hctx.lineCap = 'square'; hctx.lineJoin = 'miter';
+    const head = (px, py, dx, dy) => { const bx = px - dx * r * 0.6, by = py - dy * r * 0.6, sx = -dy * r * 0.6, sy = dx * r * 0.6; hctx.moveTo(bx + sx, by + sy); hctx.lineTo(px, py); hctx.lineTo(bx - sx, by - sy); };
+    const path = () => { hctx.beginPath();
+      if (kind === 'LEFT' || kind === 'RIGHT') { const m = kind === 'LEFT' ? -1 : 1; hctx.moveTo(0, r); hctx.lineTo(0, -r * 0.3); hctx.lineTo(m * r, -r * 0.3); head(m * r, -r * 0.3, m, 0); }
+      else if (kind === 'U-TURN') { hctx.moveTo(r * 0.5, r); hctx.lineTo(r * 0.5, -r * 0.7); hctx.lineTo(-r * 0.5, -r * 0.7); hctx.lineTo(-r * 0.5, r * 0.5); head(-r * 0.5, r * 0.5, 0, 1); }
+      else { hctx.moveTo(0, r); hctx.lineTo(0, -r); head(0, -r, 0, -1); } };
+    path(); hctx.strokeStyle = '#000000'; hctx.lineWidth = r * 0.55; hctx.stroke();
+    path(); hctx.strokeStyle = kind === 'U-TURN' ? '#ff6060' : '#2fd0ff'; hctx.lineWidth = r * 0.28; hctx.stroke();
+    hctx.restore();
+  }
+  function drawGuide(rx, y, s) {
+    const g = guide, r = s * 6, w = s * 86;
+    hctx.fillStyle = 'rgba(0,0,0,0.55)'; hctx.fillRect(rx - w, y, w, r * 2 + s * 4);
+    drawTurnArrow(rx - w + r + s * 3, y + r + s * 2, r, g.kind);
+    const word = g.kind === 'ARRIVE' ? (routeTarget ? routeTarget.label : 'GOAL') : g.kind;
+    ptext(hctx, `${word}  ${Math.round(g.d)} M`, rx - s * 2, y + s * 3, s * 1.1, g.kind === 'U-TURN' ? '#ff6060' : '#ffffff', 'right');
+    ptext(hctx, g.kind === 'ARRIVE' ? 'STRAIGHT ON' : g.street.toUpperCase(), rx - s * 2, y + s * 13, s * 0.75, '#2fd0ff', 'right');
   }
   function bar(x, y, w, h, f, color) { hctx.fillStyle = 'rgba(0,0,0,0.7)'; hctx.fillRect(x - 2, y - 2, w + 4, h + 4); hctx.fillStyle = '#333'; hctx.fillRect(x, y, w, h); hctx.fillStyle = color; hctx.fillRect(x, y, w * clamp(f, 0, 1), h); }
   function drawNames(Wd, Hd, s) {
@@ -591,7 +623,8 @@ export async function create({ mount, audio, send, hooks }) {
     if (race) { // my standing, big, and the lap under it
       ptext(hctx, me.place ? ordinal(me.place) : ordinal(me.rank || racers), rx, y, s * 2.4, me.place || me.rank === 1 ? '#ffe14d' : '#ffffff', 'right'); y += s * 20;
       ptext(hctx, me.place ? 'FINISHED' : `LAP ${Math.min(LAPS, me.lap + 1)}/${LAPS}  ·  CP ${me.next === 0 ? cpN : me.next - 1}/${cpN}`, rx, y, s * 0.9, '#2fd0ff', 'right'); y += s * 9;
-      if (race.state === 2) ptext(hctx, 'RACE ENDS ' + fmtClock(Math.max(0, race.t)), rx, y, s * 0.9, '#ff6060', 'right'); }
+      if (race.state === 2) { ptext(hctx, 'RACE ENDS ' + fmtClock(Math.max(0, race.t)), rx, y, s * 0.9, '#ff6060', 'right'); y += s * 9; }
+      if (guide && !dead) { drawGuide(rx, y, s); y += s * 20; } }
     // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
     { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark;
       hctx.fillStyle = 'rgba(0,0,0,0.5)';

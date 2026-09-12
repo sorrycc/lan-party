@@ -5,7 +5,7 @@
    forms, and the rest are spread around the city at least a few blocks apart, visited in the order they sit around
    their centre so the loop does not cross itself much. A lap is every checkpoint in order and back through the line. */
 import { makeRng } from '../../core/math.js';
-import { X, NB } from './world.js';
+import { X, NB, streetAt } from './world.js';
 
 export const LAPS = 3, CHECKPOINTS = 6;
 export const START_NODE = [3, 8]; // the intersection the grid faces (Ender Ave, heading +z)
@@ -53,3 +53,38 @@ export function gridSlot(i) {
 }
 
 export const ordinal = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'TH' : n % 10 === 1 ? 'ST' : n % 10 === 2 ? 'ND' : n % 10 === 3 ? 'RD' : 'TH');
+
+/* The sat-nav for the route the minimap draws (road nodes from the nearest intersection to the goal), for a driver at
+   (mx, mz) heading along the unit vector (hx, hz): the arrows to lay on the road ahead (breadcrumbs down each leg and a
+   bigger one at each intersection pointing the way out) and the next instruction. Returns { arrows, turn } where
+   arrows is [{ x, z, yaw, big }] and turn is null or { kind, d, street }: kind 'LEFT' | 'RIGHT' | 'U-TURN' at the first
+   intersection that is not straight through, d metres away, onto `street`; or 'ARRIVE' when the goal is straight ahead. */
+export function raceGuide(route, mx, mz, hx, hz, legs = 4, step = 14) {
+  const pts = route.map(([i, j]) => ({ x: X(i), z: X(j) }));
+  const ahead = (x, z, slack) => (x - mx) * hx + (z - mz) * hz > slack;
+  const arrows = []; let turn = null;
+  let k0 = 0; while (k0 < pts.length && !ahead(pts[k0].x, pts[k0].z, -3)) k0++;
+  if (!pts.length) return { arrows, turn };
+  if (k0 >= pts.length) { const p = pts[pts.length - 1]; return { arrows, turn: { kind: 'U-TURN', d: Math.hypot(p.x - mx, p.z - mz), street: streetAt(p.x, p.z) } }; }
+  let prev = k0 > 0 ? pts[k0 - 1] : null;
+  for (let k = k0, n = 0; k < pts.length && n < legs; k++, n++) {
+    const to = pts[k];
+    if (prev) { const dx = to.x - prev.x, dz = to.z - prev.z, len = Math.hypot(dx, dz) || 1, ux = dx / len, uz = dz / len, yaw = Math.atan2(ux, uz);
+      for (let d = step; d < len - 8; d += step) { const x = prev.x + ux * d, z = prev.z + uz * d; if (ahead(x, z, 2)) arrows.push({ x, z, yaw, big: false }); } }
+    const nxt = pts[k + 1];
+    if (nxt) arrows.push({ x: to.x, z: to.z, yaw: Math.atan2(nxt.x - to.x, nxt.z - to.z), big: true });
+    prev = to;
+  }
+  let ix = hx, iz = hz; // the direction we arrive at each intersection from: the heading for the first, the leg before it after that
+  for (let k = k0; k < pts.length; k++) {
+    const p = pts[k];
+    if (k > k0) { const q = pts[k - 1], l = Math.hypot(p.x - q.x, p.z - q.z) || 1; ix = (p.x - q.x) / l; iz = (p.z - q.z) / l; }
+    const d = Math.hypot(p.x - mx, p.z - mz), nxt = pts[k + 1];
+    if (!nxt) { turn = { kind: 'ARRIVE', d, street: streetAt(p.x, p.z) }; break; }
+    const l = Math.hypot(nxt.x - p.x, nxt.z - p.z) || 1, ox = (nxt.x - p.x) / l, oz = (nxt.z - p.z) / l;
+    const dot = ox * ix + oz * iz; if (dot > 0.5) continue; // straight through
+    turn = { kind: dot < -0.5 ? 'U-TURN' : ox * iz - oz * ix > 0 ? 'LEFT' : 'RIGHT', d, street: streetAt((p.x + nxt.x) / 2, (p.z + nxt.z) / 2) };
+    break;
+  }
+  return { arrows, turn };
+}

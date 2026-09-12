@@ -275,7 +275,7 @@ test('the ambulance: the patient lies down, the hospital is the destination, and
 });
 
 /* ---- phase 5: the street race */
-import { raceCourse, nodeXZ, progressOf, gridSlot, LAPS, CHECKPOINTS, START_NODE, CP_RADIUS, ordinal } from '../client/games/gta/race.js';
+import { raceCourse, raceGuide, nodeXZ, progressOf, gridSlot, LAPS, CHECKPOINTS, START_NODE, CP_RADIUS, ordinal } from '../client/games/gta/race.js';
 import { COUNTDOWN_T, RACE_END_T } from '../client/games/gta/sim.js';
 import { NB } from '../client/games/gta/world.js';
 
@@ -434,4 +434,25 @@ test('motorcycles wait parked around the city and by the Ferris wheel, buses rol
   let buses = 0; for (let k = 0; k < 40; k++) { run(sim, 0.5); buses += sim.cars.filter(c => c.type.bus && c.ai === 'traffic').length; if (buses) break; }
   assert.ok(buses > 0, 'a bus in the traffic within twenty seconds');
   assert.equal(sim.debug.MAX_COPS, 24); assert.equal(sim.debug.MAX_COP_CARS, 8); assert.equal(make(2).debug.MAX_COPS, 32);
+});
+
+test('the sat-nav: the first turn on the route, its hand, its distance, and a trail of arrows on the road ahead', () => {
+  const X6 = nodeXZ([6, 6]);
+  // heading +z up avenue 6 from just below node (6,6); the route bends to +x at (6,6) then on to (8,6). Seen from behind a
+  // car heading +z, +x is on the left (the camera looks down -Z, and the LEFT key steers the yaw towards +x): a left turn
+  let g = raceGuide([[6, 6], [7, 6], [8, 6]], X6.x, X6.z - 20, 0, 1);
+  assert.equal(g.turn.kind, 'LEFT'); assert.ok(Math.abs(g.turn.d - 20) < 1e-6, 'the turn is 20 m ahead'); assert.equal(g.turn.street, 'Voxel Blvd', 'onto the cross street, not the avenue we are on');
+  g = raceGuide([[6, 6], [5, 6], [4, 6]], X6.x, X6.z - 20, 0, 1); assert.equal(g.turn.kind, 'RIGHT');
+  // straight on to the goal: no turn, arrive
+  g = raceGuide([[6, 6], [6, 7], [6, 8]], X6.x, X6.z - 20, 0, 1); assert.equal(g.turn.kind, 'ARRIVE'); assert.ok(g.turn.d > 100);
+  // a straight node first, then the turn: the instruction is the turn, two blocks up, and the arrows sit on the legs ahead
+  g = raceGuide([[6, 6], [6, 7], [7, 7]], X6.x, X6.z - 20, 0, 1); assert.equal(g.turn.kind, 'LEFT'); assert.ok(g.turn.d > 70);
+  assert.ok(g.arrows.length > 4, 'a trail'); assert.ok(g.arrows.every(a => a.z > X6.z - 20), 'all of it ahead of the car');
+  const big = g.arrows.filter(a => a.big); assert.equal(big.length, 2, 'one at each intersection with a way out');
+  assert.ok(Math.abs(big[0].yaw) < 1e-6 && Math.abs(big[1].yaw - Math.PI / 2) < 1e-6, 'pointing straight on, then +x');
+  // the whole route behind me: turn around
+  g = raceGuide([[6, 6], [6, 5]], X6.x, X6.z + 20, 0, 1); assert.equal(g.turn.kind, 'U-TURN'); assert.equal(g.arrows.length, 0);
+  // a node just behind still counts as the one I am at, so its way out is the instruction
+  g = raceGuide([[6, 6], [7, 6]], X6.x, X6.z + 1, 0, 1); assert.equal(g.turn.kind, 'LEFT');
+  assert.deepEqual(raceGuide([], 0, 0, 0, 1), { arrows: [], turn: null });
 });
