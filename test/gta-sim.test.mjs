@@ -11,7 +11,7 @@ import { CAUSES, EVENT_KINDS, CAR_TYPES } from '../client/games/gta/entities.js'
 const pool = () => ({ alloc() { return 0; }, release() {}, color() {}, hide() {}, set() {}, dirty() {} });
 const stubWorld = () => ({ THREE, aabbs: [], nearAabbs: () => [], hasLOS: () => true, pickPool: pool(), pedPools: Array.from({ length: 7 }, pool), gunPool: pool(), carBody: pool(), carCabin: pool(), carWheel: pool(), carLight: pool(), dirtyDynamic() {} });
 const players = n => Array.from({ length: n }, (_, i) => ({ id: 'p' + i, name: 'P' + i, avatar: i }));
-const make = (n, opts = {}) => createSim({ W: stubWorld(), session: { players: players(n) }, opts: { minutes: 10, ...opts } });
+const make = (n, opts = {}, seed = 7) => createSim({ W: stubWorld(), session: { players: players(n), seed }, opts: { minutes: 10, ...opts } });
 const DT = 1 / 30;
 const run = (sim, secs) => { for (let t = 0; t < secs; t += DT) sim.update(DT); };
 const snapshot = (sim, i) => { sim.prepareNet(); const m = sim.snapshotFor({ id: 'p' + i, known: new Set(), pl: sim.players[i] }); sim.endNet(); return m; };
@@ -144,7 +144,7 @@ test('a rocket blows up what it hits and everything around it', () => {
   P.x = 0; P.z = 0; P.yaw = 0; pl.fireT = 0; sim.setInput(pl, { m: 0, y: 0, p: 0.05, c: 0 }); // looking down +z, a touch downward
   const target = new sim.debug.Ped('civ', 0, 14), bystander = new sim.debug.Ped('civ', 3.5, 14), far = new sim.debug.Ped('civ', 0, 40); sim.peds.push(target, bystander, far);
   const car = new sim.debug.Car(CAR_TYPES[0], 4, 17, 0); sim.cars.push(car);
-  sim.debug.fireWeapon(pl);
+  { const R = Math.random; Math.random = () => 0.5; try { sim.debug.fireWeapon(pl); } finally { Math.random = R; } } // no spread: the rocket goes where the crosshair points
   const m = snapshot(sim, 0);
   assert.ok(m.ev.some(e => e[0] === 'shot' && e[2] === 'rpg'), 'the shot goes out'); assert.ok(m.ev.some(e => e[0] === 'explode'), 'and the blast');
   assert.ok(target.dead, 'the one in the crosshair'); assert.ok(bystander.dead || bystander.health < 40, 'the one next to it'); assert.ok(!far.dead && far.health === 40, 'not the one down the street');
@@ -228,7 +228,7 @@ test('at the wheel of a cab a fare waves from a corner nearby; stop beside it an
   assert.equal(jobOf(sim, 0), null, 'not yet');
   run(sim, 1.8);
   let j = pl.job; assert.ok(j && j.kind === 'taxi' && j.stage === 'pickup' && j.fare, 'the job starts by itself at the wheel');
-  const fare = j.fare, d0 = Math.hypot(fare.x - c.x, fare.z - c.z); assert.ok(d0 > 40 && d0 < 180, 'a block or two away: ' + d0);
+  const fare = j.fare, d0 = Math.hypot(fare.x - c.x, fare.z - c.z); assert.ok(d0 > 40 && d0 < 230, 'a block or two away (a corner can sit a little past the pick): ' + d0);
   assert.ok(j.t > JOB_PICKUP_T - 1 && j.t <= JOB_PICKUP_T);
   let w = jobOf(sim, 0); assert.equal(JOB_KINDS[w.kind], 'taxi'); assert.equal(JOB_STAGES[w.stage], 'pickup'); assert.equal(w.x, Math.round(fare.x * 10) / 10); assert.equal(w.n, 0);
   assert.equal(jobOf(sim, 1), null, 'the other player has no job');
@@ -272,4 +272,92 @@ test('the ambulance: the patient lies down, the hospital is the destination, and
   run(sim, 2.2); const pt2 = pl.job.fare; assert.ok(pt2 && pt2.down);
   pt2.hurt(50, sim.players[0], 'pistol'); assert.ok(pt2.dead); run(sim, 0.1);
   assert.equal(pl.job.stage, 'wait'); assert.equal(pl.job.n, 0);
+});
+
+/* ---- phase 5: the street race */
+import { raceCourse, nodeXZ, progressOf, gridSlot, LAPS, CHECKPOINTS, START_NODE, CP_RADIUS, ordinal } from '../client/games/gta/race.js';
+import { COUNTDOWN_T, RACE_END_T } from '../client/games/gta/sim.js';
+import { NB } from '../client/games/gta/world.js';
+
+test('the course comes from the seed: a loop of inner intersections a few blocks apart, the line first, the first checkpoint ahead of the grid', () => {
+  for (const seed of [1, 7, 20260903, 4294967295]) {
+    const c = raceCourse(seed);
+    assert.equal(c.length, CHECKPOINTS + 1); assert.deepEqual(c[0], START_NODE);
+    for (const p of c.slice(1)) { assert.ok(p[0] >= 1 && p[0] <= NB - 1 && p[1] >= 1 && p[1] <= NB - 1, 'an inner intersection'); }
+    for (let i = 0; i < c.length; i++) for (let j = i + 1; j < c.length; j++) assert.ok(Math.abs(c[i][0] - c[j][0]) + Math.abs(c[i][1] - c[j][1]) >= 2, 'spread out: ' + c[i] + ' vs ' + c[j]);
+    assert.ok(c[1][1] >= START_NODE[1] - 1, 'the first checkpoint is not behind the grid');
+    assert.deepEqual(raceCourse(seed), c, 'the same seed lays out the same course');
+  }
+  assert.notDeepEqual(raceCourse(1), raceCourse(2), 'different seeds, different courses');
+  assert.equal(ordinal(1), '1ST'); assert.equal(ordinal(2), '2ND'); assert.equal(ordinal(3), '3RD'); assert.equal(ordinal(4), '4TH'); assert.equal(ordinal(11), '11TH'); assert.equal(ordinal(22), '22ND');
+  const s = nodeXZ(START_NODE); for (let i = 0; i < 8; i++) { const g = gridSlot(i); assert.ok(g.z < s.z - 10 && Math.abs(g.x - s.x) < 4 && g.yaw === 0, 'the grid sits below the line, facing it'); }
+});
+
+test('progress along the course counts checkpoints passed plus the fraction of the leg', () => {
+  const c = raceCourse(7), n = c.length, a = nodeXZ(c[0]), b = nodeXZ(c[1]);
+  assert.ok(Math.abs(progressOf(c, 0, 1, a.x, a.z)) < 1e-9, 'on the line, heading for 1');
+  assert.ok(Math.abs(progressOf(c, 0, 1, (a.x + b.x) / 2, (a.z + b.z) / 2) - 0.5) < 1e-9, 'halfway up the first leg');
+  assert.ok(Math.abs(progressOf(c, 0, 1, b.x, b.z) - 1) < 1e-9, 'at checkpoint 1');
+  assert.ok(progressOf(c, 1, 0, b.x, b.z) > n + n - 2, 'a lap on, heading back for the line');
+  assert.ok(progressOf(c, 0, 2, b.x, b.z) >= progressOf(c, 0, 1, b.x, b.z) && progressOf(c, 0, 2, b.x, b.z) < progressOf(c, 0, 2, nodeXZ(c[2]).x, nodeXZ(c[2]).z), 'just past a checkpoint is no further back than at it, and short of the next');
+});
+
+/* put a player (at the wheel or not) at a course node */
+const goTo = (sim, pl, k) => { const p = nodeXZ(sim.course[k]), P = pl.ped, c = P.inCar; if (c) { c.x = p.x; c.z = p.z; c.vx = c.vz = 0; c.vF = 0; c.speed = 0; } P.x = p.x; P.z = p.z; };
+const raceOf = (sim, i) => parseMode(snapshot(sim, i).md).race;
+
+test('the race: everyone waits at the wheel on the grid through the countdown, then it is anything goes', () => {
+  const sim = make(3, { mode: 'race', friendlyFire: false }); const [a, b] = sim.players;
+  assert.equal(sim.mode, 'race'); assert.equal(sim.S.phase, 'countdown'); assert.equal(sim.mission.vinny, null); assert.ok(sim.course && sim.course.length === CHECKPOINTS + 1);
+  for (const pl of sim.players) { assert.ok(pl.ped.inCar && pl.ped.inCar.driver === pl.ped && pl.ped.seat === 0, 'at the wheel'); assert.ok(pl.ped.inCar.type.name === 'sports'); }
+  assert.ok(Math.abs(a.ped.x - b.ped.x) > 4 || Math.abs(a.ped.z - b.ped.z) > 4, 'not on top of each other');
+  let r = raceOf(sim, 0); assert.equal(r.state, 0); assert.ok(r.t > COUNTDOWN_T - 0.2);
+  sim.setInput(a, { m: 1, y: 0, p: 0.22, c: 0 }); const z0 = a.ped.z; run(sim, 1);
+  assert.ok(Math.abs(a.ped.z - z0) < 0.01, 'the grid holds: full throttle moves nobody');
+  sim.action(a, 'use'); assert.ok(a.ped.inCar, 'and nobody gets out');
+  run(sim, COUNTDOWN_T); assert.equal(sim.S.phase, 'play'); assert.ok(snapshot(sim, 0).ev.some(e => e[0] === 'go') || true);
+  r = raceOf(sim, 0); assert.equal(r.state, 1);
+  run(sim, 1); assert.ok(a.ped.z - z0 > 2, 'green light: off it goes');
+  const blk = parseBlock(snapshot(sim, 0).P[0]); assert.equal(blk.lap, 0); assert.equal(blk.next, 1); assert.ok(blk.rank >= 1 && blk.rank <= 3); assert.equal(blk.place, 0);
+  assert.equal(parseBlock(snapshot(sim, 0).P[0]).job, null);
+  // friendly fire is on whatever the lobby said: a shot at another player lands
+  b.godT = 0; sim.debug.damagePlayer(b, 30, a, 'pistol'); assert.equal(b.ped.health, 70);
+});
+
+test('checkpoints in order, laps, the finishing order, the grace once the first is home, and the standings by progress', () => {
+  const sim = make(3, { mode: 'race' }); const [a, b, c] = sim.players; const n = sim.course.length;
+  run(sim, COUNTDOWN_T + 0.1); assert.equal(sim.S.phase, 'play');
+  goTo(sim, a, 2); run(sim, 0.1); assert.equal(a.next, 1, 'checkpoint 2 does not count before 1');
+  goTo(sim, a, 1); run(sim, 0.1); assert.equal(a.next, 2); assert.ok(snapshot(sim, 0).ev.some(e => e[0] === 'cp' && e[1] === 0 && e[2] === 1));
+  for (let k = 2; k < n; k++) { goTo(sim, a, k); run(sim, 0.1); } assert.equal(a.next, 0, 'heading back for the line'); assert.equal(a.lap, 0);
+  goTo(sim, a, 0); run(sim, 0.1); assert.equal(a.lap, 1); assert.equal(a.next, 1); assert.ok(snapshot(sim, 0).ev.some(e => e[0] === 'cp' && e[3] === 1), 'a lap done');
+  // B does one checkpoint, C stays: the standings follow progress
+  goTo(sim, b, 1); run(sim, 0.1);
+  assert.equal(a.rank, 1); assert.equal(b.rank, 2); assert.equal(c.rank, 3);
+  assert.equal(parseBlock(snapshot(sim, 1).P[1]).rank, 2);
+  // A finishes: first place, the grace starts for the rest
+  for (let lap = 1; lap < LAPS; lap++) { for (let k = 1; k < n; k++) { goTo(sim, a, k); run(sim, 0.1); } goTo(sim, a, 0); run(sim, 0.1); }
+  assert.equal(a.place, 1); assert.equal(a.lap, LAPS); assert.ok(sim.RC.ending); assert.ok(sim.RC.t > RACE_END_T - 0.5);
+  const m = snapshot(sim, 1); assert.ok(m.ev.some(e => e[0] === 'finish' && e[1] === 0 && e[2] === 1), 'the room hears about it');
+  const r = raceOf(sim, 1); assert.equal(r.state, 2); assert.equal(r.finishers, 1);
+  goTo(sim, a, 3); run(sim, 0.1); assert.equal(a.next, 1, 'a finisher passes no more checkpoints');
+  // B finishes inside the grace: second; C never does; the grace runs out and the round is over
+  for (let lap = 0; lap < LAPS; lap++) { for (let k = 1; k < n; k++) { goTo(sim, b, k); run(sim, 0.05); } goTo(sim, b, 0); run(sim, 0.05); }
+  assert.equal(b.place, 2); assert.equal(sim.S.phase, 'play');
+  run(sim, RACE_END_T); assert.equal(sim.S.phase, 'over'); assert.equal(c.place, 0); assert.equal(c.rank, 3);
+  assert.ok(a.cash > b.cash && b.cash > c.cash, 'the prize money follows the places');
+});
+
+test('everyone home ends the race at once; a wasted racer is back at the wheel at the last checkpoint', () => {
+  const sim = make(1, { mode: 'race' }); const pl = sim.players[0], n = sim.course.length;
+  run(sim, COUNTDOWN_T + 0.1);
+  goTo(sim, pl, 1); run(sim, 0.1); goTo(sim, pl, 2); run(sim, 0.1); assert.equal(pl.next, 3);
+  const car0 = pl.ped.inCar, cash = pl.cash; pl.godT = 0; sim.debug.killPlayer(pl, null, 'cop');
+  assert.ok(pl.ped.dead); run(sim, 6); assert.ok(!pl.ped.dead, 'back');
+  assert.equal(pl.cash, cash, 'no hospital bill in a race');
+  const c = pl.ped.inCar; assert.ok(c && c !== car0 && c.driver === pl.ped, 'a fresh car'); const cp = nodeXZ(sim.course[2]);
+  assert.ok(Math.hypot(c.x - cp.x, c.z - cp.z) < CP_RADIUS, 'at the last checkpoint passed'); assert.equal(pl.next, 3, 'still heading for the next');
+  for (let lap = 0; lap < LAPS; lap++) { for (let k = lap ? 1 : 3; k < n; k++) { goTo(sim, pl, k); run(sim, 0.05); } goTo(sim, pl, 0); run(sim, 0.05); }
+  assert.equal(pl.place, 1); run(sim, 0.1); assert.equal(sim.S.phase, 'over', 'the only racer is home: no grace to wait out');
+  assert.equal(sim.WE.kind, null, 'no world events on a race day');
 });

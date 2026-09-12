@@ -11,9 +11,11 @@ export const INTERP = 0.08;
 /* the per-player block the host packs in sim.js (`block`) */
 export const parseBlock = b => ({ pedId: b[0], health: b[1], wanted: b[2], cash: b[3], kills: b[4], curW: b[5], ammo: b[6], reserve: b[7], reloadT: b[8], dead: !!b[9], wastedT: b[10], carId: b[11], hint: b[12], camPitch: b[13], god: !!b[14], gone: !!b[15], ack: b[16] | 0,
   killer: b[17] === undefined ? -1 : b[17], cause: b[18] | 0, markT: b[19] || 0, owned: b[20] === undefined ? 7 : b[20], seat: b[21] | 0,
-  job: b[22] ? { kind: b[22], stage: b[23] | 0, x: b[24], z: b[25], t: b[26] || 0, n: b[27] | 0 } : null }); // job: the taxi fare / ambulance patient I am on (JOB_KINDS, JOB_STAGES, the target, seconds left, the streak)
-/* the shared mode state the host packs (`modeState`): { mode index, the mark's player index, seconds held, the world event or null } */
-export const parseMode = m => m ? { mode: m[0] | 0, mark: m[1], markT: m[2] || 0, we: m[3] ? { kind: m[3][0], x: m[3][1], z: m[3][2], t: m[3][3], landed: !!m[3][4] } : null } : { mode: 0, mark: -1, markT: 0, we: null };
+  lap: b[22] | 0, next: b[23] === undefined ? 1 : b[23], rank: b[24] | 0, place: b[25] | 0, // the race: laps done, the checkpoint I head for, my standing, my finishing place (0 = still racing)
+  job: b[26] ? { kind: b[26], stage: b[27] | 0, x: b[28], z: b[29], t: b[30] || 0, n: b[31] | 0 } : null }); // job (last, it is variable): the taxi fare / ambulance patient I am on (JOB_KINDS, JOB_STAGES, the target, seconds left, the streak)
+/* the shared mode state the host packs (`modeState`): { mode index, the mark's player index, seconds held, the world event or null, the race or null } */
+export const parseMode = m => m ? { mode: m[0] | 0, mark: m[1], markT: m[2] || 0, we: m[3] ? { kind: m[3][0], x: m[3][1], z: m[3][2], t: m[3][3], landed: !!m[3][4] } : null,
+  race: m[4] ? { state: m[4][0] | 0, t: m[4][1] || 0, finishers: m[4][2] | 0 } : null } : { mode: 0, mark: -1, markT: 0, we: null, race: null };
 
 export function createRemote({ W }) {
   const ents = new Map();

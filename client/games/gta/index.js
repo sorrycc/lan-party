@@ -24,7 +24,8 @@ import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL } from './sim.js';
+import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T } from './sim.js';
+import { raceCourse, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
@@ -32,6 +33,7 @@ import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
 const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_PER_S} a second to whoever holds it, and whoever kills them takes it, plus a $${MARK_BOUNTY} bounty.`;
+const BRIEF_RACE = `${LAPS} laps through the checkpoints and back across the line. Anything goes: guns, traffic, cops. The first one home gives the rest ${RACE_END_T} seconds.`;
 /* what the death card says for each CAUSES entry; a name is filled in when a player did it */
 const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
 const PICK_TEXT = { sniper: 'SNIPER RIFLE', rpg: 'ROCKET LAUNCHER' };
@@ -157,6 +159,7 @@ export async function create({ mount, audio, send, hooks }) {
   let dmgFlash = 0, wantedFlash = 0, areaT = 0, curDistrict = '', curStreet = '', routeT = 0, route = [], routeTarget = null, wasDead = false;
   const floats = [];
   let clicks = 0, fireHeld = false, netAcc = 0, lastIn = null, sinceIn = 0, pred = null, localFireT = 0, localArm = 0;
+  let course = null, goT = 0, lastCount = -1, finishT = 0; // the race: the checkpoints (from the seed), the GO! flash, the last countdown number heard, the "you finished" flash
   const timing = { frame: 0, sim: 0, render: 0, hud: 0 };
   const net = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, at: 0, hostFps: 0 };
   let showStats = false, quality = 0, autoQuality = true, lowFpsT = 0;
@@ -176,6 +179,7 @@ export async function create({ mount, audio, send, hooks }) {
   /* the view model the camera, HUD and audio read; filled from the sim (host) or the snapshot store (client) */
   const V = { me: null, subj: { x: 0, y: 0, z: 0, inCar: null, dead: false }, car: null, timeLeft: -1, phase: 0, ms: 0, vin: null, cops: [], players: [], blocks: [], md: parseMode(null) };
   const modeName = () => MODES[V.md.mode] || 'sandbox';
+  const onGrid = () => !!(V.md.race && V.md.race.state === 0); // the race countdown: nobody moves, so the client does not predict a move either
   const playerColor = i => (AVATARS[(session.players[i] || {}).avatar] || AVATARS[0]).color;
   function hostView() {
     const P = me.ped;
@@ -234,6 +238,11 @@ export async function create({ mount, audio, send, hooks }) {
       case 'wevent': { floatText(ev[4], 0x3dff7a); sfx.cleared(); break; }
       case 'job': if (mine(ev[1])) { const w = ev[2]; if (w === 'paid') sfx.cash(); else if (w === 'fail') sfx.wanted(); else if (w === 'pickup') sfx.enter(); else if (w === 'start' || w === 'fare') sfx.pickup(); } break;
       case 'wland': { const [, x, z] = ev; if (near(x, z)) { fx.burst.dust(x, 0.5, z); fx.burst.crash(x, 1, z, 10); } sfx.crash(vol(x, z, 200)); break; }
+      case 'go': { goT = 1.2; sfx.passed(); break; }
+      case 'cp': if (mine(ev[1])) { const [, , passed, lap] = ev, n = course ? course.length : 1, k = passed % n; sfx.pickup();
+        floatText(k === 0 ? (lap >= LAPS - 1 ? 'FINAL LAP' : 'LAP ' + (lap + 1) + ' OF ' + LAPS) : 'CHECKPOINT ' + k + ' OF ' + (n - 1), 0x2fd0ff); } break;
+      case 'finish': { const [, who, place] = ev; if (mine(who)) { finishT = 4; sfx.passed(); floatText('YOU FINISHED ' + ordinal(place), 0xffe14d); }
+        else { floatText(nameOf(who) + ' FINISHED ' + ordinal(place), 0xffe14d); if (place === 1) { floatText('THE RACE ENDS IN ' + RACE_END_T + ' SECONDS', 0xff6060); sfx.wanted(); } } break; }
     }
   }
 
@@ -292,7 +301,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
   function readInput() {
     let m = 0, x = 0, z = 0;
-    if (state === 'play') {
+    if (state === 'play' && !onGrid()) {
       if (held.up) m |= IN.UP; if (held.down) m |= IN.DOWN; if (held.left) m |= IN.LEFT; if (held.right) m |= IN.RIGHT; if (held.sprint) m |= IN.SPRINT; if (held.space || (jumpS && jumpS.held)) m |= IN.SPACE; if (fireHeld) m |= IN.FIRE;
       if (touch) { stickAxes(axes); x = axes.x; z = axes.z; if (axes.sprint) m |= IN.SPRINT; }
     }
@@ -365,7 +374,7 @@ export async function create({ mount, audio, send, hooks }) {
     const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY', tap = touch ? 'TAP' : 'CLICK';
     if (kind === 'grab') {
       ov.title.innerHTML = 'FABLE THEFT AUTO <b>5.1</b>'; ov.sub.textContent = `LOS PIXELES  ·  ${tap} TO PLAY`;
-      const f = document.createElement('div'); f.textContent = modeName() === 'mostWanted' ? 'MOST WANTED: CARRY THE MARK, HUNT THE MARK' : 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
+      const f = document.createElement('div'); f.textContent = modeName() === 'mostWanted' ? 'MOST WANTED: CARRY THE MARK, HUNT THE MARK' : modeName() === 'race' ? `STREET RACE: ${LAPS} LAPS, ANYTHING GOES` : 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
     } else if (kind === 'paused') {
       ov.title.textContent = 'PAUSED'; ov.sub.textContent = (online ? 'THE CITY KEEPS RUNNING WITHOUT YOU  ·  ' : '') + `${tap} TO RESUME`;
       button('RESUME', 'good', grab);
@@ -375,10 +384,12 @@ export async function create({ mount, audio, send, hooks }) {
       button(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { showStats = !showStats; showOverlay('paused'); });
       if (restart) { button(!online ? 'RESTART' : 'RESTART FOR EVERYONE', '', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
     } else {
-      const mw = modeName() === 'mostWanted';
-      ov.title.textContent = "TIME'S UP"; ov.sub.textContent = 'FINAL STANDINGS  ·  MOST CASH WINS';
-      const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) })).sort((a, c) => (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
-      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td><td class="n cash">$${r.b.cash}</td><td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
+      const mw = modeName() === 'mostWanted', race = modeName() === 'race', n = course ? course.length : 1;
+      ov.title.textContent = race ? 'RACE OVER' : "TIME'S UP"; ov.sub.textContent = race ? 'FINAL STANDINGS  ·  FIRST ACROSS THE LINE WINS' : 'FINAL STANDINGS  ·  MOST CASH WINS';
+      const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) }))
+        .sort((a, c) => race ? ((a.b.rank || 99) - (c.b.rank || 99)) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
+      const raceCell = b => b.place ? `<td class="n mark">FINISHED ${ordinal(b.place)}</td>` : `<td class="n">LAP ${Math.min(LAPS, b.lap + 1)}/${LAPS}  ·  CP ${b.next === 0 ? n - 1 : b.next - 1}/${n - 1}</td>`;
+      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
       if (restart) { button('PLAY AGAIN', 'primary', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
       else ov.foot.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
     }
@@ -422,7 +433,7 @@ export async function create({ mount, audio, send, hooks }) {
     const me = V.me; aimLock = false;
     if (!canShoot(me) || state !== 'play' || !(isHost ? sim : remote)) return;
     const w = WEAPONS[me.curW], list = isHost ? sim.peds : remote.ents.values(), ox = cam.x, oy = cam.y, oz = cam.z, vx = cam.dx, vy = cam.dy, vz = cam.dz;
-    const friendly = modeName() === 'mostWanted' || !session || !session.opts || session.opts.friendlyFire !== false;
+    const friendly = modeName() !== 'sandbox' || !session || !session.opts || session.opts.friendlyFire !== false; // the mark is hunted, and a race is anything goes
     let best = 1e9;
     for (const p of list) { if (p.cls !== 'ped' || p.id === me.pedId || p.dead || p.inCar || p.released || (!friendly && p.kind === 'player')) continue;
       const ddx = p.x - ox, ddz = p.z - oz; if (ddx * ddx + ddz * ddz > w.range * w.range) continue;
@@ -447,14 +458,15 @@ export async function create({ mount, audio, send, hooks }) {
     if (P) { line1 = (cause === 'runover' ? 'RUN OVER BY ' : cause === 'explosion' ? 'BLOWN UP BY ' : 'WASTED BY ') + P.name.toUpperCase(); line2 = (CAUSE_TEXT[cause] && cause !== 'runover' && cause !== 'explosion' ? CAUSE_TEXT[cause] + '  ·  ' : '') + dist + ' M'; }
     death = { killer: P ? k : -1, line1, line2, t: 0 };
   }
-  /* where the route on the minimap, the yellow square and the marker column point: my job's fare or destination first, else the
-     mission's target. { x, z, color, label, job } or null. */
-  const jobMarker = W.makeMarker(0xf2c014);
+  /* where the route on the minimap, the yellow square and the marker column point: the race's next checkpoint, else my job's
+     fare or destination, else the mission's target. { x, z, color, label, marker } or null (`marker`: a column and an edge arrow too). */
+  const goalMarker = W.makeMarker(0xf2c014);
   function goalOf() {
     const me = V.me, j = me && me.job, jt = j && JOB_TEXT[j.kind];
-    if (j && jt && j.stage > 0) return { x: j.x, z: j.z, color: jt.color, label: j.stage === 1 ? jt.who : 'DROP OFF', job: true };
+    if (course && me && !me.place) { const cp = nodeXZ(course[me.next]); return { x: cp.x, z: cp.z, color: 0x2fd0ff, label: me.next === 0 ? 'FINISH' : 'CP ' + me.next, marker: true }; }
+    if (j && jt && j.stage > 0) return { x: j.x, z: j.z, color: jt.color, label: j.stage === 1 ? jt.who : 'DROP OFF', marker: true };
     const ms = MISSION_STATES[V.ms]; const tgt = ms === 'goto' || ms === 'intro' ? PLAZA : ms === 'hit' && V.vin ? V.vin : null;
-    return tgt ? { x: tgt.x, z: tgt.z, color: 0xffe14d, label: 'TARGET', job: false } : null;
+    return tgt ? { x: tgt.x, z: tgt.z, color: 0xffe14d, label: 'TARGET', marker: false } : null;
   }
   function localFrame(dt) {
     if (lockPending > 0) { lockPending -= dt; if (lockPending <= 0 && !document.pointerLockElement && state === 'play') fallbackMouse = true; }
@@ -474,8 +486,9 @@ export async function create({ mount, audio, send, hooks }) {
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
     if (routeT <= 0) { routeT = 0.6; const g = goalOf(); route = g ? bfsRoute(nearestNode(V.subj.x, V.subj.z), nearestNode(g.x, g.z)) : []; routeTarget = g; }
-    { const g = routeTarget, m = jobMarker; m.visible = !!(g && g.job); if (m.visible) { m.position.set(g.x, 20, g.z); m.material.color.setHex(g.color); m.rotation.y += dt * 1.2; m.material.opacity = 0.35 + Math.sin(roundT * 4) * 0.15; } }
-    areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt;
+    { const g = routeTarget, m = goalMarker; m.visible = !!(g && g.marker); if (m.visible) { m.position.set(g.x, 20, g.z); m.material.color.setHex(g.color); m.rotation.y += dt * 1.2; m.material.opacity = 0.35 + Math.sin(roundT * 4) * 0.15; } }
+    areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt; goT -= dt; finishT -= dt;
+    if (onGrid()) { const c = Math.ceil(V.md.race.t); if (c !== lastCount && c > 0 && c <= 3) sfx.click(); lastCount = c; } // the countdown beeps
     if (autoQuality && state === 'play' && roundT > 4) { if (fps < 40) { lowFpsT += dt; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; floatText('LOW FRAME RATE: ' + QUALITY[quality].name + ' DETAIL', 0x9fb4dc); } } else lowFpsT = 0; }
     for (let k = floats.length - 1; k >= 0; k--) { floats[k].t += dt; if (floats[k].t > 2.5) floats.splice(k, 1); }
     if (V.phase === 1 && state !== 'over') showOver();
@@ -493,6 +506,10 @@ export async function create({ mount, audio, send, hooks }) {
     if (route.length > 1) { hctx.strokeStyle = '#d64fd6'; hctx.lineWidth = 4; hctx.beginPath(); hctx.moveTo(wx(me.x), wx(me.z));
       for (const [i, j] of route) hctx.lineTo(wx(X(i)), wx(X(j))); if (routeTarget) hctx.lineTo(wx(routeTarget.x), wx(routeTarget.z)); hctx.stroke(); }
     if (routeTarget) { hctx.fillStyle = hex(routeTarget.color); hctx.fillRect(wx(routeTarget.x) - 6, wx(routeTarget.z) - 6, 12, 12); }
+    if (course) { const next = V.me ? V.me.next : 1; // the course: numbered rings, the next one filled and blinking, the line a flag
+      course.forEach((node, k) => { const p = nodeXZ(node), px = wx(p.x), pz = wx(p.z), isNext = k === next && V.me && !V.me.place;
+        hctx.beginPath(); hctx.arc(px, pz, 8, 0, TAU); hctx.fillStyle = isNext ? (Math.floor(t * 4) % 2 ? '#2fd0ff' : '#ffffff') : 'rgba(0,0,0,0.5)'; hctx.fill(); hctx.strokeStyle = '#2fd0ff'; hctx.lineWidth = 2; hctx.stroke();
+        ptext(hctx, k === 0 ? 'F' : String(k), px, pz - 3.5, 1.5, isNext ? '#000000' : '#ffffff', 'center', false); }); }
     { const tx = wx(TAXI_RANK.x + 3), tz = wx(TAXI_RANK.z); hctx.fillStyle = '#f2c014'; hctx.fillRect(tx - 6, tz - 6, 12, 12); ptext(hctx, 'T', tx, tz - 3.5, 1.5, '#000000', 'center', false); } // the taxi rank
     hctx.fillStyle = '#ffffff'; hctx.fillRect(wx(HOSPITAL.x) - 6, wx(HOSPITAL.z - 10) - 6, 12, 12); hctx.fillStyle = '#e02020'; hctx.fillRect(wx(HOSPITAL.x) - 4, wx(HOSPITAL.z - 10) - 1.5, 8, 3); hctx.fillRect(wx(HOSPITAL.x) - 1.5, wx(HOSPITAL.z - 10) - 4, 3, 8);
     // the Pay 'n' Spray (cyan, a spray can) and the precinct door (blue, a badge)
@@ -540,7 +557,7 @@ export async function create({ mount, audio, send, hooks }) {
     };
     for (let i = 0; i < V.players.length; i++) { const p = V.players[i]; if (p.me || p.gone || p.dead) continue; const isMark = i === mk; one(p.x, p.y, p.z, isMark ? 0xffe14d : p.color, isMark ? 'MARK ' + p.name : p.name, isMark); }
     if (we) one(we.x, 0, we.z, 0x3dff7a, EVENT_TEXT[we.kind] || 'EVENT', true);
-    if (routeTarget && routeTarget.job) one(routeTarget.x, 0, routeTarget.z, routeTarget.color, routeTarget.label, true);
+    if (routeTarget && routeTarget.marker) one(routeTarget.x, 0, routeTarget.z, routeTarget.color, routeTarget.label, true);
   }
   function drawHUD() {
     const Wd = innerWidth, Hd = innerHeight; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
@@ -569,19 +586,31 @@ export async function create({ mount, audio, send, hooks }) {
     ptext(hctx, w.name, rx, y, s * 0.8, '#bbbbbb', 'right'); y += s * 9;
     for (let k = 0; k < WEAPONS.length; k++) { const owned = me.owned & (1 << k); ptext(hctx, String(k + 1), rx - (WEAPONS.length - 1 - k) * s * 8, y, s * 0.9, k === me.curW ? '#ffe14d' : owned ? '#ffffff' : 'rgba(255,255,255,0.2)', 'right'); } y += s * 9; // the weapons I carry, by their key
     ptext(hctx, 'KILLS ' + me.kills, rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
-    if (V.timeLeft >= 0) ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right');
+    if (V.timeLeft >= 0) { ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right'); y += s * 10; }
+    const race = course && V.md.race, racers = V.players.filter(p => !p.gone).length, cpN = course ? course.length - 1 : 0;
+    if (race) { // my standing, big, and the lap under it
+      ptext(hctx, me.place ? ordinal(me.place) : ordinal(me.rank || racers), rx, y, s * 2.4, me.place || me.rank === 1 ? '#ffe14d' : '#ffffff', 'right'); y += s * 20;
+      ptext(hctx, me.place ? 'FINISHED' : `LAP ${Math.min(LAPS, me.lap + 1)}/${LAPS}  ·  CP ${me.next === 0 ? cpN : me.next - 1}/${cpN}`, rx, y, s * 0.9, '#2fd0ff', 'right'); y += s * 9;
+      if (race.state === 2) ptext(hctx, 'RACE ENDS ' + fmtClock(Math.max(0, race.t)), rx, y, s * 0.9, '#ff6060', 'right'); }
     // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
     { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark;
       hctx.fillStyle = 'rgba(0,0,0,0.5)';
-      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
+      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(race ? BRIEF_RACE : mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
       const job = me.job, jt = job && JOB_TEXT[job.kind];
-      const objective = jt ? (job.stage === 0 ? `A ${jt.who.toLowerCase()} is on the way.` : job.stage === 1 ? `Pick up the ${jt.who.toLowerCase()} on ${streetAt(job.x, job.z)}.` : `Take the ${jt.who.toLowerCase()} to ${job.kind === 2 ? 'the hospital' : streetAt(job.x, job.z)}.`) + (job.stage > 0 ? '  ' + fmtClock(job.t) : '') + (job.n ? `  ·  ${job.n} in a row` : '')
+      const objective = race ? (race.state === 0 ? 'On the grid. Wait for the green.' : me.place ? `You finished ${ordinal(me.place).toLowerCase()}. ${race.finishers < racers ? 'The rest have ' + Math.ceil(Math.max(0, race.t)) + ' s.' : ''}`
+          : `${me.next === 0 ? 'Back across the line' : 'Checkpoint ' + me.next + ' of ' + cpN}, ${streetAt(routeTarget ? routeTarget.x : 0, routeTarget ? routeTarget.z : 0)}.  ${ordinal(me.rank || racers)} of ${racers}.`)
+        : jt ? (job.stage === 0 ? `A ${jt.who.toLowerCase()} is on the way.` : job.stage === 1 ? `Pick up the ${jt.who.toLowerCase()} on ${streetAt(job.x, job.z)}.` : `Take the ${jt.who.toLowerCase()} to ${job.kind === 2 ? 'the hospital' : streetAt(job.x, job.z)}.`) + (job.stage > 0 ? '  ' + fmtClock(job.t) : '') + (job.n ? `  ·  ${job.n} in a row` : '')
         : !mw ? OBJECTIVES[ms] : mk < 0 ? 'The mark is drawn in a moment. Find a car.' : mk === myIdx ? `You are the mark. Stay alive: +$${MARK_CASH_PER_S} a second.` : `Hunt ${nameOf(mk)}. The kill pays $${MARK_BOUNTY} and the mark.`;
       const objLines = wrapText('> ' + objective, Math.floor(tw / (6 * s * 0.9)));
       hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
-      ptext(hctx, jt ? jt.title : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
+      ptext(hctx, race ? 'STREET RACE' : jt ? jt.title : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
       for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
-      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
+      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; } }
+    // the race: the countdown on the grid, GO!, and the finish flash
+    if (race && race.state === 0) { const c = Math.ceil(race.t); hctx.fillStyle = 'rgba(0,0,0,0.35)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
+      ptext(hctx, c > 3 ? 'ON THE GRID' : String(c), Wd / 2, Hd * 0.36, c > 3 ? s * 2.5 : s * 6, c > 3 ? '#ffe14d' : c === 1 ? '#ff6060' : '#ffffff', 'center'); ptext(hctx, `${LAPS} LAPS  ·  ${cpN} CHECKPOINTS  ·  ANYTHING GOES`, Wd / 2, Hd * 0.36 + s * (c > 3 ? 26 : 50), s * 1.1, '#ffffff', 'center'); }
+    else if (goT > 0) { hctx.globalAlpha = clamp(goT, 0, 1); ptext(hctx, 'GO!', Wd / 2, Hd * 0.34, s * 6, '#3dff7a', 'center'); hctx.globalAlpha = 1; }
+    if (finishT > 0 && me.place) { hctx.globalAlpha = clamp(finishT, 0, 1); hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3); ptext(hctx, ordinal(me.place), Wd / 2, Hd * 0.36, s * 5, '#ffe14d', 'center'); ptext(hctx, me.place === 1 ? 'FIRST ACROSS THE LINE' : 'ACROSS THE LINE', Wd / 2, Hd * 0.36 + s * 44, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     // the world event banner, under the wanted flash
     if (V.md.we) { const e = V.md.we, left = fmtClock(Math.max(0, e.t)), txt = e.kind === 1 ? (e.landed ? 'AIRDROP DOWN  ·  ' + left : 'AIRDROP LANDS IN ' + Math.ceil(Math.max(0, e.t - (AIRDROP_T - AIRDROP_FALL)))) : (e.landed ? 'TRUCK OPEN  ·  ' + left : 'ARMORED TRUCK  ·  ' + left);
       ptext(hctx, txt, Wd / 2, T + s * 2, s * 0.9, '#3dff7a', 'center'); }
@@ -591,7 +620,7 @@ export async function create({ mount, audio, send, hooks }) {
     const hint = (touch ? HINT_TOUCH : HINT)[me.hint] || '';
     if (hint && !dead && state === 'play') ptext(hctx, hint, Wd / 2, B - s * 12 + 4, s, '#ffffff', 'center');
     // centre messages
-    if ((MISSION_STATES[V.ms] === 'intro' || modeName() === 'mostWanted') && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1); const mw = modeName() === 'mostWanted';
+    if ((MISSION_STATES[V.ms] === 'intro' || modeName() === 'mostWanted') && !course && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1); const mw = modeName() === 'mostWanted';
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
       ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, 'WANTED LEVEL ' + '*'.repeat(me.wanted), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
@@ -681,7 +710,8 @@ export async function create({ mount, audio, send, hooks }) {
       if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
-    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false; jobMarker.visible = false; routeTarget = null;
+    course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; goT = 0; lastCount = -1; finishT = 0; // the course comes from the seed on every machine
+    root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
   }
   function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); tc.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }

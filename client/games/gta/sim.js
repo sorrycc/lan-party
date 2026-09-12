@@ -12,6 +12,7 @@ import { AVATARS } from '../../core/avatars.js';
 import { PI, TAU, dist2, angDiff, X, NB, HALF, ROAD, PITCH, SW, LANE, PARK, cellOf, inCity, BEACH_Z1, groundY, PLAZA, HOSPITAL, POLICE, POLICE_DOOR, SPRAY, FERRIS, TAXI_RANK, cornerXZ, nearestNode, streetAt, districtAt, rayAabb, raySphere, computeCamera } from './world.js';
 import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK_COLOR, PICK_KINDS, CAUSES, EVENT_KINDS, JOB_KINDS, JOB_STAGES } from './entities.js';
 import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar } from './motion.js';
+import { raceCourse, nodeXZ, progressOf, gridSlot, LAPS, CP_RADIUS } from './race.js';
 export { IN };
 
 const rnd = Math.random;
@@ -28,9 +29,11 @@ export const INTRO_T = 5.5;
    a touch player aiming with a thumb gets a wider cone. The HUD uses the same rule to colour the crosshair. */
 export const aimTol = (d, assist) => assist ? Math.max(0.16, Math.atan(2.4 / d)) : Math.max(0.05, Math.atan(0.8 / d));
 export const START_CLOCK = { morning: 9.4, sunset: 18.2, night: 23.5 };
-/* the game modes, indexed on the wire. Most Wanted needs two players: solo it falls back to the sandbox. */
-export const MODES = ['sandbox', 'mostWanted'];
-export const modeOf = (opts, nPlayers) => opts.mode === 'mostWanted' && nPlayers >= 2 ? 'mostWanted' : 'sandbox';
+/* the game modes, indexed on the wire. Most Wanted needs two players: solo it falls back to the sandbox. A race alone is a time trial. */
+export const MODES = ['sandbox', 'mostWanted', 'race'];
+export const modeOf = (opts, nPlayers) => opts.mode === 'race' ? 'race' : opts.mode === 'mostWanted' && nPlayers >= 2 ? 'mostWanted' : 'sandbox';
+/* the race: the countdown on the grid, and how long the rest get once the first car is across the line */
+export const COUNTDOWN_T = 5, RACE_END_T = 20;
 /* Most Wanted: what the mark earns a second, the bounty on it, how long after the start the first mark is drawn, the stars it always carries */
 export const MARK_CASH_PER_S = 15, MARK_BOUNTY = 500, MARK_PICK_T = 8, MARK_STARS = 2;
 /* a five-star chase shaken off (not bought off at the precinct) pays this */
@@ -38,7 +41,7 @@ export const ESCAPE_BONUS = 1000;
 const NET_RANGE2 = 320 * 320, EV_RANGE2 = 360 * 360;
 /* the police budget grows with the room: this many foot cops and cars per player, capped */
 const COPS_PER_PLAYER = 16, COP_CARS_PER_PLAYER = 5, MAX_COPS_ROOM = 72, MAX_COP_CARS_ROOM = 20, ROADBLOCK_EVERY = 14, MAX_ROADBLOCKS = 2;
-const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared', 'job']);
+const TARGETED = new Set(['hurt', 'wasted', 'respawn', 'wanted', 'float', 'pickup', 'click', 'enter', 'reload', 'cleared', 'job', 'cp']);
 /* the wanted level: what a star costs to buy off, how long a taken bribe stays gone, how often a dead cop drops one */
 const STAR_PRICE = 100, BRIBE_RESPAWN = 90, COP_BRIBE_CHANCE = 0.35;
 /* the weapon crates: how long a taken one takes to grow back, how long a dropped weapon lies in the street */
@@ -61,10 +64,14 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   let nextId = 1;
   const nPlayers = (session.players || []).length;
   const mode = modeOf(opts, nPlayers);
-  const friendly = mode === 'mostWanted' || opts.friendlyFire !== false; // the mark can only be hunted with friendly fire on
+  const friendly = mode !== 'sandbox' || opts.friendlyFire !== false; // the mark can only be hunted, and a race is anything goes, with friendly fire on
   const MAX_COPS = Math.min(MAX_COPS_ROOM, COPS_PER_PLAYER * Math.max(1, nPlayers)), MAX_COP_CARS = Math.min(MAX_COP_CARS_ROOM, COP_CARS_PER_PLAYER * Math.max(1, nPlayers));
-  const S = { clockH: START_CLOCK[opts.time] ?? START_CLOCK.morning, timeLeft: (Number(opts.minutes) || 0) * 60, unlimited: !(Number(opts.minutes) > 0), phase: 'play', t: 0, spawnT: 0 };
+  /* phase: 'countdown' (the race grid, nobody moves) | 'play' | 'over' */
+  const S = { clockH: START_CLOCK[opts.time] ?? START_CLOCK.morning, timeLeft: (Number(opts.minutes) || 0) * 60, unlimited: !(Number(opts.minutes) > 0), phase: mode === 'race' ? 'countdown' : 'play', t: 0, spawnT: 0 };
   const mission = { state: mode === 'sandbox' ? 'intro' : 'done', t: 0, vinny: null, guards: [], hostile: false, passedT: 0, killer: null };
+  /* the race: the course (from the seed, the same on every machine), the countdown, then the grace once someone has finished */
+  const course = mode === 'race' ? raceCourse(session.seed) : null;
+  const RC = { t: COUNTDOWN_T, finishers: 0, ending: false };
   /* Most Wanted: who carries the mark and for how long this time */
   const mark = { idx: -1, heldT: 0, pickT: MARK_PICK_T };
   /* the current world event (one at a time): kind, where it is, how long it has left; the truck's car or the airdrop's landing timer */
@@ -83,6 +90,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       this.killer = -1; this.cause = 0; // who and what got me last (the death camera and its card)
       this.markT = 0; this.peak = 0; this.blockT = 0; // seconds carrying the mark; the highest wanted level since it was last cleared; the roadblock timer
       this.job = null; // the taxi or ambulance job I am driving: { kind, stage, fare, x, z, t, dist, pay, n }
+      this.lap = 0; this.next = 1; this.rank = 0; this.place = 0; // the race: laps done, the checkpoint I am heading for (0 = the line), my standing, my finishing place (0 = still racing)
     }
     get car() { return this.ped ? this.ped.inCar : null; }
     get dead() { return !this.ped || this.ped.dead; }
@@ -518,11 +526,17 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     if (wasMark) { if (by && by !== pl) { by.cash += MARK_BOUNTY; emit(['float', by.idx, 'BOUNTY  +$' + MARK_BOUNTY, 0xffe14d]); setMark(by.idx, 'kill'); } else setMark(randomPlayer(pl), 'cops'); }
   }
   function respawn(pl) {
-    const P = pl.ped; P.dead = false; P.health = 100; P.x = HOSPITAL.x - 2 + (pl.idx % 4) * 1.2; P.z = HOSPITAL.z - Math.floor(pl.idx / 4) * 1.2; P.y = groundY(P.x, P.z); P.vy = 0; P.yaw = 0;
-    pl.wanted = 0; pl.cash = Math.max(0, pl.cash - 300); pl.godT = 3; pl.heat = 0; pl.crimeT = 0; pl.seenT = 0;
+    const P = pl.ped; P.dead = false; P.health = 100; P.vy = 0;
+    if (mode === 'race') { // back at the wheel of a fresh car at the last checkpoint, facing the next
+      const n = course.length, at = nodeXZ(course[(pl.next + n - 1) % n]), to = nodeXZ(course[pl.next]), yaw = Math.atan2(to.x - at.x, to.z - at.z), side = pl.idx % 2 ? 3 : -3;
+      const c = new Car(CAR_TYPES[1], at.x - Math.cos(yaw) * side, at.z + Math.sin(yaw) * side, yaw, (AVATARS[pl.avatar] || AVATARS[0]).color); cars.push(c);
+      P.x = c.x; P.z = c.z; P.y = c.y; P.yaw = yaw; c.driver = P; P.inCar = c; P.seat = 0;
+      emit(['float', pl.idx, 'BACK ON THE COURSE', 0x2fd0ff]);
+    } else { P.x = HOSPITAL.x - 2 + (pl.idx % 4) * 1.2; P.z = HOSPITAL.z - Math.floor(pl.idx / 4) * 1.2; P.y = groundY(P.x, P.z); P.yaw = 0; pl.cash = Math.max(0, pl.cash - 300); emit(['float', pl.idx, 'HOSPITAL BILL -$300', 0xff6060]); }
+    pl.wanted = 0; pl.godT = 3; pl.heat = 0; pl.crimeT = 0; pl.seenT = 0;
     for (const c of cars) if (c.target === pl) c.target = null;
     for (const w of pl.weapons) w.ammo = w.mag;
-    emit(['float', pl.idx, 'HOSPITAL BILL -$300', 0xff6060]); emit(['respawn', pl.idx]);
+    emit(['respawn', pl.idx]);
     for (let k = 0; k < 20; k++) spawnCiv(pl);
     for (let k = 0; k < 10; k++) spawnTrafficCar(pl);
   }
@@ -789,7 +803,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     emit(['float', pl.idx, text, 0xff6060]); emit(['job', pl.idx, 'fail']);
   }
   function updateJob(pl, dt) {
-    const P = pl.ped, c = P.inCar; const kind = c && P.seat === 0 && !c.dead ? (c.type.taxi ? 'taxi' : c.type.ambulance ? 'ambulance' : null) : null;
+    const P = pl.ped, c = P.inCar; const kind = c && P.seat === 0 && !c.dead && mode !== 'race' ? (c.type.taxi ? 'taxi' : c.type.ambulance ? 'ambulance' : null) : null; // no fares mid-race
     if (!kind) { if (pl.job) endJob(pl); return; }
     if (!pl.job) { pl.job = { kind, stage: 'wait', fare: null, x: 0, z: 0, t: 1.5, dist: 0, pay: 0, n: 0 };
       emit(['float', pl.idx, kind === 'taxi' ? 'TAXI JOB  ·  FARES PAY BY THE METRE' : 'PARAMEDIC  ·  GET THE PATIENTS TO THE HOSPITAL', 0xf2c014]); emit(['job', pl.idx, 'start']); }
@@ -810,6 +824,30 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       pl.cash += total; releaseFare(j, true); j.stage = 'wait'; j.t = 2;
       emit(['float', pl.idx, (kind === 'taxi' ? 'FARE PAID' : 'PATIENT DELIVERED') + '  +$' + total + (tip ? '  (TIP $' + tip + ')' : '') + (streak ? '  (' + j.n + ' IN A ROW +$' + streak + ')' : ''), 0x3dff7a]); emit(['job', pl.idx, 'paid']); }
   }
+
+  /* ============================================================ the race (mode 'race')
+     Everyone starts at the wheel on the grid below the start intersection, a countdown holds them, then it is LAPS laps
+     through the course's checkpoints in order and back across the line. Anything goes: guns, traffic, cops. The first
+     across the line starts a grace period for the rest; when it runs out (or everyone is home, or the round timer
+     ends) the standings are the finishing order, then progress along the course. */
+  const racing = pl => !pl.gone && pl.ped && !pl.place;
+  function updateRace(dt) {
+    if (S.phase === 'countdown') { RC.t -= dt; if (RC.t <= 0) { RC.t = 0; S.phase = 'play'; emit(['go']); } return; }
+    if (S.phase !== 'play') return;
+    const n = course.length;
+    for (const pl of players) { if (!racing(pl) || pl.ped.dead) continue; const P = pl.ped, cp = nodeXZ(course[pl.next]);
+      if (dist2(P.x, P.z, cp.x, cp.z) > CP_RADIUS * CP_RADIUS) continue;
+      if (pl.next === 0) { pl.lap++; pl.next = 1;
+        if (pl.lap >= LAPS) { pl.place = ++RC.finishers; pl.cash += Math.max(0, 1000 - (pl.place - 1) * 250); emit(['finish', pl.idx, pl.place]);
+          if (!RC.ending) { RC.ending = true; RC.t = RACE_END_T; } continue; }
+        emit(['cp', pl.idx, pl.lap * n, pl.lap]); }
+      else { pl.next = (pl.next + 1) % n; emit(['cp', pl.idx, pl.lap * n + (pl.next === 0 ? n - 1 : pl.next - 1), pl.lap]); } }
+    // the standings: finishers by place, then everyone by how far along they are
+    const here = players.filter(p => !p.gone && p.ped), key = p => p.place ? 1e6 - p.place : progressOf(course, p.lap, p.next, p.ped.x, p.ped.z);
+    here.sort((a, b) => key(b) - key(a)).forEach((p, i) => { p.rank = i + 1; });
+    if (RC.ending) { RC.t -= dt; if (RC.t <= 0 || here.every(p => p.place)) endRound(); }
+  }
+  function endRound() { if (S.phase === 'over') return; S.phase = 'over'; S.timeLeft = Math.max(0, S.timeLeft); for (const pl of players) { pl.bits = 0; pl.godT = 1e9; } emit(['over']); }
 
   /* ============================================================ the players' own update */
   function updatePlayer(pl, dt, live) {
@@ -852,7 +890,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (const c of cars) if (!c.released) c.draw(dt);
     for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.released) { peds.splice(k, 1); continue; } if (p.kind === 'player') continue; p.update(dt);
       if (!p.dead && !p.inCar) { if (pushOutOfCars(p, 0.3, false, cars)) { p.carStuck++; if (p.carStuck > 90 && p.kind === 'civ') { p.carStuck = 0; p.flee = 2; p.threatX = p.x + rr(-1, 1); p.threatZ = p.z + rr(-1, 1); p.state = 'flee'; } } else p.carStuck = 0; } }
-    if (live) { updateWanted(dt); updateMission(dt); updateMark(dt); updateEvents(dt); }
+    if (live) { updateWanted(dt); updateMission(dt); updateMark(dt); if (mode !== 'race') updateEvents(dt); }
+    if (mode === 'race') updateRace(dt);
     updatePickups(dt); growSpots(dt);
     W.dirtyDynamic();
     // population maintenance: cull what is far from everyone, top up near a random player
@@ -872,7 +911,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       for (let k = 0; k < 2 && traffic + k < 40; k++) spawnTrafficCar(anchor());
     }
     S.clockH += dt / 45; if (S.clockH >= 24) S.clockH -= 24;
-    if (live && !S.unlimited) { S.timeLeft -= dt; if (S.timeLeft <= 0) { S.timeLeft = 0; S.phase = 'over'; for (const pl of players) { pl.bits = 0; pl.godT = 1e9; } emit(['over']); } }
+    if (live && !S.unlimited) { S.timeLeft -= dt; if (S.timeLeft <= 0) { S.timeLeft = 0; endRound(); } }
   }
 
   /* ============================================================ input from the players */
@@ -903,9 +942,12 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const block = pl => { const P = pl.ped, w = pl.weapons[pl.curW];
     return [P ? P.id : -1, P ? Math.round(P.health) : 0, pl.wanted, Math.floor(pl.cash), pl.kills, pl.curW, w.ammo, w.reserve, r2(pl.reloadT), P && P.dead ? 1 : 0, r1(pl.wastedT), P && P.inCar ? P.inCar.id : -1, pl.hint, r2(pl.camPitch), pl.godT > 0 ? 1 : 0, pl.gone ? 1 : 0, pl.seqApplied,
       pl.killer, pl.cause, r1(pl.markT), pl.weapons.reduce((m, w, i) => m | (w.owned ? 1 << i : 0), 0), P ? P.seat : 0, // appended: who killed me last and how, seconds as the mark, the weapons I own (a bit each), my seat (0 = the wheel)
-      ...(pl.job ? [JOB_KINDS.indexOf(pl.job.kind), JOB_STAGES.indexOf(pl.job.stage), r1(pl.job.x), r1(pl.job.z), r1(Math.max(0, pl.job.t)), pl.job.n] : [0])]; }; // the job: kind, stage, where to go, seconds left, deliveries in a row
-  /* the shared mode state: [mode, the mark's player index, seconds it has held, the world event or null ([kind, x, z, seconds left, landed])] */
-  const modeState = () => [MODES.indexOf(mode), mark.idx, r1(mark.heldT), WE.kind ? [EVENT_KINDS.indexOf(WE.kind), r1(WE.x), r1(WE.z), r1(WE.t), WE.landed ? 1 : 0] : null];
+      pl.lap, pl.next, pl.rank, pl.place, // the race: laps done, the checkpoint I head for, my standing, my finishing place
+      ...(pl.job ? [JOB_KINDS.indexOf(pl.job.kind), JOB_STAGES.indexOf(pl.job.stage), r1(pl.job.x), r1(pl.job.z), r1(Math.max(0, pl.job.t)), pl.job.n] : [0])]; }; // the job (last, it is variable): kind, stage, where to go, seconds left, deliveries in a row
+  /* the shared mode state: [mode, the mark's player index, seconds it has held, the world event or null ([kind, x, z, seconds left, landed]),
+     the race or null ([0 countdown / 1 racing / 2 someone is home, seconds left of the countdown or the grace, finishers])] */
+  const modeState = () => [MODES.indexOf(mode), mark.idx, r1(mark.heldT), WE.kind ? [EVENT_KINDS.indexOf(WE.kind), r1(WE.x), r1(WE.z), r1(WE.t), WE.landed ? 1 : 0] : null,
+    mode === 'race' ? [S.phase === 'countdown' ? 0 : RC.ending ? 2 : 1, r1(RC.t), RC.finishers] : null];
   function prepareNet() {
     for (const e of ents.values()) { const entry = e.cls === 'ped' ? pedEntry(e) : e.cls === 'car' ? carEntry(e) : pickEntry(e); e.entry = entry; e.dirty = !same(entry, e.sent); }
   }
@@ -949,15 +991,17 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (const oz of [-8, 0, 8]) { const c = new Car(CAR_TYPES[2], TAXI_RANK.x, TAXI_RANK.z + oz, PI); c.hand = true; c.parked = true; cars.push(c); } // the rank: three cabs, no carjacking needed
   }
   (session.players || []).forEach((info, i) => {
-    const pl = new Player(info, i); players.push(pl); const s = SPAWNS[i % SPAWNS.length];
+    const pl = new Player(info, i); players.push(pl); const s = SPAWNS[i % SPAWNS.length], color = (AVATARS[pl.avatar] || AVATARS[0]).color;
+    if (mode === 'race') { const g = gridSlot(i); const car = new Car(CAR_TYPES[1], g.x, g.z, g.yaw, color); cars.push(car); // on the grid, at the wheel, facing the line
+      pl.ped = new Ped('player', g.x, g.z, pl.avatar, pl); pl.ped.yaw = g.yaw; peds.push(pl.ped); car.driver = pl.ped; pl.ped.inCar = car; pl.ped.seat = 0; return; }
     pl.ped = new Ped('player', s.x, s.z, pl.avatar, pl); pl.ped.yaw = s.face; peds.push(pl.ped);
-    const car = new Car(CAR_TYPES[1], s.cx, s.z, s.yaw, (AVATARS[pl.avatar] || AVATARS[0]).color); car.hand = true; car.parked = true; cars.push(car);
+    const car = new Car(CAR_TYPES[1], s.cx, s.z, s.yaw, color); car.hand = true; car.parked = true; cars.push(car);
   });
   placeParkedCars(); if (mode === 'sandbox') initMission();
   for (let k = 0; k < 90; k++) spawnCiv(anchor());
   for (let k = 0; k < 40; k++) spawnTrafficCar(anchor());
 
-  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, mark, WE, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
+  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
     /* for the tests and the console: reach into the rules directly */
     debug: { damagePlayer, killPlayer, addWanted, clearWanted, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, Ped, Car } };
 }
