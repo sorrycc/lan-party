@@ -14,6 +14,7 @@ import { kindIdx, PF, CF, WEAPONS, CAR_TYPES, PedView, CarView, drawPickup, PICK
 import { IN, pedCollideWorld, pushOutOfCars, stepOnFoot, driveInput, stepCar, carOffs } from './motion.js';
 import { raceCourse, planLap, nodeXZ, progressOf, gridSlot, LAPS, CP_RADIUS } from './race.js';
 import { arenaOf, arenaSpawns, farthestSpawn, inArena, arenaCell, arenaNode, OUT_WARN_T, OUT_DMG_PER_S } from './arena.js';
+import { rosterOf, skillOf, botThink } from './bots.js';
 export { IN };
 
 const rnd = Math.random;
@@ -84,7 +85,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const peds = [], cars = [], pickups = [], cops = [], players = [], events = [];
   const ents = new Map(); // id -> entity, everything that can appear on the wire
   let nextId = 1;
-  const nPlayers = (session.players || []).length;
+  /* the round's players: the room's humans, and in a deathmatch with the fill on the bots after them (bots.js draws the same list on every machine) */
+  const roster = rosterOf(session.players, opts, session.seed), nPlayers = roster.length, botSkill = skillOf(opts);
   const mode = modeOf(opts, nPlayers);
   const friendly = mode !== 'sandbox' || opts.friendlyFire !== false; // the mark can only be hunted, and a race is anything goes, with friendly fire on
   const openCity = mode === 'sandbox' || mode === 'mostWanted'; // the free-roam modes: world events run and the cabs and the ambulance take jobs; a race or a deathmatch has neither
@@ -111,7 +113,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   /* ============================================================ players */
   class Player {
     constructor(info, idx) {
-      this.id = info.id; this.idx = idx; this.name = info.name || 'Player'; this.avatar = info.avatar | 0; this.ped = null; this.gone = false;
+      this.id = info.id; this.idx = idx; this.name = info.name || 'Player'; this.avatar = info.avatar | 0; this.ped = null; this.gone = false; this.bot = !!info.bot; this.brain = null; // a bot's input comes from its brain (bots.js), never the network
       this.camYaw = 0; this.camPitch = 0.22; this.bits = 0; this.sx = 0; this.sz = 0; this.assist = false; this.clicks = 0; this.clicksSeen = null; this.seq = 0; this.seqApplied = 0;
       this.wanted = 0; this.heat = 0; this.crimeT = 0; this.seenT = 0; this.copSpawnT = 0; this.cash = 250; this.kills = 0;
       this.weapons = WEAPONS.map(w => { const basic = guns && kit.includes(w.key); return { ...w, basic, owned: basic, ammo: basic ? w.ammo : 0, reserve: basic ? w.reserve : 0 }; }); this.curW = 0; this.reloadT = 0; this.fireT = 0; this.armTimer = 0; this.godT = 0; this.noDmgT = 0; this.wastedT = 0; this.hint = 0; this.jumpLatch = false; // the kit is drawn; the other guns are empty until a crate (or a corpse) fills them
@@ -965,9 +967,20 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     pl.outTick -= dt; if (pl.outTick <= 0) { pl.outTick += 0.5; damagePlayer(pl, OUT_DMG_PER_S / 2, null, 'fence'); }
   }
 
+  /* ============================================================ the bots */
+  /* a bot's brain writes its input where the network would (bots.js); the sim only keeps its gun fed: an empty mag is
+     reloaded from the reserve, and a gun with nothing left is swapped for the next one it owns */
+  const botCtx = { players, pickups, hasLOS: (ax, az, bx, bz) => W.hasLOS(ax, az, bx, bz), skill: botSkill, alive, rnd };
+  function botTick(pl, dt) {
+    botThink(pl, botCtx, dt);
+    if (!guns) return; const w = pl.weapons[pl.curW];
+    if (w.ammo === 0 && pl.reloadT <= 0) { if (w.reserve > 0) startReload(pl); else switchWeapon(pl, nextOwned(pl, 1)); }
+  }
+
   /* ============================================================ world tick */
   function update(dt) {
     S.t += dt; const live = S.phase === 'play';
+    if (live) for (const pl of players) if (pl.bot && alive(pl)) botTick(pl, dt);
     for (const pl of players) if (!pl.gone && pl.ped) updatePlayer(pl, dt, live);
     for (const c of cars) { if (c.released) continue; c.drive(dt); c.step(dt); }
     collideCars();
@@ -1081,7 +1094,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const amb = new Car(CAR_TYPES[6], HOSPITAL.x + 9, HOSPITAL.z - 1, PI / 2); amb.hand = true; amb.parked = true; cars.push(amb);
     for (const oz of [-8, 0, 8]) { const c = new Car(CAR_TYPES[2], TAXI_RANK.x, TAXI_RANK.z + oz, PI); c.hand = true; c.parked = true; cars.push(c); } // the rank: three cabs, no carjacking needed
   }
-  (session.players || []).forEach((info, i) => {
+  roster.forEach((info, i) => {
     const pl = new Player(info, i); players.push(pl); const s = SPAWNS[i % SPAWNS.length], color = (AVATARS[pl.avatar] || AVATARS[0]).color;
     if (mode === 'race') { const g = gridSlot(i); const car = new Car(CAR_TYPES[1], g.x, g.z, g.yaw, color); cars.push(car); // on the grid, at the wheel, facing the line
       pl.ped = new Ped('player', g.x, g.z, pl.avatar, pl); pl.ped.yaw = g.yaw; peds.push(pl.ped); car.driver = pl.ped; pl.ped.inCar = car; pl.ped.seat = 0; return; }
@@ -1093,7 +1106,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   for (let k = 0; k < Math.min(90, MAX_CIVS); k++) spawnCiv(anchor());
   for (let k = 0; k < MAX_TRAFFIC; k++) spawnTrafficCar(anchor());
 
-  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, killCap, wastedTime, guns, kit, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, arena, aSpawns, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
+  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, killCap, wastedTime, guns, kit, botSkill, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, arena, aSpawns, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
     /* for the tests and the console: reach into the rules directly */
     debug: { damagePlayer, killPlayer, addWanted, clearWanted, surrender, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, throwRiders, collideCars, Ped, Car, MAX_COPS, MAX_COP_CARS, MAX_TRAFFIC, MAX_CIVS } };
 }

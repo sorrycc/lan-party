@@ -26,6 +26,7 @@ import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
 import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn, modeOf, wastedTimeOf } from './sim.js';
 import { arenaOf, OUT_WARN_T } from './arena.js';
+import { withBots } from './bots.js';
 import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
@@ -443,7 +444,7 @@ export async function create({ mount, audio, send, hooks }) {
       const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) }))
         .sort((a, c) => race ? ((a.b.rank || 99) - (c.b.rank || 99)) : dm ? (c.b.kills - a.b.kills) || (c.b.cash - a.b.cash) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
       const raceCell = b => b.place ? `<td class="n mark">FINISHED ${ordinal(b.place)}</td>` : `<td class="n">LAP ${Math.min(laps, b.lap + 1)}/${laps}  ·  CP ${b.next === 0 ? n - 1 : b.next - 1}/${n - 1}</td>`;
-      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
+      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${(session.players[r.i] || {}).bot ? '<span class="left">CPU</span>' : ''}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
       ov.awards.innerHTML = awards.map(([key, idx, v, x]) => { const a = AWARDS[key]; return a ? `<tr class="${idx === myIdx ? 'me' : ''}"><td class="aw">${a[0]}</td><td><span class="sw" style="background:${hex(playerColor(idx))}"></span>${esc(nameOf(idx))}</td><td class="n mark">${esc(a[1](v, x, nameOf))}</td></tr>` : ''; }).join('');
       if (restart) { button('PLAY AGAIN', 'primary', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
       else ov.foot.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
@@ -828,16 +829,17 @@ export async function create({ mount, audio, send, hooks }) {
   function stopRound() { if (sim) { sim.dispose(); sim = null; } if (remote) { remote.clear(); remote = null; } pred = null; me = null; clients = []; }
   function start(s) {
     stopRound();
+    s = withBots(s); // a deathmatch's bots join the roster here, the same on every machine; everything below sees them as players
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId; myIdx = Math.max(0, s.players.findIndex(p => p.id === myId));
     camYaw = 0; camPitch = 0.22; mouseIdle = 10; t = 0; roundT = 0; clicks = 0; fireHeld = false; dmgFlash = 0; wantedFlash = 0; floats.length = 0; feed.length = 0; awards = []; areaT = 0; curDistrict = ''; curStreet = ''; route = []; routeT = 0; lastIn = null; sinceIn = 1; netAcc = 0; lockPending = 0;
     clock = START_CLOCK[(s.opts || {}).time] ?? START_CLOCK.morning;
     fx.reset();
     if (isHost) {
       sim = createSim({ W, session: s, opts: s.opts || {}, onEvent }); me = sim.players[myIdx];
-      clients = s.players.filter(p => p.id !== myId).map(p => ({ id: p.id, known: new Set(), pl: sim.playerOf(p.id) }));
+      clients = s.players.filter(p => p.id !== myId && !p.bot).map(p => ({ id: p.id, known: new Set(), pl: sim.playerOf(p.id) }));
       hostView();
       if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
-      if ((s.opts || {}).mode === 'deathmatch' && sim.mode !== 'deathmatch') floatText('A DEATHMATCH NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
+      if ((s.opts || {}).mode === 'deathmatch' && sim.mode !== 'deathmatch') floatText('A DEATHMATCH NEEDS TWO PLAYERS (OR CPU PLAYERS ON): SANDBOX INSTEAD', 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
     laps = lapsOf(s.opts || {}); killCap = killCapOf(s.opts || {}); guns = gunsOn(s.opts || {}); root.classList.toggle('noguns', !guns); // the HUD's copy of the lobby's knobs; the touch FIRE, WEAPON and RELOAD buttons go with the guns

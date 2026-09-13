@@ -15,7 +15,7 @@ import { HALF, ROAD, PITCH } from '../client/games/gta/world.js';
 const pool = () => ({ alloc() { return 0; }, release() {}, color() {}, hide() {}, set() {}, dirty() {} });
 const stubWorld = () => ({ THREE, aabbs: [], nearAabbs: () => [], hasLOS: () => true, pickPool: pool(), pedPools: Array.from({ length: 7 }, pool), gunPool: pool(), carBody: pool(), carCabin: pool(), carWheel: pool(), carLight: pool(), dirtyDynamic() {} });
 const players = n => Array.from({ length: n }, (_, i) => ({ id: 'p' + i, name: 'P' + i, avatar: i }));
-const make = (n, opts = {}, seed = 7) => createSim({ W: stubWorld(), session: { players: players(n), seed }, opts: { minutes: 10, ...opts } });
+const make = (n, opts = {}, seed = 7) => createSim({ W: stubWorld(), session: { players: players(n), seed }, opts: { minutes: 10, fillAI: false, ...opts } }); // no bots: these tests are about the rules with exactly n players (the bots have their own file)
 const DT = 1 / 30;
 const run = (sim, secs) => { for (let t = 0; t < secs; t += DT) sim.update(DT); };
 const snapshot = (sim, i) => { sim.prepareNet(); const m = sim.snapshotFor({ id: 'p' + i, known: new Set(), pl: sim.players[i] }); sim.endNet(); return m; };
@@ -101,7 +101,7 @@ test('the deathmatch ends at the cap: the round is over the moment someone reach
   const quiet = make(2, { mode: 'deathmatch', minutes: 0 }); run(quiet, 5); assert.equal(quiet.S.phase, 'play', 'an unlimited round runs until the cap');
 });
 
-test('a deathmatch needs two players: solo it is the sandbox, and the wire says so', () => {
+test('a deathmatch needs two players: solo without the CPU fill it is the sandbox, and the wire says so', () => {
   const sim = make(1, { mode: 'deathmatch' });
   assert.equal(sim.mode, 'sandbox'); assert.equal(sim.mission.state, 'intro'); assert.equal(parseMode(snapshot(sim, 0).md).dm, null); assert.equal(MODES[3], 'deathmatch'); assert.equal(sim.arena, null, 'and no fence');
 });
@@ -611,7 +611,7 @@ import { GAMES } from '../client/games/registry.js';
 
 test('the lobby offers laps, guns, a starting kit, traffic and police, and the defaults are the old game', () => {
   const opts = GAMES.find(g => g.id === 'gta').options, keys = Object.fromEntries(opts.map(o => [o.key, o]));
-  assert.equal(keys.laps.default, 3); assert.equal(keys.killCap.default, 20); assert.ok(keys.mode.choices.some(c => c.value === 'deathmatch')); assert.equal(keys.guns.default, true); assert.equal(keys.loadout.default, 'basic'); assert.equal(keys.traffic.default, 'normal'); assert.equal(keys.cops.default, 'normal');
+  assert.equal(keys.laps.default, 3); assert.equal(keys.killCap.default, 20); assert.equal(keys.fillAI.default, true); assert.equal(keys.botSkill.default, 'normal'); assert.ok(keys.mode.choices.some(c => c.value === 'deathmatch')); assert.equal(keys.guns.default, true); assert.equal(keys.loadout.default, 'basic'); assert.equal(keys.traffic.default, 'normal'); assert.equal(keys.cops.default, 'normal');
   for (const c of keys.loadout.choices) assert.ok(LOADOUTS[c.value], c.value); for (const c of keys.traffic.choices) assert.ok(TRAFFIC_LEVELS[c.value], c.value); for (const c of keys.cops.choices) assert.ok(COP_LEVELS[c.value], c.value);
   assert.equal(lapsOf({}), LAPS); assert.equal(lapsOf({ laps: 5 }), 5); assert.equal(lapsOf({ laps: '2' }), 2);
   const sim = make(2); assert.equal(sim.laps, LAPS); assert.equal(sim.guns, true); assert.deepEqual(sim.kit, LOADOUTS.basic); assert.equal(sim.debug.MAX_TRAFFIC, 40);
