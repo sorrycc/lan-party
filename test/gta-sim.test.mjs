@@ -7,7 +7,8 @@ import * as THREE from 'three';
 import { createSim, MODES, MARK_CASH_PER_S, MARK_BOUNTY, MARK_PICK_T, MARK_STARS, ESCAPE_BONUS, AIRDROP_T, AIRDROP_FALL, aimTol } from '../client/games/gta/sim.js';
 import { parseBlock, parseMode } from '../client/games/gta/remote.js';
 import { CAUSES, EVENT_KINDS, CAR_TYPES } from '../client/games/gta/entities.js';
-import { NEWS, STREAK_NEWS, AWARD_KEYS, AWARDS_SHOWN, ARENA_TRAFFIC, ARENA_CIVS, ARENA_MARGIN } from '../client/games/gta/sim.js';
+import { NEWS, STREAK_NEWS, AWARD_KEYS, AWARDS_SHOWN, ARENA_TRAFFIC, ARENA_CIVS, ARENA_MARGIN, WASTED_T, DM_WASTED_T, wastedTimeOf } from '../client/games/gta/sim.js';
+import { REPLAY_DELAY, REPLAY_KEEP } from '../client/games/gta/replay.js';
 import { arenaOf, arenaSpawns, farthestSpawn, inArena, ARENA_BLOCKS, OUT_WARN_T, OUT_DMG_PER_S } from '../client/games/gta/arena.js';
 import { HALF, ROAD, PITCH } from '../client/games/gta/world.js';
 
@@ -85,7 +86,7 @@ test('the deathmatch: killing a player is free of stars, pays the usual $100, an
   const ev = snapshot(sim, 0).ev; assert.ok(!ev.some(e => e[0] === 'wanted' && e[1] === 0), 'the room is not told of stars');
   sim.debug.damagePlayer(b, 1, a, 'pistol'); // friendly fire is on whatever the sandbox knob says
   run(sim, 200); assert.equal(sim.WE.kind, null, 'no world event in a deathmatch');
-  const cab = sim.cars.find(c => c.type.taxi); assert.ok(cab, 'a cab rolls in the traffic'); sim.debug.enterCar(a, cab); run(sim, 3); assert.equal(a.job, null, 'but it takes no fares');
+  const cab = new sim.debug.Car(CAR_TYPES[2], sim.arena.cx, sim.arena.cz, 0); sim.cars.push(cab); a.ped.x = cab.x + 2; a.ped.z = cab.z; sim.debug.enterCar(a, cab); run(sim, 3); assert.equal(a.ped.inCar, cab, 'at the wheel of a cab'); assert.equal(a.job, null, 'but it takes no fares');
 });
 
 test('the deathmatch ends at the cap: the round is over the moment someone reaches it, and the cap is the lobby\'s', () => {
@@ -141,6 +142,25 @@ test('the fence: outside the arena a clock runs and the block says so, after the
   a.ped.x = A.cx; run(sim, 0.2); assert.equal(a.outT, 0, 'back inside: the clock stops'); const h = a.ped.health; run(sim, 1); assert.equal(a.ped.health, h, 'and it stops hurting');
   a.ped.x = A.x0 - 10; run(sim, OUT_WARN_T + 100 / OUT_DMG_PER_S + 1); assert.ok(a.dead, 'staying out is death'); assert.equal(a.killer, -1); assert.equal(CAUSES[a.cause], 'fence'); assert.equal(b.kills, 0, 'nobody gets it');
   assert.equal(a.outT, 0); run(sim, 6); assert.ok(!a.dead && inArena(A, a.ped.x, a.ped.z), 'respawned inside');
+});
+
+test('the arena\'s pace: no stars from anything, the traffic never leaves it, a fence death drops the gun inside, the wait is shorter but fits the killcam, and the awards skip the chase and the driving', () => {
+  const sim = make(2, { mode: 'deathmatch', traffic: 'heavy' }); const A = sim.arena, [a, b] = sim.players; a.godT = b.godT = 0;
+  sim.debug.addWanted(a, 2); assert.equal(a.wanted, 0, 'the police stay out of the arena');
+  const civ = sim.peds.find(p => p.kind === 'civ'); civ.hurt(500, a, 'pistol'); run(sim, 0.2); assert.equal(a.wanted, 0, 'not for a civilian either'); assert.equal(sim.cops.length, 0);
+  run(sim, 90); for (const c of sim.cars) if (c.ai === 'traffic' && !c.dead) assert.ok(inArena(A, c.x, c.z, 4), 'a traffic car at ' + c.x.toFixed(0) + ',' + c.z.toFixed(0) + ' left the arena');
+  for (const c of sim.cars) if (c.ai === 'traffic') { const n = c.next; assert.ok(n[0] >= A.i0 && n[0] <= A.i0 + A.n && n[1] >= A.j0 && n[1] <= A.j0 + A.n, 'its next node is an arena intersection'); }
+  assert.ok(sim.cars.filter(c => c.ai === 'traffic' && !c.dead).length >= 3, 'and there is still traffic');
+  sim.debug.takeWeapon(a, 'rpg'); a.ped.x = A.x0 - 10; a.ped.z = A.cz; sim.debug.killPlayer(a, null, 'fence');
+  const rpg = sim.pickups.find(p => p.kind === 'rpg' && p.life); assert.ok(rpg, 'the launcher is dropped'); assert.ok(inArena(A, rpg.x, rpg.z), 'inside the fence: ' + rpg.x.toFixed(0));
+  assert.equal(a.wastedT, DM_WASTED_T); assert.equal(sim.wastedTime, DM_WASTED_T); assert.equal(wastedTimeOf('deathmatch'), DM_WASTED_T); assert.equal(wastedTimeOf('sandbox'), WASTED_T);
+  assert.ok(DM_WASTED_T < WASTED_T && DM_WASTED_T >= REPLAY_DELAY + REPLAY_KEEP, 'shorter, and the killcam still fits');
+  run(sim, DM_WASTED_T + 0.1); assert.ok(!a.dead, 'back sooner');
+  a.chaseBest = 60; a.driven = 5000; a.crashes = 0; a.loot = 500; a.topSpeed = 30; sim.debug.killPlayer(b, a, 'smg'); sim.S.timeLeft = 0; run(sim, 0.1);
+  const keys = snapshot(sim, 1).ev.find(e => e[0] === 'over')[1].map(x => x[0]);
+  assert.deepEqual(keys, ['killer', 'speed'], 'kills and speed only: no chase, no driver, no loot, no cabbie');
+  const open = make(2); open.players[0].chaseBest = 60; open.players[0].loot = 500; open.S.timeLeft = 0; run(open, 0.1);
+  assert.ok(snapshot(open, 1).ev.find(e => e[0] === 'over')[1].some(x => x[0] === 'fugitive'), 'the sandbox still hands out the chase');
 });
 
 test('the airdrop lands ten seconds in with its pickups, the armored truck spills cash when it goes', () => {

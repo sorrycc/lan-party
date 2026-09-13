@@ -24,7 +24,7 @@ import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn, modeOf } from './sim.js';
+import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn, modeOf, wastedTimeOf } from './sim.js';
 import { arenaOf, OUT_WARN_T } from './arena.js';
 import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
@@ -669,7 +669,7 @@ export async function create({ mount, audio, send, hooks }) {
     const s = Math.max(2, Math.round(Wd / 640)), me = V.me, short = Hd < 560; // short: a phone in landscape
     const L = 16 + sa.l, R = Wd - 16 - sa.r, T = 14 + sa.t, B = Hd - 16 - sa.b; // the HUD's edges, inside the notch and the home indicator
     if (!me) { ptext(hctx, 'WAITING FOR THE HOST…', Wd / 2, Hd / 2, s, '#ffffff', 'center'); return; }
-    const dead = me.dead, inCar = me.carId >= 0, deadT = dead ? Math.max(0, 5.5 - me.wastedT) : 0;
+    const dead = me.dead, inCar = me.carId >= 0, deadT = dead ? Math.max(0, wastedTimeOf(modeName()) - me.wastedT) : 0;
     if (dead && replay.active) { // the killcam: letterboxed, nothing else of the HUD (the names, arrows, briefing and feed all describe the live world, not the clip)
       const bar = Math.round(Hd * 0.09); hctx.fillStyle = '#000000'; hctx.fillRect(0, 0, Wd, bar); hctx.fillRect(0, Hd - bar, Wd, bar);
       ptext(hctx, 'KILLCAM', Wd / 2, bar + s * 6, s * 1.6, '#ff6060', 'center'); ptext(hctx, 'THROUGH THE EYES OF ' + nameOf(replay.killer).toUpperCase(), Wd / 2, bar + s * 22, s, hex(playerColor(replay.killer)), 'center');
@@ -682,8 +682,9 @@ export async function create({ mount, audio, send, hooks }) {
       hctx.fillRect(Wd / 2 - 1, Hd / 2 - g - l, 2, l); hctx.fillRect(Wd / 2 - 1, Hd / 2 + g, 2, l); hctx.fillRect(Wd / 2 - g - l, Hd / 2 - 1, l, 2); hctx.fillRect(Wd / 2 + g, Hd / 2 - 1, l, 2); }
     // top-right: stars, clock, cash, health, weapon, kills, round timer
     const rx = R; let y = T;
-    for (let k = 0; k < 5; k++) { const on = k < me.wanted; const blink = on && wantedFlash > 0 && Math.floor(t * 8) % 2 === 0; ptext(hctx, '*', rx - (4 - k) * s * 8, y, s * 1.3, on ? (blink ? '#ffffff' : '#ffe14d') : 'rgba(255,255,255,0.18)', 'right'); }
-    y += s * 12;
+    if (modeName() !== 'deathmatch') { // no stars in the arena: the police stay out of a deathmatch
+      for (let k = 0; k < 5; k++) { const on = k < me.wanted; const blink = on && wantedFlash > 0 && Math.floor(t * 8) % 2 === 0; ptext(hctx, '*', rx - (4 - k) * s * 8, y, s * 1.3, on ? (blink ? '#ffffff' : '#ffe14d') : 'rgba(255,255,255,0.18)', 'right'); }
+      y += s * 12; }
     const hh = Math.floor(clock), mm = Math.floor((clock - hh) * 60);
     ptext(hctx, String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0'), rx, y, s * 1.3, '#ffffff', 'right'); y += s * 12;
     ptext(hctx, '$' + String(Math.max(0, me.cash)).padStart(6, '0'), rx, y, s * 1.3, '#3dff7a', 'right'); y += s * 12;

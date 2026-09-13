@@ -46,6 +46,9 @@ export const COP_LEVELS = { soft: 0.5, normal: 1, hard: 1.5 };
 export const gunsOn = opts => opts.guns !== false;
 /* the deathmatch's arena holds this many traffic cars and pedestrians (before the lobby's traffic factor), and its crates grow back this fast */
 export const ARENA_TRAFFIC = 8, ARENA_CIVS = 28, ARENA_CRATE_RESPAWN = 45, ARENA_MARGIN = 24;
+/* seconds from a death to the respawn: the deathmatch's is shorter (it still fits the killcam's delay and clip, REPLAY_DELAY + REPLAY_KEEP) */
+export const WASTED_T = 5.5, DM_WASTED_T = 4.5;
+export const wastedTimeOf = mode => mode === 'deathmatch' ? DM_WASTED_T : WASTED_T;
 export const modeOf = (opts, nPlayers) => opts.mode === 'race' ? 'race' : (opts.mode === 'mostWanted' || opts.mode === 'deathmatch') && nPlayers >= 2 ? opts.mode : 'sandbox';
 /* the race: the countdown on the grid, and how long the rest get once the first car is across the line */
 export const COUNTDOWN_T = 5, RACE_END_T = 20;
@@ -95,7 +98,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const course = mode === 'race' ? raceCourse(session.seed) : null, legs = course ? planLap(course) : null; // the planned lap decides which way a respawned car faces
   const RC = { t: COUNTDOWN_T, finishers: 0, ending: false };
   /* the deathmatch: the arena (from the seed, the same on every machine) and its spawn points; a player outside it is on the fence's clock */
-  const arena = mode === 'deathmatch' ? arenaOf(session.seed) : null, aSpawns = arena ? arenaSpawns(arena) : null;
+  const arena = mode === 'deathmatch' ? arenaOf(session.seed) : null, aSpawns = arena ? arenaSpawns(arena) : null, wastedTime = wastedTimeOf(mode);
   /* Most Wanted: who carries the mark and for how long this time */
   const mark = { idx: -1, heldT: 0, pickT: MARK_PICK_T };
   /* the current world event (one at a time): kind, where it is, how long it has left; the truck's car or the airdrop's landing timer */
@@ -250,11 +253,13 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const dx = (bx - ax) / len, dz = (bz - az) / len;
     return { a, b, ax, az, bx, bz, dx, dz, len, rx: -dz, rz: dx };
   }
+  /* the node after b for a car that came from a: straight on three times as likely as a turn; in the arena only its own
+     intersections count, so the traffic loops its streets and turns back where a road leaves it (and back is the only option) */
   function chooseNext(a, b) {
     const opts = []; const dx = b[0] - a[0], dz = b[1] - a[1];
     for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const n = [b[0] + ox, b[1] + oz]; if (n[0] < 0 || n[0] > NB || n[1] < 0 || n[1] > NB) continue;
-      if (n[0] === a[0] && n[1] === a[1]) continue;
+      if (n[0] === a[0] && n[1] === a[1]) continue; if (arena && !arenaNode(arena, n[0], n[1])) continue;
       opts.push(n); if (ox === dx && oz === dz) { opts.push(n); opts.push(n); }
     }
     return opts.length ? pick(opts) : a;
@@ -461,7 +466,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   function dropWeapons(pl) {
     const P = pl.ped;
     pl.weapons.forEach((w, i) => { if (w.basic || !w.owned) return; w.owned = false; const rounds = w.ammo + w.reserve; w.ammo = 0; w.reserve = 0;
-      if (rounds > 0) spawnPickup(P.x + rr(-1, 1), P.z + rr(-1, 1), w.key, rounds, DROP_LIFE); });
+      let x = P.x, z = P.z; if (arena) { x = clamp(x, arena.x0 + 2, arena.x1 - 2); z = clamp(z, arena.z0 + 2, arena.z1 - 2); } // a fence death drops it just inside, where the next one along can get it
+      if (rounds > 0) spawnPickup(x + rr(-1, 1), z + rr(-1, 1), w.key, rounds, DROP_LIFE); });
     if (!pl.weapons[pl.curW].owned) switchWeapon(pl, 0);
   }
 
@@ -559,7 +565,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
   function killPlayer(pl, by, cause) {
     const P = pl.ped; if (P.dead) return;
-    P.dead = true; P.deadT = 0; P.moving = 0; pl.wastedT = 5.5; P.killedBy = by || null; pl.outT = 0;
+    P.dead = true; P.deadT = 0; P.moving = 0; pl.wastedT = wastedTime; P.killedBy = by || null; pl.outT = 0;
     pl.killer = by && by !== pl ? by.idx : -1; pl.cause = Math.max(0, CAUSES.indexOf(cause || '')); pl.deaths++; endChase(pl);
     if (P.inCar) leaveCar(pl, true);
     dropWeapons(pl);
@@ -598,7 +604,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   }
   const endChase = pl => { pl.chaseBest = Math.max(pl.chaseBest, pl.chaseT); pl.chaseT = 0; }; // a chase is one unbroken stretch with the cops on you
   function addWanted(pl, n) {
-    if (!pl || pl.gone) return;
+    if (!pl || pl.gone || arena) return; // the police stay out of the arena: nothing in a deathmatch earns a star (a civilian, a cop, a carjacking)
     const old = pl.wanted; pl.wanted = clamp(pl.wanted + n, 0, 5); pl.crimeT = 0; pl.seenT = 0; pl.peak = Math.max(pl.peak, pl.wanted);
     if (pl.wanted > old) { emit(['wanted', pl.idx, pl.wanted]); if (pl.wanted === 5 && old < 5) news('stars', pl.idx, 5); }
   }
@@ -911,11 +917,10 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     add('killer', best(p => p.kills, v => v >= 1));
     { let ba = null, bb = -1, bn = 1; for (const p of here) p.killsOf.forEach((n, j) => { if (n > bn) { bn = n; ba = p; bb = j; } }); if (ba) out.push(['nemesis', ba.idx, bn, bb]); }
     add('victim', best(p => p.deaths, v => v >= 2));
-    add('fugitive', best(p => p.chaseBest, v => v >= 30));
+    if (!arena) add('fugitive', best(p => p.chaseBest, v => v >= 30)); // no cops in the arena
     if (openCity) add('cabbie', best(p => p.streakBest, v => v >= 2)); // no fares to run otherwise
     add('speed', best(p => p.topSpeed * 3.6, v => v >= 60));
-    add('driver', best(p => p.driven >= DRIVER_MIN_M ? p.crashes : -1, v => v >= 0, true), p => r1(p.driven / 1000));
-    add('loot', best(p => p.loot, v => v >= 100));
+    if (!arena) { add('driver', best(p => p.driven >= DRIVER_MIN_M ? p.crashes : -1, v => v >= 0, true), p => r1(p.driven / 1000)); add('loot', best(p => p.loot, v => v >= 100)); } // a deathmatch is about the kills, not the driving or the cash
     return out.slice(0, AWARDS_SHOWN);
   }
 
@@ -1088,7 +1093,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   for (let k = 0; k < Math.min(90, MAX_CIVS); k++) spawnCiv(anchor());
   for (let k = 0; k < MAX_TRAFFIC; k++) spawnTrafficCar(anchor());
 
-  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, killCap, guns, kit, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, arena, aSpawns, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
+  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, killCap, wastedTime, guns, kit, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, arena, aSpawns, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
     /* for the tests and the console: reach into the rules directly */
     debug: { damagePlayer, killPlayer, addWanted, clearWanted, surrender, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, throwRiders, collideCars, Ped, Car, MAX_COPS, MAX_COP_CARS, MAX_TRAFFIC, MAX_CIVS } };
 }
