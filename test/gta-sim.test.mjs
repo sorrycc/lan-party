@@ -72,6 +72,37 @@ test('Most Wanted needs two players: solo it is the sandbox', () => {
   assert.equal(sim.mode, 'sandbox'); assert.equal(sim.mission.state, 'intro'); run(sim, MARK_PICK_T + 2); assert.equal(sim.mark.idx, -1);
 });
 
+/* ---- the deathmatch */
+test('the deathmatch: killing a player is free of stars, pays the usual $100, and the events and the fares are off', () => {
+  const sim = make(2, { mode: 'deathmatch', friendlyFire: false }); const [a, b] = sim.players; a.godT = b.godT = 0;
+  assert.equal(sim.mode, 'deathmatch'); assert.equal(sim.killCap, 20); assert.equal(sim.mission.state, 'done'); assert.equal(sim.mission.vinny, null);
+  assert.equal(parseMode(snapshot(sim, 0).md).dm.cap, 20); assert.equal(parseMode(snapshot(sim, 0).md).dm.leader, -1, 'nobody leads yet');
+  const cash = a.cash; sim.debug.killPlayer(b, a, 'pistol');
+  assert.equal(a.kills, 1); assert.equal(a.wanted, 0, 'no star for a player kill'); assert.equal(a.cash, cash + 100);
+  const md = parseMode(snapshot(sim, 1).md); assert.equal(md.dm.leader, 0); assert.equal(md.dm.kills, 1);
+  const ev = snapshot(sim, 0).ev; assert.ok(!ev.some(e => e[0] === 'wanted' && e[1] === 0), 'the room is not told of stars');
+  sim.debug.damagePlayer(b, 1, a, 'pistol'); // friendly fire is on whatever the sandbox knob says
+  run(sim, 200); assert.equal(sim.WE.kind, null, 'no world event in a deathmatch');
+  const cab = sim.cars.find(c => c.type.taxi); assert.ok(cab, 'the rank is still there'); sim.debug.enterCar(a, cab); run(sim, 3); assert.equal(a.job, null, 'but a cab takes no fares');
+});
+
+test('the deathmatch ends at the cap: the round is over the moment someone reaches it, and the cap is the lobby\'s', () => {
+  const sim = make(3, { mode: 'deathmatch', killCap: 10 }); const [a, b, c] = sim.players; a.godT = b.godT = c.godT = 0;
+  assert.equal(sim.killCap, 10);
+  for (let k = 0; k < 9; k++) { sim.debug.killPlayer(k % 2 ? b : c, a, 'smg'); run(sim, 6); }
+  assert.equal(a.kills, 9); assert.equal(sim.S.phase, 'play');
+  sim.debug.killPlayer(b, a, 'shotgun'); assert.equal(a.kills, 10); assert.equal(sim.S.phase, 'over', 'first to the cap ends it');
+  const ov = snapshot(sim, 1).ev.find(e => e[0] === 'over'); assert.ok(ov, 'the over event reaches everyone'); assert.equal(ov[1][0][0], 'killer'); assert.equal(ov[1][0][1], 0);
+  assert.ok(!ov[1].some(x => x[0] === 'cabbie'), 'no cabbie award in a deathmatch');
+  assert.equal(snapshot(sim, 1).ev.find(e => e[0] === 'over'), undefined, 'and only once');
+  const quiet = make(2, { mode: 'deathmatch', minutes: 0 }); run(quiet, 5); assert.equal(quiet.S.phase, 'play', 'an unlimited round runs until the cap');
+});
+
+test('a deathmatch needs two players: solo it is the sandbox, and the wire says so', () => {
+  const sim = make(1, { mode: 'deathmatch' });
+  assert.equal(sim.mode, 'sandbox'); assert.equal(sim.mission.state, 'intro'); assert.equal(parseMode(snapshot(sim, 0).md).dm, null); assert.equal(MODES[3], 'deathmatch');
+});
+
 test('the airdrop lands ten seconds in with its pickups, the armored truck spills cash when it goes', () => {
   const sim = make(2);
   assert.ok(sim.debug.startEvent('airdrop')); assert.equal(sim.WE.kind, 'airdrop');
@@ -520,7 +551,7 @@ import { GAMES } from '../client/games/registry.js';
 
 test('the lobby offers laps, guns, a starting kit, traffic and police, and the defaults are the old game', () => {
   const opts = GAMES.find(g => g.id === 'gta').options, keys = Object.fromEntries(opts.map(o => [o.key, o]));
-  assert.equal(keys.laps.default, 3); assert.equal(keys.guns.default, true); assert.equal(keys.loadout.default, 'basic'); assert.equal(keys.traffic.default, 'normal'); assert.equal(keys.cops.default, 'normal');
+  assert.equal(keys.laps.default, 3); assert.equal(keys.killCap.default, 20); assert.ok(keys.mode.choices.some(c => c.value === 'deathmatch')); assert.equal(keys.guns.default, true); assert.equal(keys.loadout.default, 'basic'); assert.equal(keys.traffic.default, 'normal'); assert.equal(keys.cops.default, 'normal');
   for (const c of keys.loadout.choices) assert.ok(LOADOUTS[c.value], c.value); for (const c of keys.traffic.choices) assert.ok(TRAFFIC_LEVELS[c.value], c.value); for (const c of keys.cops.choices) assert.ok(COP_LEVELS[c.value], c.value);
   assert.equal(lapsOf({}), LAPS); assert.equal(lapsOf({ laps: 5 }), 5); assert.equal(lapsOf({ laps: '2' }), 2);
   const sim = make(2); assert.equal(sim.laps, LAPS); assert.equal(sim.guns, true); assert.deepEqual(sim.kit, LOADOUTS.basic); assert.equal(sim.debug.MAX_TRAFFIC, 40);

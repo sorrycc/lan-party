@@ -39,7 +39,8 @@ export const GAMES = [
     id: 'gta', title: 'Fable Theft Auto 5.1', tagline: 'LOS PIXELES · VOXEL CRIME SANDBOX · UP TO 8',
     minPlayers: 1, maxPlayers: 8,
     options: [
-      { key: 'mode', type: 'select', label: 'MODE', default: 'sandbox', choices: [{ value: 'sandbox', label: 'Sandbox · most cash wins' }, { value: 'mostWanted', label: 'Most Wanted · carry the mark, hunt the mark' }, { value: 'race', label: 'Street Race · 3 laps, anything goes' }] },
+      { key: 'mode', type: 'select', label: 'MODE', default: 'sandbox', choices: [{ value: 'sandbox', label: 'Sandbox · most cash wins' }, { value: 'mostWanted', label: 'Most Wanted · carry the mark, hunt the mark' }, { value: 'race', label: 'Street Race · 3 laps, anything goes' }, { value: 'deathmatch', label: 'Deathmatch · first to N kills, no stars for it' }] },
+      { key: 'killCap', type: 'select', label: 'KILLS TO WIN (DEATHMATCH)', default: 20, choices: [{ value: 10, label: '10 kills' }, { value: 20, label: '20 kills' }, { value: 30, label: '30 kills' }] },
       { key: 'minutes', type: 'select', label: 'ROUND', default: 10, choices: [{ value: 5, label: '5 minutes' }, { value: 10, label: '10 minutes' }, { value: 15, label: '15 minutes' }, { value: 0, label: 'Unlimited' }] },
       { key: 'friendlyFire', type: 'bool', label: 'PLAYERS CAN HURT EACH OTHER', default: true },
       { key: 'guns', type: 'bool', label: 'GUNS (OFF: CARS AND THE COPS ARE THE ONLY WAYS TO DIE)', default: true },

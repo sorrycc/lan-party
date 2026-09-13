@@ -24,7 +24,7 @@ import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, lapsOf, gunsOn } from './sim.js';
+import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn } from './sim.js';
 import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
@@ -34,6 +34,7 @@ import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
 const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_PER_S} a second to whoever holds it, and whoever kills them takes it, plus a $${MARK_BOUNTY} bounty.`;
+const briefDm = (cap, guns) => `Everyone is fair game and nobody gets a star for it. First to ${cap} kills wins, or the most when the clock runs out. ${guns ? 'Guns, cars, whatever works.' : 'No guns: cars and your fists.'}`;
 const briefRace = (laps, guns) => `${laps} lap${laps === 1 ? '' : 's'} through the checkpoints and back across the line. ${guns ? 'Anything goes: guns, traffic, cops.' : 'No guns: traffic, cops and your bumper.'} The first one home gives the rest ${RACE_END_T} seconds.`;
 /* what the death card says for each CAUSES entry; a name is filled in when a player did it */
 const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
@@ -170,7 +171,7 @@ export async function create({ mount, audio, send, hooks }) {
   });
 
   /* ---- session + local state */
-  let laps = LAPS, guns = true; // the round's lobby options that the HUD needs (RACE LAPS, GUNS)
+  let laps = LAPS, killCap = KILL_CAP, guns = true; // the round's lobby options that the HUD needs (RACE LAPS, KILLS TO WIN, GUNS)
   let awards = []; // the round's awards, from the host's `over` event: [key, player index, value, extra?]
   let sim = null, remote = null, session = null, isHost = false, online = false, hostId = null, myId = null, myIdx = 0, me = null, clients = [];
   let state = 'idle'; // idle | grab (click to play) | play | paused | over
@@ -412,7 +413,7 @@ export async function create({ mount, audio, send, hooks }) {
     const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY', tap = touch ? 'TAP' : 'CLICK';
     if (kind === 'grab') {
       ov.title.innerHTML = 'FABLE THEFT AUTO <b>5.1</b>'; ov.sub.textContent = `LOS PIXELES  ·  ${tap} TO PLAY`;
-      const f = document.createElement('div'); f.textContent = modeName() === 'mostWanted' ? 'MOST WANTED: CARRY THE MARK, HUNT THE MARK' : modeName() === 'race' ? `STREET RACE: ${laps} LAP${laps === 1 ? '' : 'S'}, ${guns ? 'ANYTHING GOES' : 'NO GUNS'}` : 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
+      const f = document.createElement('div'); f.textContent = modeName() === 'mostWanted' ? 'MOST WANTED: CARRY THE MARK, HUNT THE MARK' : modeName() === 'deathmatch' ? `DEATHMATCH: FIRST TO ${killCap} KILLS` : modeName() === 'race' ? `STREET RACE: ${laps} LAP${laps === 1 ? '' : 'S'}, ${guns ? 'ANYTHING GOES' : 'NO GUNS'}` : 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
     } else if (kind === 'paused') {
       ov.title.textContent = 'PAUSED'; ov.sub.textContent = (online ? 'THE CITY KEEPS RUNNING WITHOUT YOU  ·  ' : '') + `${tap} TO RESUME`;
       button('RESUME', 'good', grab);
@@ -422,10 +423,11 @@ export async function create({ mount, audio, send, hooks }) {
       button(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { showStats = !showStats; showOverlay('paused'); });
       if (restart) { button(!online ? 'RESTART' : 'RESTART FOR EVERYONE', '', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
     } else {
-      const mw = modeName() === 'mostWanted', race = modeName() === 'race', n = course ? course.length : 1;
-      ov.title.textContent = race ? 'RACE OVER' : "TIME'S UP"; ov.sub.textContent = race ? 'FINAL STANDINGS  ·  FIRST ACROSS THE LINE WINS' : 'FINAL STANDINGS  ·  MOST CASH WINS';
+      const mw = modeName() === 'mostWanted', race = modeName() === 'race', dm = modeName() === 'deathmatch', n = course ? course.length : 1;
+      const capped = dm && V.blocks.some(b => b.kills >= killCap); // ended on the cap, not the clock
+      ov.title.textContent = race ? 'RACE OVER' : capped ? 'DEATHMATCH OVER' : "TIME'S UP"; ov.sub.textContent = race ? 'FINAL STANDINGS  ·  FIRST ACROSS THE LINE WINS' : dm ? 'FINAL STANDINGS  ·  MOST KILLS WINS' : 'FINAL STANDINGS  ·  MOST CASH WINS';
       const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) }))
-        .sort((a, c) => race ? ((a.b.rank || 99) - (c.b.rank || 99)) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
+        .sort((a, c) => race ? ((a.b.rank || 99) - (c.b.rank || 99)) : dm ? (c.b.kills - a.b.kills) || (c.b.cash - a.b.cash) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
       const raceCell = b => b.place ? `<td class="n mark">FINISHED ${ordinal(b.place)}</td>` : `<td class="n">LAP ${Math.min(laps, b.lap + 1)}/${laps}  ·  CP ${b.next === 0 ? n - 1 : b.next - 1}/${n - 1}</td>`;
       ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
       ov.awards.innerHTML = awards.map(([key, idx, v, x]) => { const a = AWARDS[key]; return a ? `<tr class="${idx === myIdx ? 'me' : ''}"><td class="aw">${a[0]}</td><td><span class="sw" style="background:${hex(playerColor(idx))}"></span>${esc(nameOf(idx))}</td><td class="n mark">${esc(a[1](v, x, nameOf))}</td></tr>` : ''; }).join('');
@@ -676,7 +678,7 @@ export async function create({ mount, audio, send, hooks }) {
       ptext(hctx, me.reloadT > 0 ? 'RELOAD' : me.ammo + '/' + me.reserve, rx - s * 2, y + s * 3, s, me.reloadT > 0 ? '#ffe14d' : '#ffffff', 'right'); y += s * 14;
       ptext(hctx, w.name, rx, y, s * 0.8, '#bbbbbb', 'right'); y += s * 9;
       for (let k = 0; k < WEAPONS.length; k++) { const owned = me.owned & (1 << k); ptext(hctx, String(k + 1), rx - (WEAPONS.length - 1 - k) * s * 8, y, s * 0.9, k === me.curW ? '#ffe14d' : owned ? '#ffffff' : 'rgba(255,255,255,0.2)', 'right'); } y += s * 9; } // the weapons I carry, by their key
-    ptext(hctx, 'KILLS ' + me.kills, rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
+    ptext(hctx, 'KILLS ' + me.kills + (V.md.dm ? '/' + V.md.dm.cap : ''), rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
     if (V.timeLeft >= 0) { ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right'); y += s * 10; }
     const race = course && V.md.race, racers = V.players.filter(p => !p.gone).length, cpN = course ? course.length - 1 : 0;
     if (race) { // my standing, big, and the lap under it
@@ -685,19 +687,20 @@ export async function create({ mount, audio, send, hooks }) {
       if (race.state === 2) { ptext(hctx, 'RACE ENDS ' + fmtClock(Math.max(0, race.t)), rx, y, s * 0.9, '#ff6060', 'right'); y += s * 9; }
       if (guide && !dead) { drawGuide(rx, y, s); y += s * 20; } }
     // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
-    { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark;
+    { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark, dm = V.md.dm;
       hctx.fillStyle = 'rgba(0,0,0,0.5)';
-      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(race ? briefRace(laps, guns) : mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
+      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(race ? briefRace(laps, guns) : dm ? briefDm(dm.cap, guns) : mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
       const job = me.job, jt = job && JOB_TEXT[job.kind];
       const objective = race ? (race.state === 0 ? 'On the grid. Wait for the green.' : me.place ? `You finished ${ordinal(me.place).toLowerCase()}. ${race.finishers < racers ? 'The rest have ' + Math.ceil(Math.max(0, race.t)) + ' s.' : ''}`
           : `${me.next === 0 ? 'Back across the line' : 'Checkpoint ' + me.next + ' of ' + cpN}, ${streetAt(routeTarget ? routeTarget.x : 0, routeTarget ? routeTarget.z : 0)}.  ${ordinal(me.rank || racers)} of ${racers}.`)
         : jt ? (job.stage === 0 ? `A ${jt.who.toLowerCase()} is on the way.` : job.stage === 1 ? `Pick up the ${jt.who.toLowerCase()} on ${streetAt(job.x, job.z)}.` : `Take the ${jt.who.toLowerCase()} to ${job.kind === 2 ? 'the hospital' : streetAt(job.x, job.z)}.`) + (job.stage > 0 ? '  ' + fmtClock(job.t) : '') + (job.n ? `  ·  ${job.n} in a row` : '')
+        : dm ? `${me.kills} of ${dm.cap} kills.  ${dm.leader < 0 ? 'Nobody has scored yet.' : dm.leader === myIdx ? 'You lead.' : `${nameOf(dm.leader)} leads with ${dm.kills}.`}`
         : !mw ? OBJECTIVES[ms] : mk < 0 ? 'The mark is drawn in a moment. Find a car.' : mk === myIdx ? `You are the mark. Stay alive: +$${MARK_CASH_PER_S} a second.` : `Hunt ${nameOf(mk)}. The kill pays $${MARK_BOUNTY} and the mark.`;
       const objLines = wrapText('> ' + objective, Math.floor(tw / (6 * s * 0.9)));
       hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
-      ptext(hctx, race ? 'STREET RACE' : jt ? jt.title : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
+      ptext(hctx, race ? 'STREET RACE' : jt ? jt.title : dm ? 'DEATHMATCH' : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
       for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
-      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; }
+      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : dm ? (dm.leader === myIdx ? '#ffe14d' : '#ff6060') : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; }
       drawFeed(px, py + s * 6, s, short || touch ? FEED_LINES_PHONE : FEED_LINES); }
     // the race: the countdown on the grid, GO!, and the finish flash
     if (race && race.state === 0) { const c = Math.ceil(race.t); hctx.fillStyle = 'rgba(0,0,0,0.35)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
@@ -713,9 +716,9 @@ export async function create({ mount, audio, send, hooks }) {
     const hint = (touch ? HINT_TOUCH : HINT)[me.hint] || '';
     if (hint && !dead && state === 'play') ptext(hctx, hint, Wd / 2, B - s * 12 + 4, s, '#ffffff', 'center');
     // centre messages
-    if ((MISSION_STATES[V.ms] === 'intro' || modeName() === 'mostWanted') && !course && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1); const mw = modeName() === 'mostWanted';
+    if ((MISSION_STATES[V.ms] === 'intro' || modeName() === 'mostWanted' || modeName() === 'deathmatch') && !course && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1); const mw = modeName() === 'mostWanted', dm = modeName() === 'deathmatch';
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
-      ptext(hctx, mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
+      ptext(hctx, dm ? 'DEATHMATCH' : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, dm ? `FIRST TO ${killCap} KILLS. NO STARS FOR IT.` : mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, 'WANTED LEVEL ' + '*'.repeat(me.wanted), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
     if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
       if (death && deadT > 0.8) { ptext(hctx, death.line1, Wd / 2, Hd / 2 + sc * 4, s * 1.2, '#ffffff', 'center'); if (death.line2) ptext(hctx, death.line2, Wd / 2, Hd / 2 + sc * 4 + s * 12, s * 0.9, '#bbbbbb', 'center'); } }
@@ -813,9 +816,10 @@ export async function create({ mount, audio, send, hooks }) {
       clients = s.players.filter(p => p.id !== myId).map(p => ({ id: p.id, known: new Set(), pl: sim.playerOf(p.id) }));
       hostView();
       if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
+      if ((s.opts || {}).mode === 'deathmatch' && sim.mode !== 'deathmatch') floatText('A DEATHMATCH NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
-    laps = lapsOf(s.opts || {}); guns = gunsOn(s.opts || {}); root.classList.toggle('noguns', !guns); // the HUD's copy of the lobby's knobs; the touch FIRE, WEAPON and RELOAD buttons go with the guns
+    laps = lapsOf(s.opts || {}); killCap = killCapOf(s.opts || {}); guns = gunsOn(s.opts || {}); root.classList.toggle('noguns', !guns); // the HUD's copy of the lobby's knobs; the touch FIRE, WEAPON and RELOAD buttons go with the guns
     course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; legs = course ? planLap(course) : null; routeCp = -1; goT = 0; lastCount = -1; finishT = 0; // the course and the lap plan come from the seed on every machine
     root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; killcamT = -1; replay.reset(); W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();

@@ -29,8 +29,11 @@ export const INTRO_T = 5.5;
    a touch player aiming with a thumb gets a wider cone. The HUD uses the same rule to colour the crosshair. */
 export const aimTol = (d, assist) => assist ? Math.max(0.16, Math.atan(2.4 / d)) : Math.max(0.05, Math.atan(0.8 / d));
 export const START_CLOCK = { morning: 9.4, sunset: 18.2, night: 23.5 };
-/* the game modes, indexed on the wire. Most Wanted needs two players: solo it falls back to the sandbox. A race alone is a time trial. */
-export const MODES = ['sandbox', 'mostWanted', 'race'];
+/* the game modes, indexed on the wire (append, never reorder). Most Wanted and the deathmatch need two players: solo they fall back to the sandbox. A race alone is a time trial. */
+export const MODES = ['sandbox', 'mostWanted', 'race', 'deathmatch'];
+/* the deathmatch: the kills that win it outright (the clock is the backstop; on an unlimited round it is the only end) */
+export const KILL_CAP = 20;
+export const killCapOf = opts => Number(opts.killCap) > 0 ? Math.floor(Number(opts.killCap)) : KILL_CAP;
 /* the lobby's knobs: how many laps a race is, which guns everyone starts with (the kit is what a dead player keeps and
    what respawns with them; anything else they pick up is dropped in the street), and how thick the traffic and the
    police are (a factor on the caps and the spawn rates) */
@@ -40,7 +43,7 @@ export const loadoutOf = opts => LOADOUTS[opts.loadout] || LOADOUTS.basic;
 export const TRAFFIC_LEVELS = { light: 0.5, normal: 1, heavy: 1.75 };
 export const COP_LEVELS = { soft: 0.5, normal: 1, hard: 1.5 };
 export const gunsOn = opts => opts.guns !== false;
-export const modeOf = (opts, nPlayers) => opts.mode === 'race' ? 'race' : opts.mode === 'mostWanted' && nPlayers >= 2 ? 'mostWanted' : 'sandbox';
+export const modeOf = (opts, nPlayers) => opts.mode === 'race' ? 'race' : (opts.mode === 'mostWanted' || opts.mode === 'deathmatch') && nPlayers >= 2 ? opts.mode : 'sandbox';
 /* the race: the countdown on the grid, and how long the rest get once the first car is across the line */
 export const COUNTDOWN_T = 5, RACE_END_T = 20;
 /* Most Wanted: what the mark earns a second, the bounty on it, how long after the start the first mark is drawn, the stars it always carries */
@@ -78,7 +81,8 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   const nPlayers = (session.players || []).length;
   const mode = modeOf(opts, nPlayers);
   const friendly = mode !== 'sandbox' || opts.friendlyFire !== false; // the mark can only be hunted, and a race is anything goes, with friendly fire on
-  const laps = lapsOf(opts), guns = gunsOn(opts), kit = loadoutOf(opts), trafficK = TRAFFIC_LEVELS[opts.traffic] || 1, copK = COP_LEVELS[opts.cops] || 1;
+  const openCity = mode === 'sandbox' || mode === 'mostWanted'; // the free-roam modes: world events run and the cabs and the ambulance take jobs; a race or a deathmatch has neither
+  const laps = lapsOf(opts), killCap = killCapOf(opts), guns = gunsOn(opts), kit = loadoutOf(opts), trafficK = TRAFFIC_LEVELS[opts.traffic] || 1, copK = COP_LEVELS[opts.cops] || 1;
   const MAX_COPS = Math.round((nPlayers <= 1 ? SOLO_COPS : Math.min(MAX_COPS_ROOM, COPS_PER_PLAYER * nPlayers)) * copK), MAX_COP_CARS = Math.round((nPlayers <= 1 ? SOLO_COP_CARS : Math.min(MAX_COP_CARS_ROOM, COP_CARS_PER_PLAYER * nPlayers)) * copK);
   const MAX_TRAFFIC = Math.round(40 * trafficK), TRAFFIC_TOPUP = Math.ceil(2 * trafficK); // cars driving around, and how many are added per half second
   /* phase: 'countdown' (the race grid, nobody moves) | 'play' | 'over' */
@@ -552,8 +556,9 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     const wasMark = mode === 'mostWanted' && mark.idx === pl.idx;
     emit(['kill', pl.killer, pl.idx, pl.cause]); // the feed on every screen: who, whom, how (the killer is -1 for the cops, the traffic, a crash)
     if (by && by !== pl) { by.kills++; by.killsOf[pl.idx]++; by.cash += 100; emit(['float', by.idx, 'WASTED ' + pl.name.toUpperCase() + '  +$100', 0xff6060]);
-      if (by.wanted < 2 && !wasMark) addWanted(by, 1); } // hunting the mark is legal
+      if (by.wanted < 2 && !wasMark && mode !== 'deathmatch') addWanted(by, 1); } // hunting the mark is legal, and so is everything in a deathmatch
     if (wasMark) { if (by && by !== pl) { by.cash += MARK_BOUNTY; emit(['float', by.idx, 'BOUNTY  +$' + MARK_BOUNTY, 0xffe14d]); setMark(by.idx, 'kill'); } else setMark(randomPlayer(pl), 'cops'); }
+    if (mode === 'deathmatch' && by && by !== pl && by.kills >= killCap) endRound(); // first to the cap takes the round
   }
   function respawn(pl) {
     const P = pl.ped; P.dead = false; P.health = 100; P.vy = 0;
@@ -835,7 +840,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     emit(['float', pl.idx, text, 0xff6060]); emit(['job', pl.idx, 'fail']);
   }
   function updateJob(pl, dt) {
-    const P = pl.ped, c = P.inCar; const kind = c && P.seat === 0 && !c.dead && mode !== 'race' ? (c.type.taxi ? 'taxi' : c.type.ambulance ? 'ambulance' : null) : null; // no fares mid-race
+    const P = pl.ped, c = P.inCar; const kind = c && P.seat === 0 && !c.dead && openCity ? (c.type.taxi ? 'taxi' : c.type.ambulance ? 'ambulance' : null) : null; // no fares mid-race or in a deathmatch
     if (!kind) { if (pl.job) endJob(pl); return; }
     if (!pl.job) { pl.job = { kind, stage: 'wait', fare: null, x: 0, z: 0, t: 1.5, dist: 0, pay: 0, n: 0 };
       emit(['float', pl.idx, kind === 'taxi' ? 'TAXI JOB  ·  FARES PAY BY THE METRE' : 'PARAMEDIC  ·  GET THE PATIENTS TO THE HOSPITAL', 0xf2c014]); emit(['job', pl.idx, 'start']); }
@@ -891,7 +896,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     { let ba = null, bb = -1, bn = 1; for (const p of here) p.killsOf.forEach((n, j) => { if (n > bn) { bn = n; ba = p; bb = j; } }); if (ba) out.push(['nemesis', ba.idx, bn, bb]); }
     add('victim', best(p => p.deaths, v => v >= 2));
     add('fugitive', best(p => p.chaseBest, v => v >= 30));
-    add('cabbie', best(p => p.streakBest, v => v >= 2));
+    if (openCity) add('cabbie', best(p => p.streakBest, v => v >= 2)); // no fares to run otherwise
     add('speed', best(p => p.topSpeed * 3.6, v => v >= 60));
     add('driver', best(p => p.driven >= DRIVER_MIN_M ? p.crashes : -1, v => v >= 0, true), p => r1(p.driven / 1000));
     add('loot', best(p => p.loot, v => v >= 100));
@@ -939,7 +944,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
     for (const c of cars) if (!c.released) c.draw(dt);
     for (let k = peds.length - 1; k >= 0; k--) { const p = peds[k]; if (p.released) { peds.splice(k, 1); continue; } if (p.kind === 'player') continue; p.update(dt);
       if (!p.dead && !p.inCar) { if (pushOutOfCars(p, 0.3, false, cars)) { p.carStuck++; if (p.carStuck > 90 && p.kind === 'civ') { p.carStuck = 0; p.flee = 2; p.threatX = p.x + rr(-1, 1); p.threatZ = p.z + rr(-1, 1); p.state = 'flee'; } } else p.carStuck = 0; } }
-    if (live) { updateWanted(dt); updateMission(dt); updateMark(dt); if (mode !== 'race') updateEvents(dt); }
+    if (live) { updateWanted(dt); updateMission(dt); updateMark(dt); if (openCity) updateEvents(dt); }
     if (mode === 'race') updateRace(dt);
     updatePickups(dt); growSpots(dt);
     W.dirtyDynamic();
@@ -994,9 +999,12 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
       pl.lap, pl.next, pl.rank, pl.place, // the race: laps done, the checkpoint I head for, my standing, my finishing place
       ...(pl.job ? [JOB_KINDS.indexOf(pl.job.kind), JOB_STAGES.indexOf(pl.job.stage), r1(pl.job.x), r1(pl.job.z), r1(Math.max(0, pl.job.t)), pl.job.n] : [0])]; }; // the job (last, it is variable): kind, stage, where to go, seconds left, deliveries in a row
   /* the shared mode state: [mode, the mark's player index, seconds it has held, the world event or null ([kind, x, z, seconds left, landed]),
-     the race or null ([0 countdown / 1 racing / 2 someone is home, seconds left of the countdown or the grace, finishers])] */
+     the race or null ([0 countdown / 1 racing / 2 someone is home, seconds left of the countdown or the grace, finishers]),
+     the deathmatch or null ([the kills that win, the leader's player index or -1, the leader's kills])] */
+  const leader = () => { let b = null; for (const p of players) if (p.kills > 0 && (!b || p.kills > b.kills)) b = p; return b; }; // the first along wins a tie
   const modeState = () => [MODES.indexOf(mode), mark.idx, r1(mark.heldT), WE.kind ? [EVENT_KINDS.indexOf(WE.kind), r1(WE.x), r1(WE.z), r1(WE.t), WE.landed ? 1 : 0] : null,
-    mode === 'race' ? [S.phase === 'countdown' ? 0 : RC.ending ? 2 : 1, r1(RC.t), RC.finishers] : null];
+    mode === 'race' ? [S.phase === 'countdown' ? 0 : RC.ending ? 2 : 1, r1(RC.t), RC.finishers] : null,
+    mode === 'deathmatch' ? (l => [killCap, l ? l.idx : -1, l ? l.kills : 0])(leader()) : null];
   function prepareNet() {
     for (const e of ents.values()) { const entry = e.cls === 'ped' ? pedEntry(e) : e.cls === 'car' ? carEntry(e) : pickEntry(e); e.entry = entry; e.dirty = !same(entry, e.sent); }
   }
@@ -1051,7 +1059,7 @@ export function createSim({ W, session, opts = {}, onEvent = () => {} }) {
   for (let k = 0; k < 90; k++) spawnCiv(anchor());
   for (let k = 0; k < MAX_TRAFFIC; k++) spawnTrafficCar(anchor());
 
-  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, guns, kit, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
+  return { players, peds, cars, cops, pickups, spots, mission, S, ents, mode, laps, killCap, guns, kit, mark, WE, course, RC, modeState, update, setInput, action, playerLeft, block, prepareNet, snapshotFor, endNet, clearEvents, dispose, playerOf: id => players.find(p => p.id === id) || null,
     /* for the tests and the console: reach into the rules directly */
     debug: { damagePlayer, killPlayer, addWanted, clearWanted, surrender, setMark, startEvent, spawnRoadblock, fireWeapon, enterCar, leaveCar, takeWeapon, spawnPickup, newFare, failJob, endJob, throwRiders, collideCars, Ped, Car, MAX_COPS, MAX_COP_CARS, MAX_TRAFFIC } };
 }
