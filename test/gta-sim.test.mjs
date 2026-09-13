@@ -7,7 +7,9 @@ import * as THREE from 'three';
 import { createSim, MODES, MARK_CASH_PER_S, MARK_BOUNTY, MARK_PICK_T, MARK_STARS, ESCAPE_BONUS, AIRDROP_T, AIRDROP_FALL, aimTol } from '../client/games/gta/sim.js';
 import { parseBlock, parseMode } from '../client/games/gta/remote.js';
 import { CAUSES, EVENT_KINDS, CAR_TYPES } from '../client/games/gta/entities.js';
-import { NEWS, STREAK_NEWS, AWARD_KEYS, AWARDS_SHOWN } from '../client/games/gta/sim.js';
+import { NEWS, STREAK_NEWS, AWARD_KEYS, AWARDS_SHOWN, ARENA_TRAFFIC, ARENA_CIVS, ARENA_MARGIN } from '../client/games/gta/sim.js';
+import { arenaOf, arenaSpawns, farthestSpawn, inArena, ARENA_BLOCKS, OUT_WARN_T, OUT_DMG_PER_S } from '../client/games/gta/arena.js';
+import { HALF, ROAD, PITCH } from '../client/games/gta/world.js';
 
 const pool = () => ({ alloc() { return 0; }, release() {}, color() {}, hide() {}, set() {}, dirty() {} });
 const stubWorld = () => ({ THREE, aabbs: [], nearAabbs: () => [], hasLOS: () => true, pickPool: pool(), pedPools: Array.from({ length: 7 }, pool), gunPool: pool(), carBody: pool(), carCabin: pool(), carWheel: pool(), carLight: pool(), dirtyDynamic() {} });
@@ -83,7 +85,7 @@ test('the deathmatch: killing a player is free of stars, pays the usual $100, an
   const ev = snapshot(sim, 0).ev; assert.ok(!ev.some(e => e[0] === 'wanted' && e[1] === 0), 'the room is not told of stars');
   sim.debug.damagePlayer(b, 1, a, 'pistol'); // friendly fire is on whatever the sandbox knob says
   run(sim, 200); assert.equal(sim.WE.kind, null, 'no world event in a deathmatch');
-  const cab = sim.cars.find(c => c.type.taxi); assert.ok(cab, 'the rank is still there'); sim.debug.enterCar(a, cab); run(sim, 3); assert.equal(a.job, null, 'but a cab takes no fares');
+  const cab = sim.cars.find(c => c.type.taxi); assert.ok(cab, 'a cab rolls in the traffic'); sim.debug.enterCar(a, cab); run(sim, 3); assert.equal(a.job, null, 'but it takes no fares');
 });
 
 test('the deathmatch ends at the cap: the round is over the moment someone reaches it, and the cap is the lobby\'s', () => {
@@ -100,7 +102,45 @@ test('the deathmatch ends at the cap: the round is over the moment someone reach
 
 test('a deathmatch needs two players: solo it is the sandbox, and the wire says so', () => {
   const sim = make(1, { mode: 'deathmatch' });
-  assert.equal(sim.mode, 'sandbox'); assert.equal(sim.mission.state, 'intro'); assert.equal(parseMode(snapshot(sim, 0).md).dm, null); assert.equal(MODES[3], 'deathmatch');
+  assert.equal(sim.mode, 'sandbox'); assert.equal(sim.mission.state, 'intro'); assert.equal(parseMode(snapshot(sim, 0).md).dm, null); assert.equal(MODES[3], 'deathmatch'); assert.equal(sim.arena, null, 'and no fence');
+});
+
+test('the arena comes from the seed: three blocks a side inside the city, the same every time, with eight sidewalk spawn points inside it facing the centre', () => {
+  const A = arenaOf(7); assert.deepEqual(arenaOf(7), A); assert.notDeepEqual(arenaOf(1), A);
+  assert.equal(A.n, ARENA_BLOCKS); assert.equal(A.x1 - A.x0, ARENA_BLOCKS * PITCH + ROAD); assert.equal(A.z1 - A.z0, ARENA_BLOCKS * PITCH + ROAD);
+  for (const seed of [1, 2, 3, 7, 42, 99, 12345]) { const B = arenaOf(seed); assert.ok(B.x0 >= -HALF - ROAD / 2 && B.x1 <= HALF + ROAD / 2 && B.z0 >= -HALF - ROAD / 2 && B.z1 <= HALF + ROAD / 2, 'inside the city ' + seed);
+    const sp = arenaSpawns(B); assert.equal(sp.length, 8); assert.equal(new Set(sp.map(s => s.x + ',' + s.z)).size, 8, 'all different');
+    for (const s of sp) { assert.ok(inArena(B, s.x, s.z), 'inside'); assert.ok(Math.sin(s.face) * (B.cx - s.x) + Math.cos(s.face) * (B.cz - s.z) > 0, 'facing the centre'); } }
+  const sp = arenaSpawns(A); const far = farthestSpawn(sp, [{ x: sp[0].x, z: sp[0].z }]); assert.notEqual(far, sp[0]);
+  const d = s => Math.hypot(s.x - sp[0].x, s.z - sp[0].z); for (const s of sp) assert.ok(d(s) <= d(far), 'the farthest from the enemy');
+  assert.equal(farthestSpawn(sp, []), sp[0], 'nobody to keep away from: the first');
+  assert.ok(!inArena(A, A.x1 + 1, A.cz)); assert.ok(inArena(A, A.x1 + 1, A.cz, 2), 'with a margin');
+});
+
+test('the deathmatch is fought in the arena: everyone starts on foot inside it, the crates, the crowd and the traffic are its own, and a respawn is the corner farthest from the others, free of charge', () => {
+  const sim = make(4, { mode: 'deathmatch' }); const A = sim.arena, [a, b, c, d] = sim.players; assert.deepEqual(A, arenaOf(7));
+  for (const p of sim.players) { assert.ok(inArena(A, p.ped.x, p.ped.z), 'inside'); assert.equal(p.ped.inCar, null, 'on foot'); }
+  assert.equal(sim.spots.length, 6); assert.deepEqual(sim.spots.map(s => s.kind).sort(), ['ammo', 'ammo', 'health', 'health', 'rpg', 'sniper']); for (const s of sim.spots) { assert.ok(inArena(A, s.x, s.z), 'the crates are inside'); assert.ok(!sim.aSpawns.some(p => Math.hypot(p.x - s.x, p.z - s.z) < 3), 'and off the spawn points'); }
+  assert.equal(sim.debug.MAX_TRAFFIC, ARENA_TRAFFIC); assert.equal(sim.debug.MAX_CIVS, ARENA_CIVS);
+  const parked = sim.cars.filter(c => c.parked); assert.ok(parked.length >= 6 && parked.length <= 24, 'a handful of cars to find: ' + parked.length); for (const c of parked) assert.ok(inArena(A, c.x, c.z), 'parked inside');
+  assert.ok(!sim.cars.some(c => c.type.ambulance), 'no landmarks outside it');
+  run(sim, 3); const civs = sim.peds.filter(p => p.kind === 'civ'), traffic = sim.cars.filter(c => c.ai === 'traffic');
+  assert.ok(civs.length > 0 && civs.length <= ARENA_CIVS, 'a thin crowd'); assert.ok(traffic.length > 0 && traffic.length <= ARENA_TRAFFIC, 'thin traffic');
+  for (const e of [...civs, ...traffic]) assert.ok(inArena(A, e.x, e.z, ARENA_MARGIN), 'nothing beyond the margin');
+  a.godT = b.godT = 0; const cash = b.cash; sim.debug.killPlayer(b, a, 'pistol'); run(sim, 6); assert.ok(!b.dead, 'back');
+  assert.equal(b.cash, cash, 'no hospital bill'); assert.ok(inArena(A, b.ped.x, b.ped.z), 'back inside');
+  const sp = farthestSpawn(sim.aSpawns, [a, c, d].map(p => ({ x: p.ped.x, z: p.ped.z }))); assert.equal(b.ped.x, sp.x); assert.equal(b.ped.z, sp.z);
+  const blk = parseBlock(sim.block(b)); assert.equal(blk.outT, 0); assert.equal(blk.job, null, 'the job still parses after it');
+});
+
+test('the fence: outside the arena a clock runs and the block says so, after the warning it hurts, back inside it stops, and staying out is a death of its own', () => {
+  const sim = make(2, { mode: 'deathmatch' }); const A = sim.arena, [a, b] = sim.players; a.godT = b.godT = 0;
+  a.ped.x = A.x1 + 10; a.ped.z = A.cz; run(sim, 1); assert.ok(a.outT > 0.9 && a.outT < 1.2, 'the clock runs'); assert.equal(a.ped.health, 100, 'not yet');
+  assert.ok(parseBlock(sim.block(a)).outT > 0.9); assert.ok(snapshot(sim, 0).ev.some(e => e[0] === 'float' && e[1] === 0 && /ARENA/.test(e[2])), 'told once');
+  run(sim, OUT_WARN_T); assert.ok(a.ped.health < 100 && a.ped.health > 100 - OUT_DMG_PER_S * 2, 'it hurts, about a second of it: ' + a.ped.health);
+  a.ped.x = A.cx; run(sim, 0.2); assert.equal(a.outT, 0, 'back inside: the clock stops'); const h = a.ped.health; run(sim, 1); assert.equal(a.ped.health, h, 'and it stops hurting');
+  a.ped.x = A.x0 - 10; run(sim, OUT_WARN_T + 100 / OUT_DMG_PER_S + 1); assert.ok(a.dead, 'staying out is death'); assert.equal(a.killer, -1); assert.equal(CAUSES[a.cause], 'fence'); assert.equal(b.kills, 0, 'nobody gets it');
+  assert.equal(a.outT, 0); run(sim, 6); assert.ok(!a.dead && inArena(A, a.ped.x, a.ped.z), 'respawned inside');
 });
 
 test('the airdrop lands ten seconds in with its pickups, the armored truck spills cash when it goes', () => {

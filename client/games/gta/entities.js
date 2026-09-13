@@ -201,7 +201,7 @@ export const PICK_COLOR = kind => kind === 'cash' ? 0x3dff7a : kind === 'ammo' ?
 /* indexed on the wire, so only ever append; the last two are the weapon crates (their amount is the rounds inside) */
 export const PICK_KINDS = ['cash', 'ammo', 'health', 'bribe', 'sniper', 'rpg', 'pistol', 'shotgun', 'smg']; // the basic guns only lie in the street when a lobby kit left someone without them
 /* how a player died, indexed on the wire (the per-player block); the weapon keys are among them */
-export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg', 'crash']; // crash: thrown off a motorcycle
+export const CAUSES = ['', 'pistol', 'shotgun', 'smg', 'runover', 'explosion', 'cop', 'guard', 'swat', 'sniper', 'rpg', 'crash', 'fence']; // crash: thrown off a motorcycle; fence: stayed outside the deathmatch's arena
 /* the world events, indexed on the wire */
 export const EVENT_KINDS = ['truck', 'airdrop'];
 /* the driving jobs (taxi fares, ambulance patients) and their stages, indexed on the wire (the per-player block) */

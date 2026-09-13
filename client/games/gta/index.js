@@ -24,7 +24,8 @@ import { AVATARS } from '../../core/avatars.js';
 import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn } from './sim.js';
+import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn, modeOf } from './sim.js';
+import { arenaOf, OUT_WARN_T } from './arena.js';
 import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
 import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
 import { createPredictor } from './predict.js';
@@ -34,14 +35,14 @@ import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 const NET_HZ = 30;
 const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
 const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_PER_S} a second to whoever holds it, and whoever kills them takes it, plus a $${MARK_BOUNTY} bounty.`;
-const briefDm = (cap, guns) => `Everyone is fair game and nobody gets a star for it. First to ${cap} kills wins, or the most when the clock runs out. ${guns ? 'Guns, cars, whatever works.' : 'No guns: cars and your fists.'}`;
+const briefDm = (cap, guns) => `Everyone is fair game and nobody gets a star for it, inside the red fence. Leave it and you have ${OUT_WARN_T} seconds to get back. First to ${cap} kills wins, or the most when the clock runs out. ${guns ? 'Guns, cars, whatever works.' : 'No guns: cars and your fists.'}`;
 const briefRace = (laps, guns) => `${laps} lap${laps === 1 ? '' : 's'} through the checkpoints and back across the line. ${guns ? 'Anything goes: guns, traffic, cops.' : 'No guns: traffic, cops and your bumper.'} The first one home gives the rest ${RACE_END_T} seconds.`;
 /* what the death card says for each CAUSES entry; a name is filled in when a player did it */
-const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT' };
+const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT', fence: 'LEFT THE ARENA' };
 const PICK_TEXT = { sniper: 'SNIPER RIFLE', rpg: 'ROCKET LAUNCHER', pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG' };
 /* the feed's line for a kill: a gun draws its icon between the two names, anything else is a verb; without a killer the victim's fate */
 const KILL_VERB = { runover: 'RAN OVER', explosion: 'BLEW UP', crash: 'KNOCKED OFF THE BIKE' };
-const DIED_TEXT = { cop: 'SHOT BY THE LPPD', swat: 'SHOT BY SWAT', guard: 'SHOT BY THE BODYGUARDS', runover: 'RUN OVER', explosion: 'BLOWN UP', crash: 'CAME OFF THE BIKE' };
+const DIED_TEXT = { cop: 'SHOT BY THE LPPD', swat: 'SHOT BY SWAT', guard: 'SHOT BY THE BODYGUARDS', runover: 'RUN OVER', explosion: 'BLOWN UP', crash: 'CAME OFF THE BIKE', fence: 'LEFT THE ARENA' };
 /* the feed: how long a line stays, how long it takes to fade, how many show (fewer on a phone) */
 const FEED_T = 8, FEED_FADE = 1.5, FEED_LINES = 5, FEED_LINES_PHONE = 3;
 /* the letter a weapon lying in the street shows on the minimap, and its square's colour */
@@ -152,6 +153,18 @@ export async function create({ mount, audio, send, hooks }) {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(66, innerWidth / innerHeight, 0.3, 1600);
   const W = buildWorld({ THREE, scene });
+  /* the deathmatch's fence: four tall translucent red walls on the arena's edge, hidden until a deathmatch places them */
+  const fence = new THREE.Group(); fence.visible = false; scene.add(fence);
+  const fenceMat = new THREE.MeshBasicMaterial({ color: 0xff3a3a, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide });
+  for (let k = 0; k < 4; k++) fence.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), fenceMat));
+  function placeFence(A) {
+    fence.visible = !!A; if (!A) return;
+    const H = 60, w = A.x1 - A.x0, d = A.z1 - A.z0, walls = fence.children;
+    walls[0].position.set(A.cx, H / 2, A.z0); walls[0].rotation.set(0, 0, 0); walls[0].scale.set(w, H, 1);
+    walls[1].position.set(A.cx, H / 2, A.z1); walls[1].rotation.set(0, 0, 0); walls[1].scale.set(w, H, 1);
+    walls[2].position.set(A.x0, H / 2, A.cz); walls[2].rotation.set(0, PI / 2, 0); walls[2].scale.set(d, H, 1);
+    walls[3].position.set(A.x1, H / 2, A.cz); walls[3].rotation.set(0, PI / 2, 0); walls[3].scale.set(d, H, 1);
+  }
   const fx = createFx({ W });
   const sfx = createSfx(audio);
   const V3 = new THREE.Vector3();
@@ -180,6 +193,7 @@ export async function create({ mount, audio, send, hooks }) {
   let dmgFlash = 0, wantedFlash = 0, areaT = 0, curDistrict = '', curStreet = '', routeT = 0, route = [], routeTarget = null, wasDead = false;
   const floats = [], feed = [];
   let clicks = 0, fireHeld = false, netAcc = 0, lastIn = null, sinceIn = 0, pred = null, localFireT = 0, localArm = 0;
+  let arena = null; // the deathmatch's arena (from the seed), or null
   let course = null, legs = null, routeCp = -1, goT = 0, lastCount = -1, finishT = 0; // the race: the checkpoints and the planned lap (from the seed), where the checkpoint sits in the shown route, the GO! flash, the last countdown number heard, the "you finished" flash
   const timing = { frame: 0, sim: 0, render: 0, hud: 0 };
   const net = { inMsgs: 0, inBytes: 0, outMsgs: 0, outBytes: 0, rateIn: 0, kbIn: 0, rateOut: 0, kbOut: 0, at: 0, hostFps: 0 };
@@ -540,6 +554,7 @@ export async function create({ mount, audio, send, hooks }) {
     W.plazaMarker.visible = V.ms < 2; W.plazaMarker.rotation.y += dt; W.plazaMarker.material.opacity = 0.3 + Math.sin(roundT * 4) * 0.15;
     { const we = V.md.we, m = W.eventMarker; m.visible = !!we; if (we) { const fall = we.kind === 1 && !we.landed ? clamp((we.t - (AIRDROP_T - AIRDROP_FALL)) / AIRDROP_FALL, 0, 1) : 0; m.position.set(we.x, 20 + fall * 60, we.z); m.rotation.y += dt * 1.5; m.material.opacity = 0.3 + Math.sin(roundT * 5) * 0.15; } }
     W.sprayMarker.rotation.y -= dt; W.sprayMarker.material.opacity = (V.me && V.me.wanted > 0 ? 0.4 : 0.18) + Math.sin(roundT * 3) * 0.1;
+    if (arena) fenceMat.opacity = V.me && V.me.outT > 0 ? 0.35 + Math.sin(roundT * 12) * 0.2 : 0.22;
     const d = districtAt(V.subj.x, V.subj.z), s = streetAt(V.subj.x, V.subj.z);
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
@@ -565,6 +580,8 @@ export async function create({ mount, audio, send, hooks }) {
     hctx.translate(cx, cy); hctx.rotate(camYaw + PI);
     hctx.translate(-(me.x + MAP.MOFF) * MAP.MS, -(me.z + MAP.MOFF) * MAP.MS);
     if (W.mapCanvas) hctx.drawImage(W.mapCanvas, 0, 0);
+    if (arena) { const A = arena, big = (MAP.MOFF * 2 + 200) * MAP.MS; hctx.fillStyle = 'rgba(0,0,0,0.55)'; hctx.beginPath(); hctx.rect(-big, -big, big * 3, big * 3); hctx.rect(wx(A.x0), wx(A.z0), wx(A.x1) - wx(A.x0), wx(A.z1) - wx(A.z0)); hctx.fill('evenodd'); // the city outside the arena, dimmed
+      hctx.strokeStyle = V.me && V.me.outT > 0 && Math.floor(t * 6) % 2 ? '#ffffff' : '#ff3a3a'; hctx.lineWidth = 4; hctx.strokeRect(wx(A.x0), wx(A.z0), wx(A.x1) - wx(A.x0), wx(A.z1) - wx(A.z0)); }
     if (route.length > 1) { hctx.strokeStyle = '#d64fd6'; hctx.lineWidth = 4; hctx.beginPath(); hctx.moveTo(wx(me.x), wx(me.z));
       for (const [i, j] of route) hctx.lineTo(wx(X(i)), wx(X(j))); if (routeTarget && !course) hctx.lineTo(wx(routeTarget.x), wx(routeTarget.z)); hctx.stroke(); }
     if (routeTarget) { hctx.fillStyle = hex(routeTarget.color); hctx.fillRect(wx(routeTarget.x) - 6, wx(routeTarget.z) - 6, 12, 12); }
@@ -705,6 +722,9 @@ export async function create({ mount, audio, send, hooks }) {
     // the race: the countdown on the grid, GO!, and the finish flash
     if (race && race.state === 0) { const c = Math.ceil(race.t); hctx.fillStyle = 'rgba(0,0,0,0.35)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
       ptext(hctx, c > 3 ? 'ON THE GRID' : String(c), Wd / 2, Hd * 0.36, c > 3 ? s * 2.5 : s * 6, c > 3 ? '#ffe14d' : c === 1 ? '#ff6060' : '#ffffff', 'center'); ptext(hctx, `${laps} LAP${laps === 1 ? '' : 'S'}  ·  ${cpN} CHECKPOINTS  ·  ${guns ? 'ANYTHING GOES' : 'NO GUNS'}`, Wd / 2, Hd * 0.36 + s * (c > 3 ? 26 : 50), s * 1.1, '#ffffff', 'center'); }
+    if (arena && me.outT > 0 && !dead) { const left = OUT_WARN_T - me.outT; hctx.fillStyle = 'rgba(120,0,0,0.45)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.22);
+      ptext(hctx, left > 0 ? 'GET BACK IN THE ARENA' : 'YOU ARE TAKING DAMAGE', Wd / 2, Hd * 0.34, s * 2.2, Math.floor(t * 6) % 2 ? '#ffffff' : '#ff6060', 'center');
+      ptext(hctx, left > 0 ? String(Math.ceil(left)) : 'GET BACK', Wd / 2, Hd * 0.34 + s * 24, s * 4, '#ffffff', 'center'); }
     else if (goT > 0) { hctx.globalAlpha = clamp(goT, 0, 1); ptext(hctx, 'GO!', Wd / 2, Hd * 0.34, s * 6, '#3dff7a', 'center'); hctx.globalAlpha = 1; }
     if (finishT > 0 && me.place) { hctx.globalAlpha = clamp(finishT, 0, 1); hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3); ptext(hctx, ordinal(me.place), Wd / 2, Hd * 0.36, s * 5, '#ffe14d', 'center'); ptext(hctx, me.place === 1 ? 'FIRST ACROSS THE LINE' : 'ACROSS THE LINE', Wd / 2, Hd * 0.36 + s * 44, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     // the world event banner, under the wanted flash
@@ -820,6 +840,7 @@ export async function create({ mount, audio, send, hooks }) {
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
     laps = lapsOf(s.opts || {}); killCap = killCapOf(s.opts || {}); guns = gunsOn(s.opts || {}); root.classList.toggle('noguns', !guns); // the HUD's copy of the lobby's knobs; the touch FIRE, WEAPON and RELOAD buttons go with the guns
+    arena = modeOf(s.opts || {}, s.players.length) === 'deathmatch' ? arenaOf(s.seed) : null; placeFence(arena);
     course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; legs = course ? planLap(course) : null; routeCp = -1; goT = 0; lastCount = -1; finishT = 0; // the course and the lap plan come from the seed on every machine
     root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; killcamT = -1; replay.reset(); W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
