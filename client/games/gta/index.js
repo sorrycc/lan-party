@@ -145,14 +145,14 @@ export async function create({ mount, audio, send, hooks }) {
   const ov = { el: $('.overlay'), title: $('[data-title]'), sub: $('[data-sub]'), controls: $('[data-controls]'), score: $('[data-score]'), awards: $('[data-awards]'), foot: $('[data-foot]') };
   /* the safe-area insets (notch, home indicator) as numbers, read off an element the stylesheet pads with them, so the canvas HUD keeps clear */
   const saEl = $('.sa'), sa = { t: 0, r: 0, b: 0, l: 0 }; let saStale = true; // the probe has no size while the shell still hides the stage: measured again until it has
-  const measureSafeArea = () => { const r = saEl.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return; saStale = false; sa.t = Math.max(0, r.top); sa.l = Math.max(0, r.left); sa.r = Math.max(0, innerWidth - r.right); sa.b = Math.max(0, innerHeight - r.bottom); };
+  const measureSafeArea = () => { const r = saEl.getBoundingClientRect(), R = root.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) return; saStale = false; sa.t = Math.max(0, r.top - R.top); sa.l = Math.max(0, r.left - R.left); sa.r = Math.max(0, R.right - r.right); sa.b = Math.max(0, R.bottom - r.bottom); };
 
   /* ---- renderer, scene, the city */
   const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5)); renderer.setSize(innerWidth, innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.BasicShadowMap;
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(66, innerWidth / innerHeight, 0.3, 1600);
+  const camera = new THREE.PerspectiveCamera(66, 1, 0.3, 1600); // the aspect comes from fit() below
   const W = buildWorld({ THREE, scene });
   /* the deathmatch's fence: four tall translucent red walls on the arena's edge, hidden until a deathmatch places them */
   const fence = new THREE.Group(); fence.visible = false; scene.add(fence);
@@ -169,9 +169,21 @@ export async function create({ mount, audio, send, hooks }) {
   const fx = createFx({ W });
   const sfx = createSfx(audio);
   const V3 = new THREE.Vector3();
-  function sizeHud() { const dpr = Math.min(window.devicePixelRatio || 1, 2); hudCanvas.width = Math.round(innerWidth * dpr); hudCanvas.height = Math.round(innerHeight * dpr); hctx.setTransform(dpr, 0, 0, dpr, 0, 0); hctx.imageSmoothingEnabled = false; saStale = true; measureSafeArea(); }
-  const onResize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); sizeHud(); };
-  addEventListener('resize', onResize); sizeHud();
+  /* The view is the stage's own box, not the window: the renderer, the camera and the HUD are all sized from it in one place, so the
+     three can never disagree (a camera aspect left behind by a canvas resize stretches everyone on screen). The box is read off the
+     element and watched with a ResizeObserver, because on an iPad `innerWidth`/`innerHeight` are not a reliable measure at the moment
+     the resize event fires (a rotation, a split-screen change) and follow the visual viewport under a pinch. Both canvases fill the box through the stylesheet; setSize only sets the
+     drawing buffer, so a wrong buffer size could only ever cost resolution, never a crop or a stretch. */
+  const view = { w: 0, h: 0 };
+  function fit() {
+    const w = root.clientWidth || innerWidth, h = root.clientHeight || innerHeight; // the stage has no size while the shell still hides it
+    view.w = w; view.h = h;
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2); hudCanvas.width = Math.round(w * dpr); hudCanvas.height = Math.round(h * dpr); hctx.setTransform(dpr, 0, 0, dpr, 0, 0); hctx.imageSmoothingEnabled = false;
+    saStale = true; measureSafeArea();
+  }
+  const onResize = () => fit();
+  addEventListener('resize', onResize); const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(onResize) : null; ro?.observe(root); fit();
 
   /* ---- continuous voices: my car's engine and the nearest siren */
   let eng = null;
@@ -201,7 +213,7 @@ export async function create({ mount, audio, send, hooks }) {
   let showStats = false, quality = 0, autoQuality = true, lowFpsT = 0;
   function setQuality(i, manual) {
     quality = clamp(i | 0, 0, QUALITY.length - 1); if (manual) { autoQuality = false; try { localStorage.setItem('lan_gta_quality', String(quality)); } catch {} }
-    const q = QUALITY[quality]; renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.pr)); renderer.setSize(innerWidth, innerHeight);
+    const q = QUALITY[quality]; renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.pr)); fit();
     W.sun.castShadow = q.shadow > 0;
     if (q.shadow > 0 && W.sun.shadow.mapSize.x !== q.shadow) { W.sun.shadow.mapSize.set(q.shadow, q.shadow); if (W.sun.shadow.map) { W.sun.shadow.map.dispose(); W.sun.shadow.map = null; } }
   }
@@ -666,7 +678,7 @@ export async function create({ mount, audio, send, hooks }) {
     if (routeTarget && routeTarget.marker) one(routeTarget.x, 0, routeTarget.z, routeTarget.color, routeTarget.label, true);
   }
   function drawHUD() {
-    const Wd = innerWidth, Hd = innerHeight; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
+    const Wd = view.w, Hd = view.h; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
     const s = Math.max(2, Math.round(Wd / 640)), me = V.me, short = Hd < 560; // short: a phone in landscape
     const L = 16 + sa.l, R = Wd - 16 - sa.r, T = 14 + sa.t, B = Hd - 16 - sa.b; // the HUD's edges, inside the notch and the home indicator
     if (!me) { ptext(hctx, 'WAITING FOR THE HOST…', Wd / 2, Hd / 2, s, '#ffffff', 'center'); return; }
@@ -765,7 +777,8 @@ export async function create({ mount, audio, send, hooks }) {
   function drawStats(Wd, Hd, s) {
     const sc = Hd < 560 ? s * 0.55 : s * 0.8, lines = [ // a phone gets a smaller face so the lines fit its width
       `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   RENDER ${timing.render.toFixed(1)}   HUD ${timing.hud.toFixed(1)}`,
-      `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}`,
+      `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   VIEW ${view.w}X${view.h}   WINDOW ${innerWidth}X${innerHeight}`,
+      `CANVAS ${glCanvas.width}X${glCanvas.height} (${glCanvas.clientWidth}X${glCanvas.clientHeight} CSS)   ASPECT ${camera.aspect.toFixed(3)}   BOX ${(glCanvas.clientWidth / Math.max(1, glCanvas.clientHeight)).toFixed(3)}`, // the two ratios differ when the picture is stretched
     ];
     if (touch) { // a control that stays HELD after the finger left is the bug these lines are for
       const ctlWord = c => (c.held ? 'HELD #' + c.pid : 'FREE') + (c.last ? ' (' + c.last.toUpperCase() + ')' : '');
@@ -846,12 +859,12 @@ export async function create({ mount, audio, send, hooks }) {
     arena = modeOf(s.opts || {}, s.players.length) === 'deathmatch' ? arenaOf(s.seed) : null; placeFence(arena);
     course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; legs = course ? planLap(course) : null; routeCp = -1; goT = 0; lastCount = -1; finishT = 0; // the course and the lap plan come from the seed on every machine
     root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; killcamT = -1; replay.reset(); W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
-    state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); sizeHud(); audio.init(); loop.start();
+    state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); fit(); audio.init(); loop.start();
   }
   function stop() { stopRound(); fx.reset(); state = 'idle'; ov.el.hidden = true; fireHeld = false; kb.detach(); tc.detach(); loop.stop(); if (document.pointerLockElement === root) document.exitPointerLock(); }
   function destroy() {
     stop(); unsubAudio(); if (eng) { try { eng.osc.stop(); eng.siren.stop(); eng.gain.disconnect(); eng.sirenGain.disconnect(); } catch {} eng = null; }
-    removeEventListener('resize', onResize); removeEventListener('mouseup', onMouseUp); removeEventListener('mousemove', onMouseMove); removeEventListener('wheel', onWheel);
+    removeEventListener('resize', onResize); ro?.disconnect(); removeEventListener('mouseup', onMouseUp); removeEventListener('mousemove', onMouseMove); removeEventListener('wheel', onWheel);
     document.removeEventListener('pointerlockchange', onLockChange); document.removeEventListener('pointerlockerror', onLockError);
     disposeScene(scene); renderer.dispose(); root.remove(); mount.innerHTML = ''; unloadCss();
   }
@@ -865,7 +878,7 @@ export async function create({ mount, audio, send, hooks }) {
     else if (msg.t === 'in') { if (isHost && sim) sim.setInput(sim.playerOf(msg.from), msg); }
     else if (msg.t === 'a') { if (isHost && sim) sim.action(sim.playerOf(msg.from), msg.a, msg.n); }
   }
-  const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get fps() { return fps; }, grab, pause, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; },
+  const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get camAspect() { return camera.aspect; }, view, get fps() { return fps; }, grab, pause, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; },
     get aimLock() { return aimLock; }, sa, touch: { on: touch, stick: stickS, lookPad: lookS, fire: fireS, jump: jumpS, axes, readInput, get sensitivity() { return LOOK[lookLevel]; }, cycleLook } };
   debug.replay = replay; window.__gta = debug;
   return { start, stop, destroy, onNetMessage, playerLeft, debug };
