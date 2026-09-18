@@ -70,12 +70,13 @@ export const GAMES = [
     load: () => import('./hog/index.js'),
   },
   {
-    id: 'dice', title: 'Loaded Dice', tagline: 'ONE-BUTTON DICE DUEL · RIG THE ROLL · 1 V 1 OR A SOLO RUN',
+    id: 'dice', title: 'Loaded Dice', tagline: '灌铅骰子 · 一个按钮的骰子对决 · 1 对 1,或单人闯关', // the game's own words are Chinese by default (its ☰ menu has English)
     minPlayers: 1, maxPlayers: 2,
     options: [
-      { key: 'wins', type: 'select', label: 'FIRST TO (DUEL)', default: 2, choices: [{ value: 1, label: '1 duel' }, { value: 2, label: '2 duels' }, { value: 3, label: '3 duels' }] },
-      { key: 'hearts', type: 'select', label: 'HEARTS (DUEL)', default: 5, choices: [{ value: 3, label: '3 hearts' }, { value: 5, label: '5 hearts' }, { value: 7, label: '7 hearts' }] },
-      { key: 'dice', type: 'select', label: 'DICE (DUEL)', default: 'grow', choices: [{ value: 'grow', label: 'D4, bigger every 3 rounds' }, { value: 'd6', label: 'D6' }, { value: 'd12', label: 'D12' }, { value: 'd20', label: 'D20' }] },
+      { key: 'wins', type: 'select', label: '先赢几局(对战)', default: 2, choices: [{ value: 1, label: '1 局' }, { value: 2, label: '2 局' }, { value: 3, label: '3 局' }] },
+      { key: 'hearts', type: 'select', label: '红心(对战)', default: 5, choices: [{ value: 3, label: '3 颗心' }, { value: 5, label: '5 颗心' }, { value: 7, label: '7 颗心' }] },
+      { key: 'spice', type: 'select', label: '花样', default: 'std', choices: [{ value: 'classic', label: '经典:只有基本格子' }, { value: 'std', label: '标准:新花样一局局加进来' }, { value: 'wild', label: '疯狂:一上来全都有' }] },
+      { key: 'dice', type: 'select', label: '骰子(对战)', default: 'grow', choices: [{ value: 'grow', label: 'D4 起,每 3 回合变大' }, { value: 'd6', label: 'D6' }, { value: 'd12', label: 'D12' }, { value: 'd20', label: 'D20' }] },
     ],
     load: () => import('./dice/index.js'),
   },

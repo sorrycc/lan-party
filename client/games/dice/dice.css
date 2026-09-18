@@ -5,7 +5,7 @@
 .dice { --ink: #25231f; --paper: #f3eee3; --card: #fbf8f0; --red: #d9534a; --yel: #f0cf4f;
   --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px);
   position: absolute; inset: 0; overflow: hidden; background: var(--paper); color: var(--ink);
-  font-family: "Avenir Next Condensed", "DIN Condensed", "Roboto Condensed", "Arial Narrow", system-ui, sans-serif;
+  font-family: "Avenir Next Condensed", "DIN Condensed", "Roboto Condensed", "Arial Narrow", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
   touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
 .dice .cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; touch-action: none; }
 .dice .sa { position: absolute; top: var(--sa-t); right: var(--sa-r); bottom: var(--sa-b); left: var(--sa-l); pointer-events: none; visibility: hidden; }
@@ -46,6 +46,10 @@
 .dice .result tr.me td { background: #fff4c4; }
 .dice .result .sw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2.5px solid var(--ink); margin-right: 8px; vertical-align: -1px; }
 .dice .result p { margin: 12px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 2px; color: #6d685c; min-height: 1em; }
+
+/* Chinese (the default; `.dice.zh` is set by the game module): hanzi are not tracked out, and the small labels are a size up */
+.dice.zh .mcard h1, .dice.zh .btn, .dice.zh .rotate { letter-spacing: 1px; } .dice.zh .howto { letter-spacing: 0; line-height: 1.55; }
+.dice.zh .result small, .dice.zh .result th, .dice.zh .result p, .dice.zh .rotate small { letter-spacing: 1px; font-size: 13px; } .dice.zh .result h1 { letter-spacing: 2px; }
 
 /* a phone held upright: the duel is drawn 16:9 */
 .dice .rotate { z-index: 30; background: var(--paper); text-align: center; font-size: 20px; font-weight: 900; letter-spacing: 3px; }
