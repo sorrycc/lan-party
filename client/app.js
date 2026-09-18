@@ -218,6 +218,6 @@ document.addEventListener('click', () => audio.init());
 document.addEventListener('keydown', () => audio.init());
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { audio.init(); wakeAcquire(); } }); // the browser drops the wake lock while hidden
 renderStart(); show('start');
-if (/^#[A-Za-z]{4}$/.test(location.hash)) { // arrived by a scanned lobby code: fill it in and point at JOIN
+if (/^#[A-Za-z0-9]{4}$/.test(location.hash)) { // arrived by a scanned lobby code: fill it in and point at JOIN
   $('codeIn').value = location.hash.slice(1).toUpperCase(); $('btnJoin').classList.add('hot'); setStatus('Room code filled in from the link. Press JOIN ROOM.', true);
 }

@@ -69,6 +69,16 @@ export const GAMES = [
     ],
     load: () => import('./hog/index.js'),
   },
+  {
+    id: 'dice', title: 'Loaded Dice', tagline: 'ONE-BUTTON DICE DUEL · RIG THE ROLL · 1 V 1 OR A SOLO RUN',
+    minPlayers: 1, maxPlayers: 2,
+    options: [
+      { key: 'wins', type: 'select', label: 'FIRST TO (DUEL)', default: 2, choices: [{ value: 1, label: '1 duel' }, { value: 2, label: '2 duels' }, { value: 3, label: '3 duels' }] },
+      { key: 'hearts', type: 'select', label: 'HEARTS (DUEL)', default: 5, choices: [{ value: 3, label: '3 hearts' }, { value: 5, label: '5 hearts' }, { value: 7, label: '7 hearts' }] },
+      { key: 'dice', type: 'select', label: 'DICE (DUEL)', default: 'grow', choices: [{ value: 'grow', label: 'D4, bigger every 3 rounds' }, { value: 'd6', label: 'D6' }, { value: 'd12', label: 'D12' }, { value: 'd20', label: 'D20' }] },
+    ],
+    load: () => import('./dice/index.js'),
+  },
 ];
 
 /* Message types owned by the lobby protocol. Games must not use these as their own `t` values;
