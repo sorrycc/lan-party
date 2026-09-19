@@ -44,8 +44,11 @@ export function createRooms({ addrHint, log = console.log }) {
     switch (msg.t) {
       case 'create': {
         const game = gameById(msg.game); if (!game) { send(ws, { t: 'error', msg: 'Unknown game' }); break; }
+        const want = String(msg.room || '').trim().toUpperCase(); // the host may pick the code; empty means a random one
+        if (want && !/^[A-Z0-9]{4}$/.test(want)) { send(ws, { t: 'error', msg: 'Room code must be 4 letters or digits' }); break; }
+        if (rooms.has(want)) { send(ws, { t: 'error', msg: `Room ${want} already exists - press JOIN ROOM or pick another code` }); break; }
         if (room) leaveRoom(ws);
-        const r = { code: newCode(), game, hostId: p.id, state: 'lobby', opts: defaultOpts(game), players: new Map() };
+        const r = { code: want || newCode(), game, hostId: p.id, state: 'lobby', opts: defaultOpts(game), players: new Map() };
         rooms.set(r.code, r); joinRoom(ws, r, msg.name, msg.avatar); log(`room ${r.code} (${game.id}) created by ${p.name}`); break;
       }
       case 'join': {

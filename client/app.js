@@ -195,7 +195,11 @@ async function connect() {
   net.on('*', m => { if (S.playing && S.game) S.game.onNetMessage(m); });
   return net;
 }
-async function createRoom() { readName(); try { const net = await connect(); net.send({ t: 'create', name: S.name, avatar: S.avatar, game: S.gameId }); } catch (e) { setStatus(e.message); } }
+async function createRoom() {
+  readName(); const code = $('codeIn').value.trim().toUpperCase(); // a code typed in the box names the new room; empty lets the server pick one
+  if (code && !/^[A-Z0-9]{4}$/.test(code)) { setStatus('Room code must be 4 letters or digits'); $('codeIn').focus(); return; }
+  try { const net = await connect(); net.send({ t: 'create', room: code || undefined, name: S.name, avatar: S.avatar, game: S.gameId }); } catch (e) { setStatus(e.message); }
+}
 async function joinRoom() {
   readName(); const code = $('codeIn').value.trim().toUpperCase(); if (code.length !== 4) { setStatus('Enter the 4-letter room code'); $('codeIn').focus(); return; }
   try { const net = await connect(); net.send({ t: 'join', room: code, name: S.name, avatar: S.avatar }); } catch (e) { setStatus(e.message); }
