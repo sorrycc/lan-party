@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN" class="zh">
 <head>
 <meta charset="utf-8">
 <!-- user-scalable=no: Safari ignores it in a tab but honours it from the home screen, where it stops a two-thumb pinch from cancelling the game's touches -->
@@ -21,43 +21,45 @@
 <div id="stage" hidden></div>
 
 <div id="intro"><div class="card">
+  <button id="btnLang" class="btn small lang" data-t="langBtn">EN</button>
   <h1>LAN <span>PARTY</span></h1>
-  <div class="sub" id="subtitle">PICK A GAME · CREATE A ROOM · FRIENDS JOIN WITH THE CODE · TYPE A CODE FIRST TO PICK YOUR OWN</div>
+  <div class="sub" id="subtitle" data-t="subtitle"></div>
 
   <div id="screenStart" class="screen show">
-    <div class="row"><span class="lbl">PLAYER</span><input id="nameIn" class="txt" type="text" maxlength="12" placeholder="Your name" autocomplete="off" autocorrect="off" autocapitalize="words" spellcheck="false" enterkeyhint="done"></div>
+    <div class="row"><span class="lbl" data-t="player"></span><input id="nameIn" class="txt" type="text" maxlength="12" data-tph="namePh" autocomplete="off" autocorrect="off" autocapitalize="words" spellcheck="false" enterkeyhint="done"></div>
     <div class="row" style="margin-bottom:26px"><div id="avatarsStart" class="avatars"></div></div>
-    <div class="lbl">GAME</div>
+    <div class="lbl" data-t="game"></div>
     <div id="gameList" class="games"></div>
-    <div id="soloOptsWrap" hidden><div class="lbl">SOLO OPTIONS</div><div id="soloOpts" class="opts"></div></div>
+    <div id="soloOptsWrap" hidden><div class="lbl" data-t="soloOpts"></div><div id="soloOpts" class="opts"></div></div>
     <div class="row">
-      <button id="btnCreate" class="btn primary">CREATE ROOM</button>
-      <input id="codeIn" class="txt code" type="text" maxlength="4" placeholder="CODE" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go">
-      <button id="btnJoin" class="btn">JOIN ROOM</button>
+      <button id="btnCreate" class="btn primary" data-t="create"></button>
+      <input id="codeIn" class="txt code" type="text" maxlength="4" data-tph="codePh" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go">
+      <button id="btnJoin" class="btn" data-t="join"></button>
     </div>
-    <div class="row"><button id="btnSolo" class="btn small">PLAY SOLO</button></div>
+    <div class="row"><button id="btnSolo" class="btn small" data-t="solo"></button></div>
     <div id="status"></div>
   </div>
 
   <div id="screenLobby" class="screen">
-    <div class="lbl">ROOM CODE</div>
+    <div class="lbl" data-t="roomCode"></div>
     <h2 id="roomCode">----</h2>
     <div id="roomAddr"></div>
-    <div id="roomQr" class="qr" hidden><canvas width="1" height="1"></canvas><span>SCAN WITH A PHONE TO JOIN</span></div>
+    <div id="roomQr" class="qr" hidden><canvas width="1" height="1"></canvas><span data-t="scan"></span></div>
     <div id="lobbyGame" class="gametag"></div>
     <div class="row"><div id="avatarsLobby" class="avatars"></div></div>
     <div id="teams" class="teams" hidden></div>
     <ul id="players" class="players"></ul>
     <div id="teamBtns" class="row" hidden>
-      <button id="btnFriend" class="btn small">JOIN HOST'S TEAM</button>
-      <button id="btnEnemy" class="btn small">JOIN OTHER TEAM</button>
+      <button id="btnFriend" class="btn small" data-t="friendTeam"></button>
+      <button id="btnEnemy" class="btn small" data-t="enemyTeam"></button>
     </div>
     <div id="opts" class="opts"></div>
     <div class="row">
-      <button id="btnReady" class="btn good">READY</button>
-      <button id="btnStart" class="btn primary">START GAME</button>
-      <button id="btnLeave" class="btn small">LEAVE</button>
+      <button id="btnReady" class="btn good"></button>
+      <button id="btnStart" class="btn primary" data-t="start"></button>
+      <button id="btnLeave" class="btn small" data-t="leave"></button>
     </div>
+    <div id="lobbyErr" class="err"></div>
     <div id="lobbyStatus" class="help"></div>
   </div>
 </div></div>

@@ -8,6 +8,7 @@ import { WebSocketServer } from 'ws';
 import { createStaticHandler } from './static.js';
 import { createRooms } from './rooms.js';
 import { GAMES } from '../client/games/registry.js';
+import { pickEn } from '../client/core/i18n.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,7 +25,7 @@ const wss = new WebSocketServer({ server });
 createRooms({ addrHint }).attach(wss);
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`LAN party server running with ${GAMES.length} game(s): ${GAMES.map(g => g.title).join(', ')}`);
+  console.log(`LAN party server running with ${GAMES.length} game(s): ${GAMES.map(g => pickEn(g.title)).join(', ')}`);
   console.log('Open one of these on every machine:');
   console.log(`  http://localhost:${PORT}   (this machine)`);
   for (const a of lanAddresses()) console.log(`  http://${a}:${PORT}`);

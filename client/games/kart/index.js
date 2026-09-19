@@ -5,12 +5,19 @@
        mount  element the game owns; build the HUD into it, empty it in destroy()
        audio  shared synth from core/audio.js (already unlocked by the shell's first click)
        send   send(msg) relays a JSON message to the rest of the room; a no-op when playing solo
-       hooks  { onRestart(), onExit() } - what R / ESC and the result-screen buttons mean is the shell's call
+       hooks  { onRestart(), onExit(), onLeave(), onRematch(on) } - what R / ESC and the result-screen buttons mean is the shell's
+              call. onRestart / onExit belong to the host (and solo); a guest leaves the room with onLeave and asks the host for
+              another round with onRematch
      instance.start(session)   begin a round; session = { players: [{ id, name, avatar }], myId, hostId, isHost, online, opts }
      instance.stop()           end the round and go quiet (back to the lobby); the instance may be started again
      instance.destroy()        release everything: DOM, listeners, GL, audio voices
      instance.onNetMessage(m)  a relayed message from another player (m.from is their id)
      instance.playerLeft(id)   a player dropped out mid-round
+     instance.rematchVotes(ids) optional: the guests who want another round (shown to the host on the result screen)
+
+   Words: every game draws its text through core/i18n.js (Chinese by default, English from the shell's toggle or the game's menu),
+   keeps them in its own strings.js (`STR = { zh, en }`, checked by test/strings.test.mjs), redraws on onLang(), and sends keys
+   plus vars over the network, never a finished sentence.
 
    Netcode: each machine simulates only the karts it owns - its own kart plus, on the host, every CPU kart,
    shells, bananas, item boxes and the race clock - and broadcasts them as two streams (net.js): motion at 30 Hz from a
