@@ -12,8 +12,16 @@
    in the past. Everything visible or audible goes through emit() -> applyEvent(), so the host and the clients produce
    the same sounds, particles and toasts. An online host keeps simulating from a worker timer while its tab is hidden.
 
+   Clients predict only what is cheap and safe: their own pig turns to the stick at once, and a HOP or DASH press plays its
+   sound and dust immediately (the host's matching event is then not played twice). A DASH pressed a little early (while
+   still cooling down or mid-air) is kept for DASH_BUFFER seconds instead of lost.
+
+   Words: strings.js (Chinese by default, English from the shell's toggle or the ☰ menu); toasts cross the wire as keys.
+   Guests get LEAVE ROOM and a REMATCH toggle on the title card and in the menu; the host sees how many want one.
+
    Touch screens (core/touch.js): the left part of the screen is a thumb stick, HOP (hold to keep hopping) and DASH sit
-   under the right thumb, ☰ opens a menu card, and a phone held upright is asked to rotate. */
+   under the right thumb (DASH draws its cooldown), ☰ opens a menu card, and a phone held upright is asked to rotate.
+   Your own pig wears a ring on the ground (the dash cooldown fills it back up) and a bobbing arrow. */
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { clamp, lerp, makeRng } from '../../core/math.js';
@@ -23,10 +31,15 @@ import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { createTicker } from '../../core/ticker.js';
 import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
-import { buildRoster, packPig, unpackPig, createSnapGuard, cleanWish, STATES, MODES } from './net.js';
+import { makeT, onLang, nextLang } from '../../core/i18n.js';
+import { buildRoster, packPig, unpackPig, createSnapGuard, cleanWish, toastText, STATES, MODES } from './net.js';
+import { STR } from './strings.js';
+const T = makeT(STR);
 
 /* ============================================================ config + utils */
-const STEP = 1 / 60, R = 0.55, SPEED = 6.8, JUMP = 8.8, DASH_SPEED = 16, DASH_TIME = 0.2, DASH_CD = 1.0;
+const STEP = 1 / 60, R = 0.55, SPEED = 6.8, JUMP = 8.8, DASH_SPEED = 16, DASH_TIME = 0.2, DASH_CD = 1.0, DASH_BUFFER = 0.25;
+const CARD_TIME = 4.4, COUNT_STEP = 0.8, COUNT_FROM = 3; // the intro: the round card, then 3-2-1 over the arena for the last COUNT_FROM * COUNT_STEP s
+const MINE = 0x7cff9a; // your own pig's ring and arrow
 const NET_HZ = 30, INTERP = 0.08, TAU = Math.PI * 2;
 const GOLD = 0xffd166, INK = 0x2a0a1a;
 const rand = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
@@ -104,17 +117,17 @@ const HTML = `<canvas class="gl"></canvas>
   <div class="chips" data-chips></div>
   <div class="foot" data-foot><span data-keys></span><button class="snd" data-snd type="button"></button></div>
 </div>
-<div class="toast stroke" data-toast></div>
+<div class="toasts" data-toasts></div>
 <div class="card ov" data-card hidden><div class="in"><div class="kick stroke" data-kick></div><h2 class="stroke" data-cname></h2><p data-csub></p><div class="who" data-who hidden></div></div></div>
 <div class="title ov" data-title hidden><canvas class="confetti" data-confetti></canvas><div class="in">
-  <div class="kick">THE HOG WHO SAT LONGEST</div><h1>HOG THE THRONE</h1><div class="win" data-twin></div><div class="again" data-tfoot></div>
+  <div class="kick" data-t="title.kick"></div><h1 data-t="title.name"></h1><div class="win" data-twin></div><div class="again" data-tfoot></div>
 </div></div>
 <div class="menu-btn ctl" data-menu>☰</div>
-<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl">DRAG HERE TO MOVE</div></div>
-<div class="tbtn ctl hop" data-hop>HOP</div>
-<div class="tbtn ctl dash" data-dash>DASH</div>
-<div class="overlay pause" data-pause><div class="mcard"><h1>MENU</h1><div data-pause-btns></div></div></div>
-<div class="overlay rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>HOG THE THRONE PLAYS IN LANDSCAPE</small></div></div>`;
+<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl" data-t="pad"></div></div>
+<div class="tbtn ctl hop" data-hop><span data-t="hop"></span></div>
+<div class="tbtn ctl dash" data-dash><span data-t="dash"></span></div>
+<div class="overlay pause" data-pause><div class="mcard"><h1 data-t="menu.title"></h1><div data-pause-btns></div></div></div>
+<div class="overlay rotate"><div><div class="phone">📱</div><span data-t="rotate"></span><small data-t="rotateSub"></small></div></div>`;
 
 /* ============================================================ the game */
 export async function create({ mount, audio, send, hooks }) {
@@ -122,7 +135,7 @@ export async function create({ mount, audio, send, hooks }) {
   const touch = isCoarse(); // phones and tablets: the thumb stick, HOP, DASH and ☰ appear and the keyboard footer goes
   const root = document.createElement('div'); root.className = 'hog' + (touch ? ' touch' : ''); root.innerHTML = HTML; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
-  const dom = { hud: $('[data-hud]'), round: $('[data-round]'), sub: $('[data-sub]'), timer: $('[data-timer]'), chips: $('[data-chips]'), keys: $('[data-keys]'), snd: $('[data-snd]'), toast: $('[data-toast]'),
+  const dom = { hud: $('[data-hud]'), round: $('[data-round]'), sub: $('[data-sub]'), timer: $('[data-timer]'), chips: $('[data-chips]'), keys: $('[data-keys]'), snd: $('[data-snd]'), toasts: $('[data-toasts]'),
     card: $('[data-card]'), kick: $('[data-kick]'), cname: $('[data-cname]'), csub: $('[data-csub]'), who: $('[data-who]'),
     title: $('[data-title]'), confetti: $('[data-confetti]'), twin: $('[data-twin]'), tfoot: $('[data-tfoot]'),
     menuBtn: $('[data-menu]'), pause: $('[data-pause]'), pauseBtns: $('[data-pause-btns]'), hopBtn: $('[data-hop]'), dashBtn: $('[data-dash]') };
@@ -253,6 +266,21 @@ export async function create({ mount, audio, send, hooks }) {
     g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = false; } });
     return { group: g, visual: v, head, legs, eyes, tail: tailG, hat: hatM, prop };
   }
+  /* your own pig's marker: a ring on the ground whose bright arc is the dash cooldown filling back up (16 cached arcs, no
+     per-frame geometry), and an arrow bobbing over the hat. Unlit, so it reads in every arena's light. */
+  const MARK_ARCS = 16;
+  const markDim = new THREE.MeshBasicMaterial({ color: MINE, transparent: true, opacity: 0.28, depthWrite: false });
+  const markLit = new THREE.MeshBasicMaterial({ color: MINE, transparent: true, opacity: 0.9, depthWrite: false });
+  const markArrow = new THREE.MeshBasicMaterial({ color: MINE });
+  const ringArc = k => geo(`mk${k}`, () => new THREE.RingGeometry(0.74, 0.92, 32, 1, Math.PI / 2, k / MARK_ARCS * TAU).rotateX(-Math.PI / 2));
+  function buildMarker() {
+    const g = new THREE.Group();
+    const base = new THREE.Mesh(ringArc(MARK_ARCS), markDim), fill = new THREE.Mesh(ringArc(MARK_ARCS), markLit);
+    const arrow = new THREE.Mesh(GEO.cone(0.24, 0.42, 4), markArrow); arrow.rotation.x = Math.PI;
+    for (const m of [base, fill]) { m.renderOrder = 5; m.position.y = 0.02; }
+    g.add(base, fill, arrow); g.visible = false; scene.add(g);
+    return { g, fill, arrow, k: MARK_ARCS, pulse: 0 };
+  }
 
   /* ============================================================ state */
   let session = null, isHost = false, online = false, hostId = null, myId = null, me = null, guard = null;
@@ -270,28 +298,31 @@ export async function create({ mount, audio, send, hooks }) {
       Object.assign(this, buildPig(slot.color, slot.hat)); scene.add(this.group);
       this.yaw = 0; this.stun = 0; this.grounded = 0; this.wasGrounded = false; this.prevVy = 0; this.dash = 0; this.dashCd = 0; this.jumpCd = 0;
       this.out = false; this.inWorld = false; this.respawn = -1; this.lastBump = -9;
-      this.bank = 0; this.wins = 0; this.throne = 0; this.balloons = 3; this.truffles = 0; this.hits = 0; this.pops = 0; this.outTime = 0;
+      this.bank = 0; this.throne = 0; this.balloons = 3; this.truffles = 0; this.hits = 0; this.pops = 0; this.outTime = 0;
       this.squash = 0; this.stretch = 0; this.legPhase = 0; this.blink = rand(2, 5); this.stunFx = 0; this.dashFx = 0;
       this.ai = { mx: 0, mz: 0, jump: false, dash: false, think: 0, tx: 0, tz: 0, react: rand(0.8, 1.2), fumble: rand(0.02, 0.1), target: null, side: rand() < 0.5 ? 1 : -1 };
       this.ctl = { mx: 0, mz: 0, jump: false, dash: false };
-      this.want = { mx: 0, mz: 0, jump: false }; this.dashQ = false; // a human's latest wish (local keys, or the network)
+      this.want = { mx: 0, mz: 0, jump: false }; this.dashQ = 0; // a human's latest wish (local keys, or the network); dashQ: seconds a DASH press stays buffered
       this.buf = []; // a client's snapshots of this pig
+      this.marker = null; this.echoHop = -9; this.echoDash = -9; this.lyaw = 0; // your own pig: its marker, and a client's local echo (press times, the yaw it shows)
     }
     get pos() { return this.body.position; }
     place(x, y, z, face) { const b = this.body; b.position.set(x, y, z); b.velocity.set(0, 0, 0); b.angularVelocity.set(0, 0, 0); this.yaw = face ?? Math.atan2(-x, -z); b.quaternion.setFromAxisAngle(UPV, this.yaw); this.stun = 0; this.dash = 0; this.grounded = 0; this.buf = []; }
     enter() { if (!this.inWorld) { if (isHost) world.addBody(this.body); this.inWorld = true; } this.group.visible = true; this.respawn = -1; }
     leave() { if (this.inWorld) { if (isHost) world.removeBody(this.body); this.inWorld = false; } this.group.visible = false; }
     resetRound() { this.out = false; this.balloons = 3; this.truffles = 0; this.hits = 0; this.pops = 0; this.outTime = 0; this.throne = 0; this.enter(); }
-    toAI() { if (!this.human) return; this.human = false; this.pid = null; if (this === me) me = null; }
-    dispose() { this.leave(); scene.remove(this.group); }
+    toAI() { if (!this.human) return; this.human = false; this.pid = null; if (this === me) me = null; if (this.marker) this.marker.g.visible = false; }
+    dispose() { this.leave(); scene.remove(this.group); if (this.marker) scene.remove(this.marker.g); }
+    mark() { if (!this.marker) this.marker = buildMarker(); }
     readInput(step) {
       const c = this.ctl;
-      if (G.frozen || this.out) { c.mx = c.mz = 0; c.jump = c.dash = false; this.dashQ = false; return; }
-      if (this.human) { c.mx = this.want.mx; c.mz = this.want.mz; c.jump = this.want.jump; c.dash = this.dashQ; this.dashQ = false; }
+      if (G.frozen || this.out) { c.mx = c.mz = 0; c.jump = c.dash = false; this.dashQ = 0; return; }
+      /* a DASH press waits up to DASH_BUFFER s for the cooldown or a stun to run out; fixed() clears it once the dash goes */
+      if (this.human) { c.mx = this.want.mx; c.mz = this.want.mz; c.jump = this.want.jump; c.dash = this.dashQ > 0; this.dashQ = Math.max(0, this.dashQ - step); }
       else { const a = this.ai; a.jump = false; G.mode.ai(this, step); c.mx = a.mx; c.mz = a.mz; c.jump = a.jump; c.dash = a.dash; a.dash = false; }
     }
     fixed(step) {
-      if (this.respawn > 0) { this.respawn -= step; if (this.respawn <= 0) { this.enter(); const s = G.mode.respawnPos(this); this.place(s.x, s.y, s.z); emit('poof', r2(s.x), r2(s.y), r2(s.z)); } return; }
+      if (this.respawn > 0) { this.dashQ = 0; this.respawn -= step; if (this.respawn <= 0) { this.enter(); const s = G.mode.respawnPos(this); this.place(s.x, s.y, s.z); emit('poof', r2(s.x), r2(s.y), r2(s.z)); } return; }
       if (!this.inWorld) return;
       this.readInput(step);
       const b = this.body, v = b.velocity, c = this.ctl, grounded = this.grounded > 0;
@@ -305,7 +336,7 @@ export async function create({ mount, audio, send, hooks }) {
           v.x += (mx * SPEED - v.x) * k; v.z += (mz * SPEED - v.z) * k;
           if (len > 0.1) this.yaw = lerpAngle(this.yaw, Math.atan2(mx, mz), damp(14, step));
           if (c.jump && grounded && this.jumpCd <= 0) { v.y = JUMP; this.jumpCd = 0.25; this.grounded = 0; emit('hop', this.i); }
-          if (c.dash && this.dashCd <= 0) { if (len > 0.1) this.yaw = Math.atan2(mx, mz); this.dash = DASH_TIME; this.dashCd = DASH_CD; emit('dash', this.i); if (grounded) v.y = Math.max(v.y, 2.5); }
+          if (c.dash && this.dashCd <= 0) { this.dashQ = 0; if (len > 0.1) this.yaw = Math.atan2(mx, mz); this.dash = DASH_TIME; this.dashCd = DASH_CD; emit('dash', this.i); if (grounded) v.y = Math.max(v.y, 2.5); }
         }
         tmpQ.setFromAxisAngle(UPV, this.yaw); b.quaternion.slerp(tmpQ, damp(11, step), b.quaternion); b.angularVelocity.set(0, 0, 0);
       }
@@ -339,6 +370,12 @@ export async function create({ mount, audio, send, hooks }) {
       if (this.prop) this.prop.rotation.y += dt * (7 + sp * 3);
       if (this.stun > 0) { this.stunFx -= dt; if (this.stunFx <= 0) { this.stunFx = 0.14; FX.stars(this.pos, 2); } }
       if (this.dash > 0) { this.dashFx -= dt; if (this.dashFx <= 0) { this.dashFx = 0.03; FX.dust(this.pos, 3); } }
+      const mk = this.marker; if (mk) {
+        mk.g.position.set(b.position.x, b.position.y - R, b.position.z);
+        const k = Math.round(clamp(1 - this.dashCd / DASH_CD, 0, 1) * MARK_ARCS); if (k !== mk.k) { if (k === MARK_ARCS) mk.pulse = 1; mk.k = k; mk.fill.visible = k > 0; if (k > 0) mk.fill.geometry = ringArc(k); }
+        mk.pulse *= Math.exp(-dt * 6); mk.fill.scale.setScalar(1 + mk.pulse * 0.35);
+        mk.arrow.position.y = 3.3 + Math.sin(t * 5) * 0.14; mk.arrow.rotation.y = t * 2;
+      }
     }
   }
   function onCollide(pig, e) {
@@ -378,19 +415,24 @@ export async function create({ mount, audio, send, hooks }) {
   /* ============================================================ effects: the host emits, everyone applies */
   function emit(...ev) { applyEvent(ev); if (online && isHost) events.push(ev); }
   const pigAt = i => G.pigs[i | 0] || null;
+  /* a client already played its own HOP / DASH the moment it pressed (echoHop / echoDash); the host's event for it is swallowed once */
+  const ECHO_WINDOW = 0.5;
+  const echoed = (p, k) => { if (isHost || p !== me || nowSec() - p[k] > ECHO_WINDOW) return false; p[k] = -9; return true; };
+  const hopFx = p => { sfx.hop(); FX.dust(p.pos, 5); p.stretch = 1; }, dashFx = p => { sfx.whoosh(); FX.dust(p.pos, 8); p.stretch = 1; };
+  const wordToast = ev => { const w = toastText(ev, G.pigs, T); if (w) toast(w.text, w.color); };
   function applyEvent(ev) {
     const p = pigAt(ev[1]);
     switch (ev[0]) {
-      case 'hop': if (p) { sfx.hop(); FX.dust(p.pos, 5); p.stretch = 1; } break;
-      case 'dash': if (p) { sfx.whoosh(); FX.dust(p.pos, 8); p.stretch = 1; } break;
+      case 'hop': if (p && !echoed(p, 'echoHop')) hopFx(p); break;
+      case 'dash': if (p && !echoed(p, 'echoDash')) dashFx(p); break;
       case 'land': if (p) { p.squash = 1; FX.dust(p.pos, ev[2] ? 10 : 4); if (ev[2]) sfx.land(); } break;
       case 'bump': { const [, x, y, z, pow, dashHit] = ev; if (dashHit) sfx.thud(); sfx.boing(); sfx.oink(); FX.stars({ x, y, z }, 10); CAM.shake += 0.25 * pow; break; }
       case 'hazard': if (p) { sfx.thud(); sfx.squeal(); FX.stars(p.pos, 12); CAM.shake += 0.5; } break;
-      case 'out': if (p) { sfx.fall(); toast(`${p.name} OUT!`, p.color); } break;
+      case 'out': if (p) { sfx.fall(); wordToast(['toast', 'out', ev[1]]); } break;
       case 'fall': if (p) { sfx.fall(); FX.poof(p.pos); } break;
       case 'poof': FX.poof({ x: ev[1], y: ev[2], z: ev[3] }); break;
       case 'pop': { const [, x, y, z, i] = ev; const q = pigAt(i); FX.pop({ x, y, z }, q ? q.color : 0xffffff); sfx.pop(); break; }
-      case 'toast': toast(String(ev[1]), ev[2]); break;
+      case 'toast': wordToast(ev); break;
       case 'crack': sfx.crack(); break;
       case 'tile': FX.spawn(ev[1], 0, ev[2], [0xfff1c9, 0x8b5a2b], { n: 6, speed: 2, up: 2, size: 0.7, life: 0.6 }); break;
       case 'ding': { const [, x, y, z, gold] = ev; sfx.ding(); if (gold) sfx.fanfare(); FX.spawn(x, y, z, [gold ? 0xffd60a : 0x3e2723, 0xffffff], { n: 8, speed: 2.5, up: 3, size: 0.7, life: 0.5 }); break; }
@@ -398,22 +440,25 @@ export async function create({ mount, audio, send, hooks }) {
       case 'fanfare': sfx.fanfare(); break;
       case 'whistle': sfx.whistle(); break;
       case 'tick': sfx.tick(); break;
-      case 'go': toast('GO!', 0x7cff9a); sfx.whistle(); break;
-      case 'cheer': sfx.cheer(); dom.toast.classList.remove('go'); FX.confetti(p && p.inWorld ? p.pos : { x: 0, y: 2, z: 0 }, [p ? p.color : 0xffffff, GOLD, 0xffffff]); break;
+      case 'count': dom.card.hidden = true; toast(String(ev[1] | 0), 0xffffff, 'count'); sfx.tick(); break;
+      case 'go': dom.card.hidden = true; toast(T('go'), 0x7cff9a, 'count'); sfx.whistle(); break;
+      case 'cheer': sfx.cheer(); clearToasts(); FX.confetti(p && p.inWorld ? p.pos : { x: 0, y: 2, z: 0 }, [p ? p.color : 0xffffff, GOLD, 0xffffff]); break;
       case 'sting': sfx.sting(); sfx.cheer(); break;
     }
   }
 
   /* ============================================================ modes */
   class Mode {
-    constructor() { this.name = ''; this.sub = ''; this.duration = 30; this.safeR = 6; this.spawnR = 4.5; this.sky = 0x86d1ff; this.finale = false; this.camUp = 0.85; this.camDist = 1; this.t = 0; }
+    constructor() { this.key = ''; this.duration = 30; this.safeR = 6; this.spawnR = 4.5; this.sky = 0x86d1ff; this.finale = false; this.camUp = 0.85; this.camDist = 1; this.t = 0; }
     build(A) {} reset() {} fixed(step) {} frame(dt, t) {} onBump(a, b, dash, rel) {}
     pack() { return null; } apply(m) {}
     ai(pig, step) { this.wander(pig, step); }
     onFall(pig) { this.eliminate(pig); }
     rank() { return this.survivalRank(); }
     finished() { return this.alive().length <= 1; }
-    stat(p) { return p.out ? 'OUT' : '🐷'; }
+    get name() { return T('mode.' + this.key); }
+    get sub() { return T('mode.' + this.key + '.sub'); }
+    stat(p) { return p.out ? T('stat.out') : '🐷'; }
     camPoints() { return null; }
     alive() { return G.pigs.filter(p => !p.out); }
     spawnPos(i) { const n = Math.max(4, G.pigs.length), a = i / n * TAU + Math.PI / 4; return { x: Math.cos(a) * this.spawnR, y: 3.5 + i * 0.4, z: Math.sin(a) * this.spawnR }; }
@@ -429,7 +474,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   class SpinBar extends Mode {
-    constructor() { super(); this.name = 'WHIRLY BACON'; this.sub = 'Hop the spinning bar. Last pig standing wins.'; this.duration = 32; this.safeR = 5.5; this.spawnR = 4.5; this.sky = 0xffc857; this.angle = 0; this.w = 0; }
+    constructor() { super(); this.key = 'spin'; this.duration = 32; this.safeR = 5.5; this.spawnR = 4.5; this.sky = 0xffc857; this.angle = 0; this.w = 0; }
     build(A) {
       scyl(A, 7.5, 1, 0xff6b6b, 0, -0.5, 0, 36); underside(A, 7.5, 0xc44536);
       const ring = new THREE.Mesh(geo('sring', () => new THREE.RingGeometry(6.6, 7.5, 36)), mat(0xffe66d)); ring.rotation.x = -Math.PI / 2; ring.position.y = 0.01; ring.receiveShadow = true; A.add(ring);
@@ -442,7 +487,7 @@ export async function create({ mount, audio, send, hooks }) {
     reset() { this.t = 0; this.dir = 1; this.w = 0; this.angle = 0; this.nextFlip = rand(9, 13); }
     fixed(step) {
       this.t += step; const target = Math.min(3.4, 1.3 + this.t * 0.075) * this.dir; this.w += (target - this.w) * Math.min(1, 2.2 * step);
-      if (this.t > this.nextFlip) { this.dir *= -1; this.nextFlip += rand(8, 12); emit('beep'); emit('toast', 'REVERSE!', 0xffe66d); }
+      if (this.t > this.nextFlip) { this.dir *= -1; this.nextFlip += rand(8, 12); emit('beep'); emit('toast', 'reverse'); }
       this.bar.angularVelocity.set(0, this.w, 0);
       const q = this.bar.quaternion; this.angle = 2 * Math.atan2(q.y, q.w);
     }
@@ -466,7 +511,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   class Balloon extends Mode {
-    constructor() { super(); this.name = 'BALLOON BUTT'; this.sub = 'Butt-dash pigs to pop their balloons. Keep yours.'; this.duration = 35; this.safeR = 7.5; this.spawnR = 5.5; this.sky = 0x9be7ff; }
+    constructor() { super(); this.key = 'balloon'; this.duration = 35; this.safeR = 7.5; this.spawnR = 5.5; this.sky = 0x9be7ff; }
     build(A) {
       sbox(A, 18, 1, 18, 0xb388ff, 0, -0.5, 0); underside(A, 10, 0x5e548e);
       const tiles = new THREE.InstancedMesh(GEO.box(1.9, 0.08, 1.9), mat(0xffffff), 81); const d = new THREE.Object3D(); const c = new THREE.Color();
@@ -482,8 +527,8 @@ export async function create({ mount, audio, send, hooks }) {
         g.position.set(p.pos.x + ox, p.pos.y + oy, p.pos.z + oz);
         dir.set(-ox, -(oy - 0.1), -oz); const len = dir.length(); dir.normalize(); str.quaternion.setFromUnitVectors(up, dir); str.scale.y = len; str.position.copy(dir).multiplyScalar(len / 2); } });
     }
-    onBump(a, b, dash, rel) { if (!dash && rel < 6.5) return; if (b.balloons > 0 && !b.out) { b.balloons--; a.pops++; const bp = this.bal[b.i][b.balloons].g.position; emit('pop', r2(bp.x), r2(bp.y), r2(bp.z), b.i); if (b.balloons === 0) { this.eliminate(b); emit('toast', `${b.name} POPPED!`, b.color); } } }
-    onFall(pig) { pig.balloons--; if (pig.balloons <= 0) this.eliminate(pig); else { emit('fall', pig.i); pig.leave(); pig.respawn = 1.2; emit('toast', `${pig.name} -1 🎈`, pig.color); } }
+    onBump(a, b, dash, rel) { if (!dash && rel < 6.5) return; if (b.balloons > 0 && !b.out) { b.balloons--; a.pops++; const bp = this.bal[b.i][b.balloons].g.position; emit('pop', r2(bp.x), r2(bp.y), r2(bp.z), b.i); if (b.balloons === 0) { this.eliminate(b); emit('toast', 'popped', b.i); } } }
+    onFall(pig) { pig.balloons--; if (pig.balloons <= 0) this.eliminate(pig); else { emit('fall', pig.i); pig.leave(); pig.respawn = 1.2; emit('toast', 'balloon', pig.i); } }
     respawnPos() { return { x: rand(-5, 5), y: 5, z: rand(-5, 5) }; }
     ai(pig, step) {
       const ai = pig.ai; ai.think -= step; if (ai.think <= 0) { ai.think = 0.15; ai.target = this.nearestPig(pig).pig; }
@@ -495,11 +540,11 @@ export async function create({ mount, audio, send, hooks }) {
       if (Math.abs(pig.pos.x) > 7.2 || Math.abs(pig.pos.z) > 7.2) this.steer(pig, 0, 0);
     }
     rank() { const a = this.alive().sort((x, y) => (y.balloons - x.balloons) || (y.pops - x.pops)); const o = G.pigs.filter(p => p.out).sort((x, y) => (y.outTime - x.outTime)); return a.concat(o); }
-    stat(p) { return p.out ? 'OUT' : '🎈'.repeat(p.balloons); }
+    stat(p) { return p.out ? T('stat.out') : '🎈'.repeat(p.balloons); }
   }
 
   class Crumble extends Mode {
-    constructor() { super(); this.name = 'CRUMBLE CAKE'; this.sub = 'The floor is cake. Cake falls. Do not.'; this.duration = 35; this.safeR = 8; this.spawnR = 5.5; this.sky = 0xffafcc; }
+    constructor() { super(); this.key = 'crumble'; this.duration = 35; this.safeR = 8; this.spawnR = 5.5; this.sky = 0xffafcc; }
     build(A) {
       underside(A, 9, 0x8b5a2b, 4); this.tiles = []; const cols = [0xff8fab, 0xfff1c9, 0x8b5a2b, 0xfff1c9, 0xff8fab];
       for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) {
@@ -546,11 +591,11 @@ export async function create({ mount, audio, send, hooks }) {
       if (ai.target) { this.steer(pig, ai.target.x, ai.target.z, 0.4); const nx = pig.pos.x + ai.mx * 1.3, nz = pig.pos.z + ai.mz * 1.3; const nt = this.tileAt(nx, nz); if ((!nt || nt.state >= 2) && pig.grounded > 0) ai.jump = true; }
       else this.wander(pig, step);
     }
-    stat(p) { return p.out ? 'OUT' : '🍰'; }
+    stat(p) { return p.out ? T('stat.out') : '🍰'; }
   }
 
   class Truffle extends Mode {
-    constructor() { super(); this.name = 'TRUFFLE RUSH'; this.sub = 'Snort up the most truffles. Butt-dash to make pigs drop theirs.'; this.duration = 32; this.safeR = 8; this.spawnR = 5.5; this.sky = 0xb5e48c; this.nextId = 1; }
+    constructor() { super(); this.key = 'truffle'; this.duration = 32; this.safeR = 8; this.spawnR = 5.5; this.sky = 0xb5e48c; this.nextId = 1; }
     build(A) {
       scyl(A, 9.5, 1, 0x8d5524, 0, -0.5, 0, 36); underside(A, 9.5, 0x5c3a1e);
       for (let i = 0; i < 28; i++) { const a = i / 28 * TAU; sbox(A, 2.3, 1.3, 0.8, i % 2 ? 0x98d86b : 0x6fbf4a, Math.cos(a) * 9.7, 0.4, Math.sin(a) * 9.7, -a); }
@@ -583,7 +628,7 @@ export async function create({ mount, audio, send, hooks }) {
       for (const it of [...this.items]) if (!seen.has(it.id)) this.removeItem(it);
     }
     frame(dt, t) { for (const it of this.items) { if (!isHost) it.age += dt; it.g.rotation.y += dt * 2; it.spark.rotation.y -= dt * 5; it.spark.position.y = 0.55 + Math.sin(t * 5 + it.x) * 0.08; const s = clamp((it.age + 0.4) * 3, 0.1, 1); it.g.scale.setScalar(s); } }
-    onBump(a, b, dash) { if (!dash || b.truffles <= 0) return; const n = Math.min(3, b.truffles); b.truffles -= n; for (let k = 0; k < n; k++) { const ang = rand(TAU), r = rand(1.5, 2.5); this.spawnItem(clamp(b.pos.x + Math.cos(ang) * r, -8, 8), b.pos.y + 0.5, clamp(b.pos.z + Math.sin(ang) * r, -8, 8), 1, -0.6); } emit('toast', `${b.name} DROPS ${n}!`, b.color); }
+    onBump(a, b, dash) { if (!dash || b.truffles <= 0) return; const n = Math.min(3, b.truffles); b.truffles -= n; for (let k = 0; k < n; k++) { const ang = rand(TAU), r = rand(1.5, 2.5); this.spawnItem(clamp(b.pos.x + Math.cos(ang) * r, -8, 8), b.pos.y + 0.5, clamp(b.pos.z + Math.sin(ang) * r, -8, 8), 1, -0.6); } emit('toast', 'drops', b.i, n); }
     onFall(pig) { emit('fall', pig.i); pig.leave(); pig.respawn = 1; }
     ai(pig, step) {
       const ai = pig.ai; ai.think -= step; if (ai.think <= 0) { ai.think = 0.2; let best = null, bs = 1e9; for (const it of this.items) { const d = Math.hypot(it.g.position.x - pig.pos.x, it.g.position.z - pig.pos.z) / it.value; if (d < bs) { bs = d; best = it; } } ai.target = best; }
@@ -596,7 +641,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   class Throne extends Mode {
-    constructor() { super(); this.name = 'THE THRONE'; this.sub = 'King of the hill. Sit longest. Shove the rest off.'; this.duration = 45; this.safeR = 11; this.spawnR = 9; this.sky = 0x7b6cf6; this.finale = true; this.camUp = 1.0; this.camDist = 1.15; this.king = null; this.contested = false; }
+    constructor() { super(); this.key = 'throne'; this.duration = 45; this.safeR = 11; this.spawnR = 9; this.sky = 0x7b6cf6; this.finale = true; this.camUp = 1.0; this.camDist = 1.15; this.king = null; this.contested = false; }
     build(A) {
       scyl(A, 13, 1.2, 0x6fcf6f, 0, -0.6, 0, 40); underside(A, 13, 0x5c3a1e, 8);
       const road = new THREE.Mesh(geo('rring', () => new THREE.RingGeometry(7.6, 9, 40)), mat(GOLD)); road.rotation.x = -Math.PI / 2; road.position.y = 0.01; road.receiveShadow = true; A.add(road);
@@ -619,8 +664,8 @@ export async function create({ mount, audio, send, hooks }) {
     camPoints() { return [{ x: 0, y: 2.6, z: 0 }]; }
     fixed(step) {
       const zone = []; for (const p of G.pigs) { if (p.out || !p.inWorld) continue; if (Math.hypot(p.pos.x - this.seat.x, p.pos.z - this.seat.z) < 1.15 && p.pos.y > this.seat.y + 0.65) zone.push(p); }
-      if (zone.length === 1) { const k = zone[0]; if (k !== this.king) { this.king = k; this.kingT = 0; emit('fanfare'); emit('toast', `${k.name} TAKES THE THRONE!`, k.color); } k.throne += step; this.kingT += step; this.contested = false; }
-      else { this.contested = zone.length > 1; if (this.king && (zone.length === 0 || this.contested)) { this.king = null; if (this.contested) emit('toast', 'CONTESTED!', GOLD); } }
+      if (zone.length === 1) { const k = zone[0]; if (k !== this.king) { this.king = k; this.kingT = 0; emit('fanfare'); emit('toast', 'king', k.i); } k.throne += step; this.kingT += step; this.contested = false; }
+      else { this.contested = zone.length > 1; if (this.king && (zone.length === 0 || this.contested)) { this.king = null; if (this.contested) emit('toast', 'contested'); } }
     }
     pack() { return { k: this.king ? this.king.i : -1, c: this.contested ? 1 : 0 }; }
     apply(m) { if (m) { this.king = pigAt(m.k); this.contested = !!m.c; } }
@@ -639,7 +684,7 @@ export async function create({ mount, audio, send, hooks }) {
     }
     rank() { return G.pigs.slice().sort((x, y) => (y.throne - x.throne) || (x.hits - y.hits)); }
     finished() { return false; }
-    stat(p) { return p.throne.toFixed(1) + 's'; }
+    stat(p) { return T('stat.sec', { n: p.throne.toFixed(1) }); }
   }
   const MODE_CLASSES = { spin: SpinBar, balloon: Balloon, crumble: Crumble, truffle: Truffle, throne: Throne }; // keyed by net.js MODES
 
@@ -666,8 +711,9 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   /* ============================================================ rounds (host drives; a client mirrors from the snapshots) */
+  /* the mode resets after the pigs do: resetRound() zeroes p.throne, and the Throne's reset() then seeds it from p.bank */
   function setArena(modeId) {
-    if (G.arena) G.arena.dispose(); G.arena = new Arena(); G.mode = new MODE_CLASSES[modeId](); G.mode.build(G.arena); setSky(G.mode.sky); G.mode.reset();
+    if (G.arena) G.arena.dispose(); G.arena = new Arena(); G.mode = new MODE_CLASSES[modeId](); G.mode.build(G.arena); setSky(G.mode.sky);
     G.pigs.forEach((p, i) => { p.resetRound(); const s = G.mode.spawnPos(i); p.place(s.x, s.y, s.z); });
     bumpQueue.length = 0; G.mode.reset();
     CAM.pos.set(0, 14, 18); CAM.target.set(0, 0, 0); CAM.shake = 0;
@@ -675,30 +721,30 @@ export async function create({ mount, audio, send, hooks }) {
   function startGame() {
     const n = clamp(Number(session.opts && session.opts.rounds) || 3, 1, MODES.length - 1), R = makeRng(session.seed >>> 0);
     G.plan = shuffleR(R, MODES.slice(0, -1)).slice(0, n).concat(['throne']); G.round = 0; G.winner = -1;
-    for (const p of G.pigs) { p.bank = 0; p.wins = 0; }
+    for (const p of G.pigs) p.bank = 0;
     emit('whistle'); nextRound();
   }
   function nextRound() {
     if (G.round >= G.plan.length) { G.round = 0; }
-    setArena(G.plan[G.round]); G.state = 'intro'; G.frozen = true; G.card = 1.5; G.t = 0; G.lastTick = 99; G.winner = -1;
+    setArena(G.plan[G.round]); G.state = 'intro'; G.frozen = true; G.card = CARD_TIME; G.t = 0; G.lastTick = 99; G.winner = -1;
     onRoundStarted();
   }
   /* the HUD and the music for the round in progress: run on every arena change, so a client that joins the round late
      (its first accepted snapshot already says `play`) is not left on the waiting text without music */
   function syncRound() {
-    const m = G.mode; sfx.setMusic(true, m.finale);
-    dom.round.textContent = m.finale ? 'FINALE · ' + m.name : `ROUND ${G.round + 1} · ${m.name}`; dom.sub.textContent = m.sub;
+    sfx.setMusic(true, G.mode.finale); roundWords();
     dom.title.hidden = true; root.classList.remove('over'); confetti = null;
   }
-  function onRoundStarted() { syncRound(); const m = G.mode; showCard(m.finale ? 'FINALE' : `ROUND ${G.round + 1}`, m.name, m.sub, null); if (m.finale) sfx.fanfare(); }
+  function roundWords() { const m = G.mode; dom.round.textContent = m.finale ? T('finaleLine', { name: m.name }) : T('roundLine', { n: G.round + 1, name: m.name }); dom.sub.textContent = m.sub; }
+  function onRoundStarted() { syncRound(); showCard('intro'); if (G.mode.finale) sfx.fanfare(); }
   function endRound() {
     const ranking = G.mode.rank(); const w = ranking[0];
     if (G.mode.finale) { showTitle(w); return; }
-    const pts = [3, 2, 1, 0]; ranking.forEach((p, i) => { p.bank += pts[i] || 0; }); w.wins++;
+    const pts = [3, 2, 1, 0]; ranking.forEach((p, i) => { p.bank += pts[i] || 0; });
     G.state = 'result'; G.frozen = true; G.card = 2.4; G.winner = w.i; emit('cheer', w.i);
     onResult();
   }
-  function onResult() { const w = pigAt(G.winner); if (w) showCard('WINNER', G.mode.name, '+3s throne bonus · 2nd +2s · 3rd +1s', w); }
+  function onResult() { if (pigAt(G.winner)) showCard('result'); }
   function showTitle(w) {
     G.state = 'title'; G.frozen = true; G.winner = w.i; emit('sting');
     onTitle();
@@ -706,12 +752,21 @@ export async function create({ mount, audio, send, hooks }) {
   function onTitle() {
     const w = pigAt(G.winner); if (!w) return;
     sfx.setMusic(false); dom.card.hidden = true; dom.title.hidden = false; root.classList.add('over'); showMenu(false);
-    dom.twin.style.setProperty('--c', hex(w.color)); dom.twin.innerHTML = `${w.emoji} ${esc(w.name)}${w.human ? '' : ' (CPU)'} HOGGED IT<small>${w.throne.toFixed(1)}s on the throne</small>`;
-    renderTitleFoot(); startConfetti();
+    titleWords(); startConfetti();
+  }
+  function titleWords() {
+    const w = pigAt(G.winner); if (!w) return;
+    dom.twin.style.setProperty('--c', hex(w.color));
+    dom.twin.innerHTML = `${w.emoji} ${T('title.hogged', { name: esc(w.name) + (w.human ? '' : ' ' + T('title.cpu')) })}<small>${T('title.secs', { n: w.throne.toFixed(1) })}</small>`;
+    renderTitleFoot();
   }
   function hostFixedStep(step) {
     G.time += step;
-    if (G.state === 'intro') { G.card -= step; if (G.card <= 0) { G.state = 'play'; G.frozen = false; G.t = 0; dom.card.hidden = true; emit('go'); } }
+    if (G.state === 'intro') {
+      G.card -= step; const n = Math.ceil(G.card / COUNT_STEP); // 3-2-1 over the arena once the round card has had its time
+      if (G.card <= 0) { G.state = 'play'; G.frozen = false; G.t = 0; G.lastTick = 99; dom.card.hidden = true; emit('go'); } // lastTick: the countdown's, then the last 5 s
+      else if (n <= COUNT_FROM && n < G.lastTick) { G.lastTick = n; emit('count', n); }
+    }
     else if (G.state === 'play') {
       G.t += step; const left = G.mode.duration - G.t; const sec = Math.ceil(left); if (sec <= 5 && sec < G.lastTick && sec > 0) { G.lastTick = sec; emit('tick'); }
       if (G.mode.finished() || left <= 0) { endRound(); return; } G.mode.fixed(step);
@@ -742,6 +797,8 @@ export async function create({ mount, audio, send, hooks }) {
     (m.p || []).forEach((e, i) => {
       const p = G.pigs[i], s = unpackPig(e); if (!p || !s) return;
       p.out = s.out; p.dash = s.dash ? 1 : 0; p.grounded = s.grounded ? 3 : 0; p.stun = s.stun ? 1 : 0; p.balloons = s.balloons; p.truffles = s.truffles; p.throne = s.throne; p.bank = s.bank; p.hits = s.hits; p.respawn = s.respawn;
+      /* my own dash I may have predicted a moment ago; the host's copy catches up once my `da` arrives */
+      p.dashCd = p === me && nowSec() - p.echoDash < 0.3 ? Math.max(p.dashCd, s.dashCd) : s.dashCd;
       if (p.human && !s.human) p.toAI();
       if (s.inWorld !== p.inWorld) { p.inWorld = s.inWorld; p.group.visible = s.inWorld; if (s.inWorld) { p.buf = []; p.body.position.set(s.x, s.y, s.z); } }
       pushSnap(p.buf, { x: s.x, y: s.y, z: s.z, qx: s.qx, qy: s.qy, qz: s.qz, qw: s.qw, vx: s.vx, vy: s.vy, vz: s.vz }, now);
@@ -754,14 +811,24 @@ export async function create({ mount, audio, send, hooks }) {
     for (const ev of Array.isArray(m.ev) ? m.ev : []) if (Array.isArray(ev)) applyEvent(ev);
   }
   const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
-  function updateClient(dt) {
+  /* my own pig turns to the stick at once instead of a round trip later (it only ever turns in place, so nothing snaps back);
+     stunned or dashing it shows the host's tumble and heading as they are */
+  function updateClient(dt, want) {
     if (G.state === 'play') G.t += dt; // smooth between snapshots; every snapshot puts it right
     const rt = nowSec() - INTERP;
     for (const p of G.pigs) {
+      p.dashCd = Math.max(0, p.dashCd - dt);
       if (!p.inWorld) continue; const s = sampleSnaps(p.buf, rt); if (!s) continue; const { a, b, f } = s; const body = p.body;
       if (b) { body.position.set(lerp(a.x, b.x, f), lerp(a.y, b.y, f), lerp(a.z, b.z, f)); qa.set(a.qx, a.qy, a.qz, a.qw); qb.set(b.qx, b.qy, b.qz, b.qw); qa.slerp(qb, f); }
       else { const ex = clamp(rt - a.t, 0, 0.2); body.position.set(a.x + a.vx * ex, a.y + a.vy * ex, a.z + a.vz * ex); qa.set(a.qx, a.qy, a.qz, a.qw); }
       body.quaternion.set(qa.x, qa.y, qa.z, qa.w); body.velocity.set(a.vx, a.vy, a.vz);
+      if (p === me && want) {
+        const hostYaw = 2 * Math.atan2(qa.y, qa.w);
+        if (p.stun > 0 || p.dash > 0 || G.frozen) { p.lyaw = hostYaw; continue; }
+        const moving = Math.hypot(want.mx, want.mz) > 0.1;
+        p.lyaw = lerpAngle(p.lyaw, moving ? Math.atan2(want.mx, want.mz) : hostYaw, damp(moving ? 14 : 6, dt));
+        tmpQ.setFromAxisAngle(UPV, p.lyaw); body.quaternion.copy(tmpQ);
+      }
     }
   }
   let netAcc = 0, lastSent = null, sinceSent = 0;
@@ -777,12 +844,28 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   /* ============================================================ HUD, cards, toasts, title */
-  let toastT = 0;
-  function toast(text, color = 0xffffff) { const t = dom.toast; t.textContent = text; t.style.color = hex(color); t.classList.remove('go'); void t.offsetWidth; t.classList.add('go'); toastT = 0; }
-  function showCard(kick, name, sub, who) {
-    dom.kick.textContent = kick; dom.cname.textContent = name; dom.csub.textContent = sub;
-    if (who) { dom.who.hidden = false; dom.who.style.setProperty('--c', hex(who.color)); dom.who.textContent = `${who.emoji} ${who.name} wins!`; } else dom.who.hidden = true;
+  /* toasts stack (newest at the bottom, at most TOASTS_MAX, the oldest goes first) so a burst of news is not erased; a toast
+     with a tag replaces the live one with the same tag (the 3-2-1-GO countdown, the sound toggle) */
+  const TOASTS_MAX = 3;
+  function toast(text, color = 0xffffff, tag = '') {
+    const box = dom.toasts; if (tag) for (const o of box.children) if (o.dataset.tag === tag) o.remove();
+    while (box.children.length >= TOASTS_MAX) box.firstElementChild.remove();
+    const t = document.createElement('div'); t.className = 'toast stroke'; t.textContent = text; t.style.color = hex(color); if (tag) t.dataset.tag = tag;
+    t.addEventListener('animationend', () => t.remove()); box.appendChild(t);
+  }
+  const clearToasts = () => { dom.toasts.textContent = ''; };
+  /* the round card: 'intro' (the minigame, its rule and, on the finale, my head start) or 'result' (the winner and the bonus);
+     cardWords() fills it in the current language, so a language switch redraws it without replaying its entrance */
+  let cardKind = '';
+  function showCard(kind) {
+    cardKind = kind; cardWords();
     dom.card.hidden = false; const inner = dom.card.firstElementChild; inner.style.animation = 'none'; void inner.offsetWidth; inner.style.animation = '';
+  }
+  function cardWords() {
+    const m = G.mode; if (!m || !cardKind) return; const who = cardKind === 'result' ? pigAt(G.winner) : null;
+    dom.kick.textContent = cardKind === 'result' ? T('card.winner') : m.finale ? T('finale') : T('round', { n: G.round + 1 }); dom.cname.textContent = m.name;
+    dom.csub.textContent = cardKind === 'result' ? T('card.bonus') : m.sub + (m.finale && me ? '\n' + (me.bank > 0 ? T('card.headStart', { n: me.bank }) : T('card.headZero')) : '');
+    if (who) { dom.who.hidden = false; dom.who.style.setProperty('--c', hex(who.color)); dom.who.textContent = `${who.emoji} ${T('card.wins', { name: who.name })}`; } else dom.who.hidden = true;
   }
   const chips = [], chipCache = [];
   function buildChips() {
@@ -793,22 +876,33 @@ export async function create({ mount, audio, send, hooks }) {
   function syncHud() {
     const m = G.mode; if (!m) return;
     G.pigs.forEach((p, i) => {
-      const c = chips[i]; if (!c) return; const nm = p.name + (p.human ? '' : ' 🤖') + (p === me ? ' (you)' : ''); const king = !!(m.king && m.king === p);
+      const c = chips[i]; if (!c) return; const nm = p.name + (p.human ? '' : ' 🤖') + (p === me ? ' ' + T('chip.you') : ''); const king = !!(m.king && m.king === p);
       const s = `${nm}|${m.stat(p)}|${p.bank}|${p.out}|${king}`; if (chipCache[i] === s) return; chipCache[i] = s;
-      c.children[1].textContent = nm; c.children[2].textContent = m.stat(p) + (m.finale ? '' : ` · +${p.bank}s`); c.classList.toggle('out', p.out); c.classList.toggle('king', king); c.classList.toggle('me', p === me);
+      /* the banked bonus shows in the finale too: there it is the head start already counted into the throne seconds */
+      c.children[1].textContent = nm; c.children[2].textContent = m.stat(p) + ' · ' + T('chip.bank', { n: p.bank }); c.classList.toggle('out', p.out); c.classList.toggle('king', king); c.classList.toggle('me', p === me);
     });
     const playing = G.state === 'play', left = playing ? Math.max(0, m.duration - G.t) : 0, ts = playing ? String(Math.ceil(left)) : '';
     if (hudCache.timer !== ts) { hudCache.timer = ts; dom.timer.textContent = ts; }
     const hot = playing && left <= 5.5; if (hudCache.hot !== hot) { hudCache.hot = hot; dom.timer.classList.toggle('hot', hot); }
   }
+  /* the title card's buttons: the host (and solo) restart or leave; a guest votes for a rematch and may leave the room, and the
+     host sees how many guests voted (rematchVotes) */
+  let wantRematch = false, rematchIds = [];
+  const note = (f, text) => { const d = document.createElement('div'); d.className = 'note'; d.textContent = text; f.appendChild(d); };
+  const mkBtn = f => (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
+  const rematchLabel = () => T(wantRematch ? 'btn.rematchOn' : 'btn.rematch');
+  function toggleRematch() { wantRematch = !wantRematch; hooks.onRematch?.(wantRematch); renderTitleFoot(); if (dom.pause.classList.contains('show')) renderMenu(); }
   function renderTitleFoot() {
-    const f = dom.tfoot; f.innerHTML = '';
-    const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
+    const f = dom.tfoot; f.innerHTML = ''; const btn = mkBtn(f);
     const key = k => touch ? '' : `  (${k})`;
-    if (!online) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('MENU' + key('ESC'), '', () => hooks.onExit?.()); }
-    else if (isHost) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY' + key('ESC'), '', () => hooks.onExit?.()); }
-    else f.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
+    if (!online) { btn(T('btn.again') + key('R'), 'primary', () => hooks.onRestart?.()); btn(T('btn.menu') + key('ESC'), '', () => hooks.onExit?.()); }
+    else if (isHost) {
+      btn(T('btn.again') + key('R'), 'primary', () => hooks.onRestart?.()); btn(T('btn.lobby') + key('ESC'), '', () => hooks.onExit?.());
+      const n = rematchIds.filter(id => id !== myId).length; if (n) note(f, n === 1 ? T('rematch1') : T('rematchN', { n }));
+    }
+    else { btn(rematchLabel() + key('R'), wantRematch ? 'primary on' : 'primary', toggleRematch); btn(T('btn.leave'), '', () => hooks.onLeave?.()); note(f, T(wantRematch ? 'foot.voted' : 'foot.wait')); }
   }
+  function rematchVotes(ids) { rematchIds = Array.isArray(ids) ? ids.slice() : []; if (session && isHost && G.state === 'title') renderTitleFoot(); }
   /* confetti on the title card (2D canvas) */
   let confetti = null;
   function startConfetti() {
@@ -822,18 +916,25 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   /* ============================================================ input: the keyboard, plus the touch controls on a coarse-pointer screen */
-  const setSnd = () => { dom.snd.textContent = audio.muted ? '🔇 sound off' : '🔊 sound on'; };
+  const setSnd = () => { dom.snd.textContent = T(audio.muted ? 'snd.off' : 'snd.on'); };
   const canPlay = () => !!(session && me && G.state === 'play' && !me.out);
+  /* a press: the host buffers it for its own pig; a client sends it and, when the press will surely take, plays it at once */
+  const canEcho = () => !isHost && canPlay() && me.inWorld && me.stun <= 0 && me.dash <= 0;
   function dashPressed() {
     if (!session || !me) return;
-    if (isHost) me.dashQ = true; else send({ t: 'da', to: hostId });
+    if (isHost) { me.dashQ = DASH_BUFFER; return; }
+    send({ t: 'da', to: hostId });
+    if (canEcho() && me.dashCd <= 0) { dashFx(me); me.echoDash = nowSec(); me.dashCd = DASH_CD; }
   }
+  function hopPressed() { if (canEcho() && me.grounded > 0 && nowSec() - me.echoHop > ECHO_WINDOW) { hopFx(me); me.echoHop = nowSec(); } }
   const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', Space: 'jump', ShiftLeft: 'dash', ShiftRight: 'dash', KeyE: 'dash' }, {
-    onDown: name => { audio.init(); if (name === 'dash') dashPressed(); },
+    onDown: name => { audio.init(); if (name === 'dash') dashPressed(); else if (name === 'jump') hopPressed(); },
+    /* R / ESC are the host's (and solo's) restart and exit; a guest's R votes for a rematch on the title card, its ESC opens the menu (LEAVE ROOM is there) */
     onKey: e => {
-      if (e.code === 'KeyM') { audio.toggle(); setSnd(); toast(audio.muted ? 'MUTED' : 'SOUND ON', 0xffffff); }
-      else if (e.code === 'KeyR') hooks.onRestart?.();
-      else if (e.code === 'Escape') hooks.onExit?.();
+      const guest = online && !isHost;
+      if (e.code === 'KeyM') { audio.toggle(); setSnd(); toast(T(audio.muted ? 'toast.muted' : 'toast.sound'), 0xffffff, 'snd'); if (dom.pause.classList.contains('show')) renderMenu(); }
+      else if (e.code === 'KeyR') { if (!guest) hooks.onRestart?.(); else if (G.state === 'title') toggleRematch(); }
+      else if (e.code === 'Escape') { if (!guest) hooks.onExit?.(); else showMenu(!dom.pause.classList.contains('show')); }
     },
   });
   const held = kb.held;
@@ -843,7 +944,7 @@ export async function create({ mount, audio, send, hooks }) {
   const shake = el => { el.classList.remove('nope'); void el.offsetWidth; el.classList.add('nope'); };
   for (const el of [dom.hopBtn, dom.dashBtn]) el.addEventListener('animationend', () => el.classList.remove('nope'));
   const stickS = touch ? tc.pad($('[data-pad]'), { range: 60, dead: 6, axes: 2, onDown: () => audio.init() }) : null;
-  const hopS = touch ? tc.button(dom.hopBtn, { onDown: () => { audio.init(); if (!canPlay()) shake(dom.hopBtn); } }) : null;
+  const hopS = touch ? tc.button(dom.hopBtn, { onDown: () => { audio.init(); if (!canPlay()) shake(dom.hopBtn); else hopPressed(); } }) : null;
   const dashS = touch ? tc.button(dom.dashBtn, { onDown: () => { audio.init(); if (!canPlay()) shake(dom.dashBtn); dashPressed(); } }) : null;
   /* what my pig is told to do this frame: the keys, or the stick and HOP */
   function readWant() {
@@ -851,18 +952,25 @@ export async function create({ mount, audio, send, hooks }) {
     if (touch) { if (!mx && !mz && stickS.held) { mx = r2(stickS.x); mz = r2(stickS.y); } jump = jump || hopS.held; }
     return { mx, mz, jump };
   }
-  function syncTouch() { if (!touch) return; const ok = canPlay(); dom.hopBtn.classList.toggle('dim', !ok); dom.dashBtn.classList.toggle('dim', !ok || (me && me.dashCd > 0 && isHost)); }
+  /* DASH draws its cooldown as a shrinking dark wedge (--cd, 0..1 in twentieths so the style is only touched when it changes) */
+  let lastCd = -1;
+  function syncTouch() {
+    if (!touch) return; const ok = canPlay(); dom.hopBtn.classList.toggle('dim', !ok); dom.dashBtn.classList.toggle('dim', !ok);
+    const cd = ok ? Math.ceil(clamp(me.dashCd / DASH_CD, 0, 1) * 20) / 20 : 0; if (cd !== lastCd) { lastCd = cd; dom.dashBtn.style.setProperty('--cd', cd); }
+  }
 
-  /* ☰: a card with what M, R and Esc do on a keyboard; the round keeps running underneath */
+  /* ☰ (and a guest's ESC): a card with sound, language and the ways out; the round keeps running underneath */
   function renderMenu() {
-    const f = dom.pauseBtns; f.innerHTML = '';
-    const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
-    btn('RESUME', 'primary', () => showMenu(false));
-    btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); setSnd(); renderMenu(); });
-    if (!online || isHost) { btn(!online ? 'RESTART' : 'PLAY AGAIN', '', () => { showMenu(false); hooks.onRestart?.(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
+    const f = dom.pauseBtns; f.innerHTML = ''; const btn = mkBtn(f);
+    btn(T('btn.resume'), 'primary', () => showMenu(false));
+    btn(T(audio.muted ? 'btn.soundOff' : 'btn.soundOn'), '', () => { audio.toggle(); setSnd(); renderMenu(); });
+    btn(T('btn.lang'), '', () => nextLang()); // onLang redraws everything, this card included
+    if (!online || isHost) { btn(T(!online ? 'btn.restart' : 'btn.again'), '', () => { showMenu(false); hooks.onRestart?.(); }); btn(T(!online ? 'btn.quit' : 'btn.lobby'), '', () => { showMenu(false); hooks.onExit?.(); }); }
+    else { btn(rematchLabel(), wantRematch ? 'on' : '', toggleRematch); btn(T('btn.leave'), '', () => { showMenu(false); hooks.onLeave?.(); }); }
   }
   function showMenu(on) { dom.pause.classList.toggle('show', on); if (on) { tc.releaseAll(); renderMenu(); } }
-  if (touch) { dom.menuBtn.addEventListener('click', () => { audio.init(); showMenu(!dom.pause.classList.contains('show')); }); dom.pause.addEventListener('click', e => { if (e.target === dom.pause) showMenu(false); }); }
+  if (touch) dom.menuBtn.addEventListener('click', () => { audio.init(); showMenu(!dom.pause.classList.contains('show')); });
+  dom.pause.addEventListener('click', e => { if (e.target === dom.pause) showMenu(false); });
 
   /* ============================================================ main loop. The simulation advances by the wall clock (`simAt`): from the frame
      loop while the tab is visible and, for an online host, from a worker timer while it is hidden, so the round goes on for everyone else. */
@@ -871,7 +979,7 @@ export async function create({ mount, audio, send, hooks }) {
     const dt = clamp((now - simAt) / 1000, 0, 0.05); simAt = now;
     const want = readWant();
     if (isHost) { if (me) me.want = want; acc += dt; let n = 0; while (acc >= STEP && n < 4) { hostFixedStep(STEP); acc -= STEP; n++; } if (n === 4) acc = 0; hostNetTick(dt); }
-    else { if (me) clientSendInput(want, dt); updateClient(dt); }
+    else { if (me) clientSendInput(want, dt); updateClient(dt, want); }
     return dt;
   }
   const ticker = createTicker(NET_HZ, () => { if (session && online && isHost && document.hidden) step(performance.now()); });
@@ -881,6 +989,7 @@ export async function create({ mount, audio, send, hooks }) {
     if (G.state === 'title') { titleFrame(dt); syncHud(); return; }
     if (!G.mode) return; // a client before its first snapshot
     for (const p of G.pigs) p.frame(dt, tAll);
+    if (me && me.marker) me.marker.g.visible = me.inWorld;
     G.mode.frame(dt, tAll);
     FX.update(dt);
     for (const c of clouds) { c.position.x += c.userData.v * dt; if (c.position.x > 60) c.position.x = -60; }
@@ -891,23 +1000,36 @@ export async function create({ mount, audio, send, hooks }) {
   /* ============================================================ session API */
   function start(s) {
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId;
-    for (const p of G.pigs) p.dispose(); G.pigs = buildRoster(s).map(slot => new Pig(slot)); me = G.pigs.find(p => p.pid === myId) || null;
+    for (const p of G.pigs) p.dispose(); G.pigs = buildRoster(s).map(slot => new Pig(slot)); me = G.pigs.find(p => p.pid === myId) || null; me?.mark();
+    wantRematch = false; rematchIds = []; cardKind = ''; lastCd = -1; clearToasts();
     guard = createSnapGuard(s.seed >>> 0); seq = 0; events = []; netAcc = 0; lastSent = null; sinceSent = 1; acc = 0; simAt = performance.now();
     if (G.arena) { G.arena.dispose(); G.arena = null; } G.mode = null; G.state = null; G.plan = []; G.round = 0; G.t = 0; G.time = 0; G.frozen = true; G.winner = -1; bumpQueue.length = 0;
     for (const k of Object.keys(hudCache)) delete hudCache[k]; buildChips();
-    dom.card.hidden = true; dom.title.hidden = true; root.classList.remove('over'); dom.timer.textContent = ''; dom.round.textContent = 'GET READY'; dom.sub.textContent = online && !isHost ? 'waiting for the host…' : '';
-    dom.keys.innerHTML = touch ? '' : `<kbd>WASD</kbd> move <kbd>SPACE</kbd> hop <kbd>SHIFT</kbd>/<kbd>E</kbd> butt-dash <kbd>M</kbd> sound` + (!online ? ' <kbd>R</kbd> restart <kbd>ESC</kbd> menu' : isHost ? ' <kbd>R</kbd> again <kbd>ESC</kbd> lobby' : '');
-    setSnd(); showMenu(false); audio.init(); kb.attach(); if (touch) tc.attach(); resize(); loop.start(); if (online && isHost) ticker.start(); else ticker.stop();
+    dom.card.hidden = true; dom.title.hidden = true; root.classList.remove('over'); dom.timer.textContent = '';
+    words(); showMenu(false); audio.init(); kb.attach(); if (touch) tc.attach(); resize(); loop.start(); if (online && isHost) ticker.start(); else ticker.stop();
     if (isHost) startGame(); else setSky(0x86d1ff);
   }
+  /* every word on screen, in the current language: run on start and on every language switch */
+  function words() {
+    for (const el of root.querySelectorAll('[data-t]')) el.textContent = T(el.dataset.t);
+    setSnd(); chipCache.fill('');
+    dom.keys.innerHTML = touch || !session ? '' : `<kbd>WASD</kbd> ${T('k.move')} <kbd>SPACE</kbd> ${T('k.hop')} <kbd>SHIFT</kbd>/<kbd>E</kbd> ${T('k.dash')} <kbd>M</kbd> ${T('k.sound')}`
+      + (!online ? ` <kbd>R</kbd> ${T('k.restart')} <kbd>ESC</kbd> ${T('k.menu')}` : isHost ? ` <kbd>R</kbd> ${T('k.again')} <kbd>ESC</kbd> ${T('k.lobby')}` : ` <kbd>ESC</kbd> ${T('k.menu')}`);
+    if (G.mode) roundWords(); else { dom.round.textContent = T('getReady'); dom.sub.textContent = online && !isHost ? T('waitHost') : ''; }
+    if (!dom.card.hidden) cardWords();
+    if (!dom.title.hidden) titleWords();
+    if (dom.pause.classList.contains('show')) renderMenu();
+  }
+  const unLang = onLang(() => words());
+  words();
   function stop() {
     session = null; kb.detach(); tc.detach(); ticker.stop(); loop.stop(); sfx.setMusic(false); showMenu(false);
     for (const p of G.pigs) p.dispose(); G.pigs = []; me = null; if (G.arena) { G.arena.dispose(); G.arena = null; } G.mode = null; G.state = null; confetti = null;
     dom.card.hidden = true; dom.title.hidden = true;
   }
   function destroy() {
-    stop(); ticker.dispose(); sfx.dispose(); ro?.disconnect(); removeEventListener('resize', resize);
-    FX.dispose(); for (const g of GEOS.values()) g.dispose(); GEOS.clear(); for (const m of MATS.values()) m.dispose(); MATS.clear(); grad.dispose(); sunMat.dispose();
+    stop(); unLang(); ticker.dispose(); sfx.dispose(); ro?.disconnect(); removeEventListener('resize', resize);
+    FX.dispose(); markDim.dispose(); markLit.dispose(); markArrow.dispose(); for (const g of GEOS.values()) g.dispose(); GEOS.clear(); for (const m of MATS.values()) m.dispose(); MATS.clear(); grad.dispose(); sunMat.dispose();
     renderer.dispose(); renderer.forceContextLoss?.(); root.remove(); mount.innerHTML = ''; unloadCss();
     if (window.__hog === debug) delete window.__hog;
   }
@@ -922,5 +1044,5 @@ export async function create({ mount, audio, send, hooks }) {
   }
   const debug = { G, get me() { return me; }, get session() { return session; }, packSnapshot, applySnapshot, loop, touch: { on: touch, stick: stickS, hop: hopS, dash: dashS, showMenu }, skipCard() { G.card = 0; } };
   window.__hog = debug;
-  return { start, stop, destroy, onNetMessage, playerLeft, debug };
+  return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };
 }

@@ -2,7 +2,8 @@
    guard that keeps a straggler from the finished match away from the next one after PLAY AGAIN. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoster, packPig, unpackPig, createSnapGuard, cleanWish, MAX_PIGS, HATS } from '../client/games/hog/net.js';
+import { buildRoster, packPig, unpackPig, createSnapGuard, cleanWish, toastText, TOAST_PIG, TOAST_COLOR, MAX_PIGS, HATS } from '../client/games/hog/net.js';
+import { STR } from '../client/games/hog/strings.js';
 import { AVATARS } from '../client/core/avatars.js';
 
 const wire = msg => JSON.parse(JSON.stringify(msg)); // what actually crosses the network
@@ -36,6 +37,33 @@ test('a pig survives the wire', () => {
   const t = unpackPig(wire(packPig(pig)));
   assert.equal(t.out, true); assert.equal(t.inWorld, false); assert.equal(t.dash, false); assert.equal(t.stun, true); assert.equal(t.human, false);
   assert.equal(unpackPig('junk'), null);
+});
+
+test('the dash cooldown rides along in tenths, rounded up, so it reads 0 only when DASH is ready', () => {
+  const pig = { body: { position: { x: 0, y: 0, z: 0 }, quaternion: { x: 0, y: 0, z: 0, w: 1 }, velocity: { x: 0, y: 0, z: 0 } }, dashCd: 1 };
+  const cd = v => { pig.dashCd = v; const a = wire(packPig(pig)); assert.ok(Number.isInteger(a[17]), 'a small integer on the wire'); return unpackPig(a).dashCd; };
+  assert.equal(cd(1), 1); assert.equal(cd(0.5), 0.5); assert.equal(cd(0.01), 0.1); assert.equal(cd(0), 0); assert.equal(cd(-0.2), 0);
+  delete pig.dashCd; assert.equal(cd(undefined), 0, 'a pig without one');
+  assert.equal(unpackPig([1, 2, 3]).dashCd, 0, 'an older build sends none');
+});
+
+test('toasts cross the wire as a key plus a pig and a number, and every machine words them in its own language', () => {
+  const pigs = [{ name: 'ABE', color: 0x111111 }, { name: 'ZOE', color: 0x222222 }];
+  const tables = { zh: STR.zh, en: STR.en };
+  const T = lang => (k, v) => { let s = tables[lang][k]; for (const n in v) s = s.split('{' + n + '}').join(v[n]); return s; };
+  const events = [['toast', 'reverse'], ['toast', 'popped', 1], ['toast', 'balloon', 0], ['toast', 'drops', 1, 3], ['toast', 'king', 0], ['toast', 'contested'], ['toast', 'out', 1]];
+  for (const ev of events) {
+    const w = wire(ev); assert.ok(w.every(x => typeof x !== 'string' || x === 'toast' || /^[a-z]+$/.test(x)), 'no sentence on the wire');
+    for (const lang of ['zh', 'en']) { const t = toastText(w, pigs, T(lang)); assert.ok(t && t.text && !/[{}]/.test(t.text), `${ev[1]} in ${lang}`); }
+  }
+  assert.equal(toastText(['toast', 'drops', 1, 3], pigs, T('en')).text, 'ZOE DROPS 3!');
+  assert.equal(toastText(['toast', 'king', 0], pigs, T('zh')).text, 'ABE 登上王座!');
+  assert.equal(toastText(['toast', 'king', 0], pigs, T('en')).color, 0x111111, 'painted in the pig colour');
+  assert.equal(toastText(['toast', 'contested'], pigs, T('en')).color, TOAST_COLOR.contested);
+  assert.equal(toastText(['toast', 'popped', 7], pigs, T('en')), null, 'a pig that is not there');
+  assert.equal(toastText(['toast', 'popped'], pigs, T('en')), null);
+  assert.equal(toastText(['toast', 'ZOE POPPED!', 0xff0000], pigs, T('en')), null, 'an old-style sentence is dropped');
+  for (const k of [...TOAST_PIG, ...Object.keys(TOAST_COLOR)]) for (const lang of ['zh', 'en']) assert.ok(tables[lang]['toast.' + k], `toast.${k} in ${lang}`);
 });
 
 test('the snapshot guard takes the current match in order and drops a straggler from the last one', () => {

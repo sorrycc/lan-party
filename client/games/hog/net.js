@@ -6,7 +6,8 @@
      q    sequence number, st index into STATES, rd round index into pl (the shuffled plan, indices into MODES)
      tm   seconds into the current round, cd the card timer, w the winner's pig index (result and title) or -1
      p    one packed pig per roster slot (packPig / unpackPig), m whatever the current mode packs
-     ev   the effects that happened since the last snapshot; every machine turns them into the same sounds and particles */
+     ev   the effects that happened since the last snapshot; every machine turns them into the same sounds and particles. A toast
+          travels as ['toast', key, pig index, n], never as a sentence: each machine words it in its own language (toastText) */
 import { AVATARS } from '../../core/avatars.js';
 
 export const MAX_PIGS = 4;
@@ -39,19 +40,20 @@ export function buildRoster(session) {
   return roster;
 }
 
-/* ---- pigs. Flags: 1 out, 2 in the world (visible), 4 dashing, 8 grounded, 16 human, 32 stunned. */
+/* ---- pigs. Flags: 1 out, 2 in the world (visible), 4 dashing, 8 grounded, 16 human, 32 stunned. The dash cooldown rides
+   along in tenths of a second, rounded up (0 only when DASH is really ready), so a client can draw its cooldown too. */
 export function packPig(p) {
   const b = p.body, q = b.quaternion, v = b.velocity;
   const flags = (p.out ? 1 : 0) | (p.inWorld ? 2 : 0) | (p.dash > 0 ? 4 : 0) | (p.grounded > 0 ? 8 : 0) | (p.human ? 16 : 0) | (p.stun > 0 ? 32 : 0);
   return [r3(b.position.x), r3(b.position.y), r3(b.position.z), r3(q.x), r3(q.y), r3(q.z), r3(q.w), r2(v.x), r2(v.y), r2(v.z),
-    flags, p.balloons | 0, p.truffles | 0, r2(p.throne), p.bank | 0, p.hits | 0, r2(p.respawn)];
+    flags, p.balloons | 0, p.truffles | 0, r2(p.throne), p.bank | 0, p.hits | 0, r2(p.respawn), Math.ceil(Math.max(0, p.dashCd || 0) * 10 - 1e-6)];
 }
 export function unpackPig(a) {
   if (!Array.isArray(a)) return null;
   const flags = num(a[10]);
   return { x: num(a[0]), y: num(a[1]), z: num(a[2]), qx: num(a[3]), qy: num(a[4]), qz: num(a[5]), qw: num(a[6], 1), vx: num(a[7]), vy: num(a[8]), vz: num(a[9]),
     out: !!(flags & 1), inWorld: !!(flags & 2), dash: !!(flags & 4), grounded: !!(flags & 8), human: !!(flags & 16), stun: !!(flags & 32),
-    balloons: num(a[11]), truffles: num(a[12]), throne: num(a[13]), bank: num(a[14]), hits: num(a[15]), respawn: num(a[16], -1) };
+    balloons: num(a[11]), truffles: num(a[12]), throne: num(a[13]), bank: num(a[14]), hits: num(a[15]), respawn: num(a[16], -1), dashCd: Math.max(0, num(a[17])) / 10 };
 }
 
 /* ---- the snapshot guard: only the current match's snapshots, and only in order. PLAY AGAIN restarts the host's numbering
@@ -71,3 +73,15 @@ export function createSnapGuard(matchId) {
 
 /* ---- a client's wish for its pig: a direction, whether HOP is held; DASH travels separately as a one-off `da` message */
 export const cleanWish = m => ({ mx: Math.max(-1, Math.min(1, num(m.x))), mz: Math.max(-1, Math.min(1, num(m.y))), jump: !!m.j });
+
+/* ---- toasts: ['toast', key, pig index, n] from the host, worded by each machine through its own T (strings.js `toast.<key>`).
+   Keys about a pig need a real pig (its name fills {name}, its colour paints the toast); an unknown key or a missing pig is dropped. */
+export const TOAST_COLOR = { reverse: 0xffe66d, contested: 0xffd166 }; // the toasts about nobody in particular
+export const TOAST_PIG = ['out', 'popped', 'balloon', 'drops', 'king'];
+export function toastText(ev, pigs, T) {
+  if (!Array.isArray(ev)) return null;
+  const key = String(ev[1]), about = TOAST_PIG.includes(key);
+  if (!about && !(key in TOAST_COLOR)) return null;
+  const p = about ? (Number.isInteger(ev[2]) ? pigs[ev[2]] : null) : null; if (about && !p) return null;
+  return { text: T('toast.' + key, { name: p ? p.name : '', n: num(ev[3]) }), color: p ? p.color : TOAST_COLOR[key] };
+}

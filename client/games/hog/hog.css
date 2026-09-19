@@ -3,13 +3,15 @@
    `.hog.touch` is set by the game on coarse-pointer devices (phones and tablets): the thumb stick, HOP, DASH and the
    ☰ menu appear, the keyboard footer goes and the player chips move up out of the thumbs' way. Every edge offset adds
    the device's safe-area inset (notch, home indicator). A short viewport (a phone in landscape) gets the compact sizes
-   at the end of this file. */
+   at the end of this file. Chinese text (html.zh, set by the shell) falls back to the CJK fonts in the two stacks below and loses
+   the wide letter-spacing the Latin capitals need (the html.zh block before the short-viewport sizes). */
 .hog { --ink: #2a0a1a; --pink: #ff7fb0; --gold: #ffd166;
+  --cjk: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei"; --body: Arial, var(--cjk), sans-serif;
   --sa-t: env(safe-area-inset-top, 0px); --sa-r: env(safe-area-inset-right, 0px); --sa-b: env(safe-area-inset-bottom, 0px); --sa-l: env(safe-area-inset-left, 0px);
   /* the thumb buttons stay clear of Safari's edge-swipe zones even where the safe-area insets are zero (an iPad in a browser tab) */
   --edge-r: max(22px + var(--sa-r), 40px); --edge-b: max(22px + var(--sa-b), 40px);
   position: absolute; inset: 0; overflow: hidden; background: #86d1ff; color: #fff;
-  font-family: "Arial Black", "Impact", "Franklin Gothic Medium", "Helvetica Neue", Arial, sans-serif; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  font-family: "Arial Black", "Impact", "Franklin Gothic Medium", "Helvetica Neue", Arial, var(--cjk), sans-serif; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .hog.touch { touch-action: none; }
 .hog .gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 .hog .ov { position: absolute; inset: 0; pointer-events: none; }
@@ -20,7 +22,7 @@
   padding: calc(clamp(8px, 1.5vw, 18px) + var(--sa-t)) calc(clamp(8px, 1.5vw, 18px) + var(--sa-r)) calc(clamp(8px, 1.5vw, 18px) + var(--sa-b)) calc(clamp(8px, 1.5vw, 18px) + var(--sa-l)); }
 .hog .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .hog .round { font-size: clamp(16px, 2.6vw, 34px); letter-spacing: 1px; line-height: 1.05; }
-.hog .round small { display: block; font-size: clamp(11px, 1.3vw, 16px); opacity: .95; margin-top: 4px; font-family: Arial, sans-serif; -webkit-text-stroke: 0; text-shadow: 2px 2px 0 var(--ink); }
+.hog .round small { display: block; font-size: clamp(11px, 1.3vw, 16px); opacity: .95; margin-top: 4px; font-family: var(--body); -webkit-text-stroke: 0; text-shadow: 2px 2px 0 var(--ink); }
 .hog .timer { font-size: clamp(34px, 6vw, 84px); line-height: 1; min-width: 1.4em; text-align: right; }
 .hog .timer.hot { color: #ff4d6d; animation: hog-pulse .5s infinite alternate; }
 @keyframes hog-pulse { from { transform: scale(1); } to { transform: scale(1.12); } }
@@ -28,18 +30,18 @@
 .hog .chip { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 8px; border-radius: 14px; background: rgba(42,10,26,.72); border: 3px solid var(--c); font-size: clamp(13px, 1.6vw, 22px); min-width: clamp(80px, 14vw, 170px); }
 .hog .chip .dot { width: .9em; height: .9em; border-radius: 50%; background: var(--c); box-shadow: inset -3px -3px 0 rgba(0,0,0,.25); flex: none; }
 .hog .chip .nm { color: var(--c); white-space: nowrap; }
-.hog .chip .st { margin-left: auto; font-family: Arial, sans-serif; font-weight: bold; white-space: nowrap; }
+.hog .chip .st { margin-left: auto; font-family: var(--body); font-weight: bold; white-space: nowrap; }
 .hog .chip.out { opacity: .45; filter: grayscale(.6); }
 .hog .chip.king { box-shadow: 0 0 0 3px var(--gold), 0 0 18px var(--gold); }
 .hog .chip.me { background: rgba(42,10,26,.9); }
-.hog .foot { display: flex; gap: 14px; align-items: center; justify-content: center; font-family: Arial, sans-serif; font-size: 12px; font-weight: bold; color: #fff; text-shadow: 0 2px 0 rgba(42,10,26,.6); letter-spacing: .5px; flex-wrap: wrap; }
+.hog .foot { display: flex; gap: 14px; align-items: center; justify-content: center; font-family: var(--body); font-size: 12px; font-weight: bold; color: #fff; text-shadow: 0 2px 0 rgba(42,10,26,.6); letter-spacing: .5px; flex-wrap: wrap; }
 .hog .foot kbd { background: rgba(42,10,26,.72); color: #fff; border-radius: 6px; padding: 1px 7px; margin: 0 3px 0 6px; text-shadow: none; font-family: inherit; }
 .hog .snd { pointer-events: auto; font: inherit; color: inherit; background: rgba(42,10,26,.5); border: 0; border-radius: 999px; padding: 4px 10px; cursor: pointer; text-shadow: inherit; letter-spacing: inherit; }
 /* touch: the chips sit under the round title, the thumbs own the bottom of the screen */
 .hog.touch .hud { justify-content: flex-start; }
 .hog.touch .hud .foot { display: none; }
-.hog .toast { position: absolute; left: 0; right: 0; top: 32%; text-align: center; font-size: clamp(26px, 5.5vw, 72px); pointer-events: none; opacity: 0; z-index: 4; }
-.hog .toast.go { animation: hog-toast 1.1s ease-out forwards; }
+.hog .toasts { position: absolute; left: 0; right: 0; top: 26%; display: flex; flex-direction: column; align-items: center; gap: .1em; pointer-events: none; z-index: 4; }
+.hog .toast { text-align: center; font-size: clamp(24px, 4.8vw, 64px); line-height: 1.1; padding: 0 12px; opacity: 0; animation: hog-toast 1.3s ease-out forwards; }
 @keyframes hog-toast { 0% { opacity: 0; transform: scale(.4) rotate(-6deg); } 15% { opacity: 1; transform: scale(1.15) rotate(2deg); } 30% { transform: scale(1); } 80% { opacity: 1; } 100% { opacity: 0; transform: translateY(-30px); } }
 
 /* ---------------------------------------------------------------- cards */
@@ -48,7 +50,7 @@
 @keyframes hog-cardin { from { transform: scale(.3) rotate(-8deg); opacity: 0; } to { transform: none; opacity: 1; } }
 .hog .card .kick { font-size: clamp(14px, 2vw, 24px); color: var(--gold); letter-spacing: 3px; }
 .hog .card h2 { margin: .1em 0; font-size: clamp(40px, 9vw, 120px); line-height: .95; }
-.hog .card p { font-family: Arial, sans-serif; font-weight: bold; font-size: clamp(14px, 2.2vw, 28px); margin: .4em 0 0; text-shadow: 2px 2px 0 var(--ink); }
+.hog .card p { white-space: pre-line; font-family: var(--body); font-weight: bold; font-size: clamp(14px, 2.2vw, 28px); margin: .4em 0 0; text-shadow: 2px 2px 0 var(--ink); }
 .hog .card .who { display: inline-block; margin-top: 10px; padding: 6px 18px; border-radius: 20px; background: var(--c); color: var(--ink); text-shadow: none; -webkit-text-stroke: 0; font-size: clamp(18px, 3vw, 40px); }
 
 /* ---------------------------------------------------------------- title card */
@@ -61,11 +63,13 @@
 .hog .title h1 { margin: .05em 0; font-size: clamp(56px, 14vw, 220px); line-height: .88; color: var(--gold); -webkit-text-stroke: 3px var(--ink); text-shadow: 6px 6px 0 var(--ink), 12px 12px 0 rgba(42,10,26,.25); animation: hog-slam .5s cubic-bezier(.2,1.5,.4,1) both; }
 @keyframes hog-slam { from { transform: scale(3); opacity: 0; } to { transform: none; opacity: 1; } }
 .hog .title .win { display: inline-block; margin-top: 14px; padding: 10px 26px; border-radius: 30px; background: var(--c); border: 4px solid var(--ink); color: var(--ink); font-size: clamp(20px, 4vw, 52px); animation: hog-cardin .5s .3s both; }
-.hog .title .win small { display: block; font-family: Arial, sans-serif; font-size: .5em; }
-.hog .title .again { margin-top: 24px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-family: Arial, sans-serif; font-weight: bold; font-size: clamp(13px, 1.8vw, 20px); color: var(--ink); animation: hog-fadein .4s 1.2s both; }
+.hog .title .win small { display: block; font-family: var(--body); font-size: .5em; }
+.hog .title .again .note { flex-basis: 100%; text-align: center; }
+.hog .title .again { margin-top: 24px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-family: var(--body); font-weight: bold; font-size: clamp(13px, 1.8vw, 20px); color: var(--ink); animation: hog-fadein .4s 1.2s both; }
 @keyframes hog-fadein { from { opacity: 0; } to { opacity: 1; } }
 .hog .btn { font-family: inherit; font-size: 16px; letter-spacing: 1px; padding: 10px 20px; border-radius: 999px; border: 4px solid var(--ink); background: #fff1c9; color: var(--ink); box-shadow: 0 5px 0 var(--ink); cursor: pointer; transition: transform .08s, box-shadow .08s; touch-action: manipulation; }
 .hog .btn.primary { background: var(--gold); }
+.hog .btn.on, .hog .btn.on:hover { background: #7cff9a; }
 .hog .btn:hover { background: #fff8e8; transform: none; }
 .hog .btn.primary:hover { background: #ffe08a; }
 .hog .btn:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--ink); }
@@ -84,7 +88,7 @@
 .hog .pad .ring { position: absolute; left: var(--ox); top: var(--oy); width: 124px; height: 124px; margin: -62px 0 0 -62px; border-radius: 50%; border: 3px solid rgba(255,255,255,.5); background: rgba(42,10,26,.3); opacity: 0; transition: opacity .2s; }
 .hog .pad.on .ring { opacity: 1; transition: none; }
 .hog .pad .knob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; margin: -27px 0 0 -27px; border-radius: 50%; background: rgba(255,255,255,.92); box-shadow: 0 4px 12px rgba(0,0,0,.45); transform: translate(calc(var(--sx) * 36px), calc(var(--sy) * 36px)); }
-.hog .pad .lbl { position: absolute; left: 50%; bottom: calc(24px + var(--sa-b)); transform: translateX(-50%); font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,.55); font-family: Arial, sans-serif; font-weight: 700; white-space: nowrap; text-shadow: 0 2px 0 rgba(42,10,26,.5); }
+.hog .pad .lbl { position: absolute; left: 50%; bottom: calc(24px + var(--sa-b)); transform: translateX(-50%); font-size: 11px; letter-spacing: 3px; color: rgba(255,255,255,.55); font-family: var(--body); font-weight: 700; white-space: nowrap; text-shadow: 0 2px 0 rgba(42,10,26,.5); }
 .hog .pad.on .lbl { opacity: 0; }
 /* HOP (hold to keep hopping) and DASH under the right thumb */
 .hog .tbtn { width: 92px; height: 92px; border-radius: 50%; border: 3px solid rgba(255,255,255,.55); background: rgba(42,10,26,.55); color: #fff; font-size: 15px; letter-spacing: 1px;
@@ -95,6 +99,8 @@
 .hog .hop { right: calc(var(--edge-r) + 118px); bottom: var(--edge-b); }
 .hog .hop.on { background: rgba(124,255,154,.45); border-color: #7cff9a; }
 .hog .dash { right: var(--edge-r); bottom: var(--edge-b); width: 104px; height: 104px; border-color: rgba(255,209,102,.8); }
+/* the dash cooldown: a dark wedge (--cd of a turn, set by the game) that shrinks clockwise back to nothing; under the label */
+.hog .dash::before { content: ""; position: absolute; inset: 0; border-radius: 50%; z-index: -1; background: conic-gradient(rgba(42,10,26,.75) calc(var(--cd, 0) * 1turn), transparent 0); }
 .hog .dash.on { background: rgba(255,209,102,.5); border-color: var(--gold); }
 /* a press that cannot do anything: a short shake instead of silence */
 @keyframes hog-nope { 0%, 100% { transform: translateX(0); } 30% { transform: translateX(-6px); } 70% { transform: translateX(6px); } }
@@ -109,9 +115,15 @@
 .hog .overlay .mcard .btn { font-size: 15px; padding: 10px 18px; }
 .hog .rotate { z-index: 30; background: var(--ink); text-align: center; font-size: 20px; letter-spacing: 3px; color: #fff; }
 .hog .rotate .phone { font-size: 64px; margin-bottom: 14px; animation: hog-rot 1.6s ease-in-out infinite alternate; }
-.hog .rotate small { display: block; font-family: Arial, sans-serif; font-size: 11px; color: #ff9ecb; letter-spacing: 2px; margin-top: 10px; font-weight: 700; }
+.hog .rotate small { display: block; font-family: var(--body); font-size: 11px; color: #ff9ecb; letter-spacing: 2px; margin-top: 10px; font-weight: 700; }
 @keyframes hog-rot { from { transform: rotate(0); } to { transform: rotate(-90deg); } }
 @media (orientation: portrait) and (max-width: 760px) { .hog.touch .rotate { display: flex; } } /* phones only; a tablet held upright still fits */
+
+/* ---------------------------------------------------------------- Chinese: CJK glyphs need no tracking and read heavier */
+html.zh .hog { font-weight: 800; }
+html.zh .hog .round, html.zh .hog .btn, html.zh .hog .tbtn { letter-spacing: 0; }
+html.zh .hog .card .kick, html.zh .hog .title .kick, html.zh .hog .overlay .mcard h1, html.zh .hog .rotate { letter-spacing: 2px; }
+html.zh .hog .pad .lbl, html.zh .hog .rotate small, html.zh .hog .foot { letter-spacing: 1px; }
 
 /* ---------------------------------------------------------------- short viewports: a phone in landscape */
 @media (max-height: 560px) {
@@ -119,7 +131,7 @@
   .hog .hud { gap: 4px; }
   .hog .round { font-size: 15px; -webkit-text-stroke: 1px var(--ink); text-shadow: 2px 2px 0 var(--ink); } .hog .round small { font-size: 10px; margin-top: 2px; text-shadow: 1px 1px 0 var(--ink); }
   .hog .timer { font-size: 34px; text-shadow: 3px 3px 0 var(--ink); }
-  .hog .toast { font-size: 34px; text-shadow: 3px 3px 0 var(--ink); }
+  .hog .toast { font-size: 30px; text-shadow: 3px 3px 0 var(--ink); }
   .hog .chip { padding: 3px 8px 3px 6px; gap: 5px; font-size: 12px; min-width: 0; border-width: 2px; border-radius: 10px; }
   .hog .chip .nm { max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
   .hog .menu-btn { width: 36px; height: 26px; line-height: 22px; font-size: 14px; right: calc(6px + var(--sa-r)); top: calc(6px + var(--sa-t)); }
