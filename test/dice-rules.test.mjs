@@ -171,7 +171,8 @@ test('a leech hits for less and heals, a counter turns an attack back or leaves 
   [a, b] = resolveDuel(roll('leech', 6), roll('heart', 2)); assert.equal(b.dmg, 1, '2 for the 6, less 1');
   [a, b] = resolveDuel(roll('leech', 4), roll('shield', 4)); assert.equal(b.dmg, 0); assert.equal(a.heal, 0, 'a shield stops it');
   [a, b] = resolveDuel(roll('sword', 6), roll('counter', 4)); assert.equal(b.dmg, 0); assert.equal(a.dmg, 2, 'its own 6 comes back'); assert.deepEqual(said(b), ['counter']); assert.equal(b.daze, false);
-  [a, b] = resolveDuel(roll('heart', 4), roll('counter', 4)); assert.equal(b.daze, true); assert.deepEqual(said(b), ['opening']);
+  [a, b] = resolveDuel(roll('heart', 4), roll('counter', 4)); assert.equal(b.daze, false, 'a counter that rolled its number and was not swung at costs nothing'); assert.deepEqual(said(b), ['braced']);
+  [a, b] = resolveDuel(roll('heart', 4), roll('counter', 2)); assert.equal(b.daze, true, 'a fumbled counter still leaves its owner open'); assert.deepEqual(said(b), ['fumble']);
   [a, b] = resolveDuel(roll('sword', 4), roll('counter', 2)); assert.equal(b.dmg, 1); assert.equal(b.daze, true, 'a counter that does not roll its number is a fumble');
   [a, b] = resolveDuel(roll('skull', 4), roll('counter', 4)); assert.equal(b.daze, true);
   [a, b] = resolveDuel(roll('poison', 4), roll('shield', 5)); assert.equal(b.poison, true); assert.deepEqual(said(b), ['guard', 'poisoned']);

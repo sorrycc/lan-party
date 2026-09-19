@@ -1,6 +1,8 @@
 /* Loaded Dice - a bar that moves. A round's bar is { v, slots, amp, ph, fog, presses } and everything about it is a pure function of the
    sweep's progress `u`, which runs from 0 to `spanOf(bar)` at the owner's speed: where the cursor is, where each slot is and how wide.
-   A press travels as `u`, so the host grades exactly what the player saw, whatever the link did in between.
+   A press travels as `u`, so the host grades exactly what the player saw, whatever the link did in between, together with `w`: how
+   far the sweep went in the frame before it. A press is graded over that whole stretch, so a fast bar on a slow screen cannot jump
+   the cursor clean over a sliver of gold between two frames.
 
      still    the bar as genSlots laid it out
      bounce   the cursor comes back: u runs to 2, and on the way back the slots are narrower
@@ -14,6 +16,7 @@
 import { gradePress } from './rules.js';
 
 export const VARIANTS = ['bounce', 'slide', 'shrink'], VARIANT_P = 0.35, SLIDE_AMP = 0.06, SHRINK = 0.45, BACK_W = 0.8, FOG_W = 0.35, FOG_NEAR = 0.07, FAKE_P = 0.25, DOUBLE_P = 0.12;
+export const SWEPT_MAX = 0.07, SWEPT_STEP = 0.002; // the longest frame a press may reach back over (a 20 fps frame at the top speed), and how finely it is walked
 const LO = 0.24, HI = 0.997;
 
 export function mkBar(rnd, slots, feat, fogged = false, force = null) { // force: { v } or { presses }, a foe's trick or the host's double round
@@ -32,12 +35,24 @@ export function slotsAt(bar, u) {
   const k = bar.v === 'shrink' ? 1 - SHRINK * Math.min(1, Math.max(0, u)) : bar.v === 'bounce' && u > 1 ? BACK_W : 1;
   return k === 1 ? bar.slots : bar.slots.map(s => ({ k: s.k, x: s.x + s.w * (1 - k) / 2, w: s.w * k }));
 }
-/* what a press at `u` picked (below 0: the bar ran out) */
-export const gradeAt = (bar, u, perfW) => u >= 0 ? gradePress(slotsAt(bar, u), cursorAt(bar, u), perfW) : { slot: -1, grade: '' };
+/* what a press at `u` picked (below 0: the bar ran out). `back` is how far the sweep came in the frame before the press: a slot the cursor
+   crossed in it counts (the one nearest the press), and so does its sweet spot. A double round never reaches back into the first crossing. */
+export function gradeAt(bar, u, perfW, back = 0) {
+  if (!(u >= 0)) return { slot: -1, grade: '' };
+  const at = v => gradePress(slotsAt(bar, v), cursorAt(bar, v), perfW), lo = Math.max(bar.presses === 2 && u >= 1 ? 1 : 0, u - Math.min(SWEPT_MAX, back > 0 ? back : 0));
+  let g = at(u); if (g.grade === 'PERFECT' || !(lo < u)) return g;
+  const n = Math.ceil((u - lo) / SWEPT_STEP);
+  for (let i = 1; i <= n; i++) { const h = at(u - (u - lo) * i / n); if (h.slot < 0) continue; if (g.slot < 0) g = h; else if (h.slot !== g.slot) break; if (h.grade === 'PERFECT') return h; }
+  return g;
+}
 /* is slot `s` (as it is now) hidden by the fog, with the cursor at `c`? */
 export const fogged = (bar, s, c) => !!bar.fog && s.x + s.w / 2 > bar.fog[0] && s.x + s.w / 2 < bar.fog[1] && Math.abs(c - (s.x + s.w / 2)) > s.w / 2 + FOG_NEAR;
-/* a press off the wire: the round it answers and the sweep's progress */
-export function cleanPick(m) { const ok = v => typeof v === 'number' && Number.isFinite(v), fit = v => Math.min(2, Math.max(-1, v)); return m && Number.isInteger(m.n) && ok(m.u) ? { n: m.n, u: fit(m.u), u2: ok(m.u2) ? fit(m.u2) : -1 } : null; }
+/* a press off the wire: the round it answers, the sweep's progress, and (when sent) how far the sweep came in the frame before each press */
+export function cleanPick(m) { const ok = v => typeof v === 'number' && Number.isFinite(v), fit = v => Math.min(2, Math.max(-1, v)), back = v => Math.min(SWEPT_MAX, Math.max(0, v));
+  if (!(m && Number.isInteger(m.n) && ok(m.u))) return null; const p = { n: m.n, u: fit(m.u), u2: ok(m.u2) ? fit(m.u2) : -1 };
+  if (ok(m.w)) p.w = back(m.w); if (ok(m.w2)) p.w2 = back(m.w2); return p; }
+/* a press as the rules take it: the sweep's progress `u`, or { u, w } with the stretch swept in the frame before it */
+export const pressOf = p => typeof p === 'number' ? { u: p, w: 0 } : p && typeof p.u === 'number' ? { u: p.u, w: +p.w || 0 } : null;
 
 /* a slot that is not there, in the widest bare stretch of the bar, of a kind the bar does not already hold; null when there is no room */
 export function fakeSlot(rnd, slots, kinds = ['sword', 'shield', 'skull', 'heart']) {

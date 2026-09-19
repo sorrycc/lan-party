@@ -8,11 +8,12 @@
    Alone (PLAY SOLO, or a room of one) it is a run: Sir Rollo against a ladder of CPU fighters (foes.js), perks on level up, the best
    score kept per browser. With two players it is a duel between them: both bars sweep at once, each player sees the other's slots but
    not the pick, and the dice are thrown when both have pressed. Both are the same rules (rules.js); this file turns a round's outcome
-   into words, poses, particles and sounds. Every word comes from strings.js: Chinese by default, English from the ☰ menu (or L).
+   into words, poses, particles and sounds. Every word comes from strings.js through core/i18n.js: the whole app's language, Chinese by
+   default, switched from the shell's toggle, the ☰ menu or L.
 
    Netcode (two players): host-authoritative and turn-shaped, so nothing is streamed. The host sends `round` (hearts, speeds, fever, and to
    each player their own bar whole and the other's only as the slots they are to see), every machine runs its own sweep on its own clock,
-   so the press is graded where the finger is and the link's latency is not in it, and answers with `pick` (the sweep's progress `u`: a
+   so the press is graded where the finger is and the link's latency is not in it, and answers with `pick` (the sweep's progress `u`, and `w`, how far its last frame swept: a
    bar may move, and bar.js makes all of it a function of `u`); the host tells the room a side has `locked`, rolls for both when the two picks are in
    (or the sweep's deadline has passed: a plain roll for whoever is missing), and sends `result`: the rolls, what each side shouts and
    takes, and the standings. Each screen puts its own player on the left. Every message carries the round's seed as `m`, so a
@@ -28,7 +29,8 @@ import { cleanPick, cursorAt, fogged, gradeAt, isDouble, mkBar, shownSlots, slot
 import { DIE_STEPS, FEVER_MAX, SWEEP_T, TO_HIT, carve, dealFaces, dieForRound, featsFor, freeFaces, genSlots, isHot, mkDuelist, mkMods, playRound, speedOf } from './rules.js';
 import { foeTurn, mkFoe, mkHero, slotHint, stealSlot } from './foes.js';
 import { dealPerks } from './perks.js';
-import { LANGS, mkT } from './strings.js';
+import { STR } from './strings.js';
+import { isZh, makeT, nextLang, onLang } from '../../core/i18n.js';
 
 const HTML = `
 <canvas class="cv"></canvas>
@@ -36,7 +38,7 @@ const HTML = `
 <div class="menu-btn" data-menu>☰</div>
 <div class="overlay" data-pause><div class="mcard"><h1 data-t="menu"></h1><div data-pause-btns></div></div></div>
 <div class="overlay" data-help><div class="mcard howto"><h1 data-t="howto"></h1><div data-help-body></div><button class="btn primary" data-help-ok data-t="gotIt"></button></div></div>
-<div class="overlay" data-result><div class="mcard result"><small data-res-kick></small><h1 data-res-title></h1><div class="rows" data-res-rows></div><div class="btns" data-res-btns></div><p data-res-foot></p></div></div>
+<div class="overlay" data-result><div class="mcard result"><small data-res-kick></small><h1 data-res-title></h1><div class="rows" data-res-rows></div><div class="btns" data-res-btns></div><p class="vote" data-res-vote></p><p data-res-foot></p></div></div>
 <div class="overlay rotate"><div><div class="phone">📱</div><span data-t="rotate"></span><small data-t="rotateSub"></small></div></div>`;
 
 export async function create({ mount, audio, send, hooks }) {
@@ -45,15 +47,16 @@ export async function create({ mount, audio, send, hooks }) {
   const root = document.createElement('div'); root.className = 'dice' + (touch ? ' touch' : ''); root.innerHTML = HTML; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
   const dom = { menuBtn: $('[data-menu]'), pause: $('[data-pause]'), pauseBtns: $('[data-pause-btns]'), help: $('[data-help]'), helpBody: $('[data-help-body]'), helpOk: $('[data-help-ok]'),
-    result: $('[data-result]'), resKick: $('[data-res-kick]'), resTitle: $('[data-res-title]'), resRows: $('[data-res-rows]'), resBtns: $('[data-res-btns]'), resFoot: $('[data-res-foot]') };
+    result: $('[data-result]'), resKick: $('[data-res-kick]'), resTitle: $('[data-res-title]'), resRows: $('[data-res-rows]'), resBtns: $('[data-res-btns]'), resVote: $('[data-res-vote]'), resFoot: $('[data-res-foot]') };
   const cv = $('canvas.cv'), ctx = cv.getContext('2d');
   const W=1280,H=720,GROUND=590,DIE_GY=560,TAU=Math.PI*2;
   const INK='#25231f',BG='#f3eee3',RED='#d9534a',YEL='#f0cf4f',GRN='#a8c878',SLOT_RED='#e39a88';
   const HUDF='"Avenir Next Condensed","DIN Condensed","Roboto Condensed","Arial Narrow","PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif';
-  /* the language: Chinese unless this browser was told otherwise. The canvas is redrawn every frame, so only the DOM cards need telling. */
-  let lang='zh';try{const l=localStorage.getItem('loadedDiceLang');if(LANGS.includes(l))lang=l}catch(e){}
-  let T=mkT(lang);
-  function setLang(l){lang=l;T=mkT(l);try{localStorage.setItem('loadedDiceLang',l)}catch(e){}root.classList.toggle('zh',l==='zh');root.querySelectorAll('[data-t]').forEach(el=>el.textContent=T(el.dataset.t))}
+  /* the language is the app's (core/i18n.js). The canvas is redrawn every frame, so only the DOM cards need telling when it changes. */
+  const T=makeT(STR);
+  function relabel(){root.classList.toggle('zh',isZh());root.querySelectorAll('[data-t]').forEach(el=>el.textContent=T(el.dataset.t));
+    if(dom.pause.classList.contains('show'))renderMenu();if(dom.help.classList.contains('show'))showHelp(true);if(dom.result.classList.contains('show'))renderResult()}
+  const unsubLang=onLang(relabel);
   const LS='letterSpacing' in ctx;
   const rnd=(a,b)=>a+Math.random()*(b-a),ri=(a,b)=>Math.floor(rnd(a,b+1)),clamp=(v,a,b)=>v<a?a:v>b?b:v,lerp=(a,b,t)=>a+(b-a)*t;
   const pick=a=>a[Math.floor(Math.random()*a.length)];
@@ -243,7 +246,7 @@ export async function create({ mount, audio, send, hooks }) {
   function rr(x,y,w,h,r){ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath()}
   function poly(p){p.forEach((q,i)=>i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.closePath()}
   function line(x0,y0,x1,y1,lw=5,col=INK){ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x1,y1);ctx.lineWidth=lw;ctx.strokeStyle=col;ctx.lineCap='round';ctx.stroke()}
-  function txt(s,x,y,size,o={}){const cjk=lang==='zh';if(cjk&&size<12)size=Math.min(13,size*1.25); // a 9px hanzi is not readable, and Chinese is not tracked out
+  function txt(s,x,y,size,o={}){const cjk=isZh();if(cjk&&size<12)size=Math.min(13,size*1.25); // a 9px hanzi is not readable, and Chinese is not tracked out
     ctx.font=`${o.w||700} ${size}px ${HUDF}`;ctx.textAlign=o.a||'center';ctx.textBaseline=o.b||'alphabetic';if(LS)ctx.letterSpacing=(cjk?0:o.ls||0)+'px';
     if(o.stroke){ctx.lineWidth=o.sw||6;ctx.strokeStyle=o.stroke;ctx.lineJoin='round';ctx.strokeText(s,x,y)}ctx.fillStyle=o.c||INK;ctx.fillText(s,x,y)}
   function heartPath(x,y,s){ctx.moveTo(x,y+s*.9);ctx.bezierCurveTo(x-s*1.5,y-s*.1,x-s*.8,y-s*1.1,x,y-s*.35);ctx.bezierCurveTo(x+s*.8,y-s*1.1,x+s*1.5,y-s*.1,x,y+s*.9);ctx.closePath()}
@@ -412,7 +415,7 @@ export async function create({ mount, audio, send, hooks }) {
 
   /* ---------- game state ---------- */
   const G={state:'title',auto:true,phase:'intro',t:0,pt:0,shake:0,hitStop:0,score:0,best:0,stage:0,lvl:1,xp:0,need:14,pendingLvl:0,xpMul:1,die:4,
-    bar:{v:'still',slots:[]},slots:[],cursor:0,pressed:false,pressU:0,hitSlot:-1,picks:[],firstSlot:-1,autoMode:'',autoT:-1,lastSlot:-1,grade:'',gradeSub:'',gradeT:9,gradeCol:INK,perks:[],perkT:0,perkPicked:-1,
+    bar:{v:'still',slots:[]},slots:[],cursor:0,back:0,backs:[],pressed:false,pressU:0,hitSlot:-1,picks:[],firstSlot:-1,autoMode:'',autoT:-1,lastSlot:-1,grade:'',gradeSub:'',gradeT:9,gradeCol:INK,perks:[],owned:[],perkT:0,perkPicked:-1,
     deadT:0,kills:0,idleT:0,maxCombo:0,barShake:0,flashBG:0,pitch:1};
   try{G.best=+localStorage.getItem('loadedDiceBest')||0}catch(e){}
   let P=mkFighter(HERO,230,1),E=mkFighter({...LOOK.daisy,id:'daisy'},1050,-1);
@@ -422,14 +425,14 @@ export async function create({ mount, audio, send, hooks }) {
   const perfNow=()=>Math.min(1,MODS().perfW*(P.hot?2:1)); // a hot round's sweet spots are twice as wide
   const MODS=()=>!V.on&&SOLO.hero?SOLO.hero.mods:DEF_MODS;
   /* the duel as this screen sees it: `me` is my index in the room's first two players, P is always me and E the other one */
-  const V={on:false,fever:false,draft:null,me:0,m:0,d:1,n:0,rn:0,target:1,oppSlots:[],oppLocked:false,oppHit:-1,oppAct:'',res:null,landed:0,helloT:0,over:false};
+  const V={on:false,fever:false,draft:null,me:0,m:0,d:1,n:0,rn:0,target:1,oppSlots:[],oppLocked:false,oppHit:-1,oppAct:'',res:null,landed:0,helloT:0,over:false,result:null,rematch:false,votes:[]};
   let session=null,isHost=false,online=false,hostId=null;
 
   function speed(){return P.sp||1}
   function eSpeed(){return 1+E.combo*.08}
   function pressure(){return V.on?speed():speed()+(eSpeed()-1)*.5}
   function syncSolo(){const h=SOLO.hero,f=SOLO.foe.f;P.hp=h.hp;P.maxHp=h.maxHp;P.combo=h.combo;P.sp=speedOf(h);P.fever=h.fever;P.poison=h.poison;E.poison=f.poison;die.faces=dieB.faces=h.mods.faces;E.hp=f.hp;E.maxHp=f.maxHp;E.combo=f.combo;E.stun=f.dazed}
-  function resetRun(auto){G.auto=auto;G.state=auto?'title':'play';Object.assign(G,{score:0,stage:0,lvl:1,xp:0,need:14,pendingLvl:0,xpMul:1,die:4,kills:0,maxCombo:0,grade:'',gradeT:9});
+  function resetRun(auto){G.auto=auto;G.state=auto?'title':'play';Object.assign(G,{score:0,stage:0,lvl:1,xp:0,need:14,pendingLvl:0,xpMul:1,die:4,kills:0,maxCombo:0,grade:'',gradeT:9,owned:[]});
     SOLO.rnd=makeRng((Math.random()*4294967296)>>>0).rnd;SOLO.hero=mkHero();
     P=mkFighter(HERO,230,1);die.home=640;die.jit=46;dieSet(die,4);words.length=0;fx.length=0;spawnEnemy()}
   function spawnEnemy(){const s=G.stage,F=SOLO.foe=mkFoe(s);SOLO.feat=featsFor(session?.opts?.spice||'std',s>=4?3:s>=2?2:1); // a run brings the new things in stage by stage
@@ -443,11 +446,11 @@ export async function create({ mount, audio, send, hooks }) {
     E.hidden=E.intent!=='stun'&&!turn.trick&&SOLO.rnd()<F.cfg.hide;if(turn.angry){E.die=F.die;banner(T('trick.angry'),T('trick.angry.d',{die:F.die}));SFX.spook();G.shake=14;setPose(E,'threat',.8)}else if(turn.trick){word(E,T('trick.'+turn.trick),'#7a5a9a',30);if(turn.trick!=='flurry'&&turn.trick!=='smash')SFX.spook()}
     let slots=turn.swallow?[]:genSlots(SOLO.rnd,h,G.stage+1,{...slotHint(F.f,F.cfg,E.intent),smoke:0},feat);if(turn.steal)slots=stealSlot(slots); // ink is no use against a foe with no bar
     setBar(mkBar(SOLO.rnd,slots,feat,h.fogged||turn.fog,turn.bar||(isDouble(SOLO.rnd,feat)?{presses:2}:null)));G.blank=turn.blank;const n=turn.swallow?4:P.die;if(die.n!==n)dieSet(die,n);G.phase='sweep';dieToss(die);roundFx(isHot(h),false);
-    if(G.auto){const pref={attack:['shield','sword'],block:['skull','sword','heart'],dodge:['sword','heart'],stun:['sword']}[E.intent];let t=-1; // the demo: aims at what answers the intent, now and then fumbles or lets the bar run out
+    if(G.auto){const pref={attack:['shield','sword'],block:['skull','sword','heart'],dodge:['sword','heart'],stun:['sword']}[E.intent]||['sword'];let t=-1; // a charge (or any intent without its own answer): swing // the demo: aims at what answers the intent, now and then fumbles or lets the bar run out
       for(const k of pref){t=G.slots.findIndex(q=>q.k===k);if(t>=0)break}if(t<0)t=G.slots.findIndex(q=>q.k!=='bomb');if(P.hp<=3){const h=G.slots.findIndex(q=>q.k==='heart');if(h>=0)t=h}
       const r=Math.random();G.autoT=t;G.autoMode=r<.08?'':r<.16?'early':'aim'}}
   /* a new bar on this screen: the slots get what the drawing needs (a centre, a pop), the sweep starts over */
-  function setBar(bar){G.bar={...bar,slots:viewSlots(bar.slots)};G.slots=G.bar.slots;G.cursor=0;G.pressed=false;G.hitSlot=-1;G.lastSlot=-1;G.picks=[];G.firstSlot=-1;G.blank=false}
+  function setBar(bar){G.bar={...bar,slots:viewSlots(bar.slots)};G.slots=G.bar.slots;G.cursor=0;G.back=0;G.pressed=false;G.hitSlot=-1;G.lastSlot=-1;G.picks=[];G.backs=[];G.firstSlot=-1;G.blank=false}
   function sweepTick(){const g=gradeAt(G.bar,G.cursor,1).slot;if(g!==G.lastSlot){G.lastSlot=g;if(g>=0)SFX.tick()}} // a tick as the cursor comes onto a slot
   /* the top of a round, both modes: who is hot (a second die, a fifth up, a word about it), and a tip for anything new on the bar */
   function roundFx(mine,theirs,two2=false){P.hot=mine;E.hot=theirs;G.pitch=mine?1.5:1;tossHot(die,dieB,mine||G.bar.presses===2,-1);tossHot(die2,die2B,theirs||two2,1);
@@ -460,7 +463,9 @@ export async function create({ mount, audio, send, hooks }) {
     if(SOLO.feat.faces&&SOLO.rnd()<.6){const c=dealFaces(SOLO.rnd,SOLO.hero,P.die,1)[0];if(c)pool[ri(0,pool.length-1)]=faceCard(c)} // a level up may offer a face to load
     const di=DIE_STEPS.indexOf(P.die);if(di<DIE_STEPS.length-1&&G.lvl%2===0){BIGDIE.vars={n:DIE_STEPS[di+1],a:P.die,b:DIE_STEPS[di+1]};pool[ri(0,2)]=BIGDIE}
     G.perks=pool;SFX.level();banner(T('levelUp'),T('lv',{n:G.lvl}));setPose(P,'cheer',.9);heartsFx(P.x,GROUND-200,0)}
-  function pickPerk(i){if(G.perkPicked>=0)return;G.perkPicked=i;G.pt=.45;const p=G.perks[i];p.f(SOLO.hero,G);syncSolo();SFX.pickp();P.hpPop=1;word(P,T(p.nk||'perk.'+p.id,p.vars),'#8a6a10',24)}
+  function pickPerk(i){if(G.perkPicked>=0)return;G.perkPicked=i;G.pt=.45;const p=G.perks[i];p.f(SOLO.hero,G);syncSolo();own(p);SFX.pickp();P.hpPop=1;word(P,T(p.nk||'perk.'+p.id,p.vars),'#8a6a10',24)}
+  /* what the run has taken, for the strip under the hero's panel: one chip a perk (a loaded face is its own, with its number), twice taken is ×2 */
+  function own(p){const k=p.card?'f'+p.card.face:p.id,o=G.owned.find(q=>q.k===k);if(o)o.n++;else G.owned.push({k,icon:p.icon,n:1,face:p.card?p.card.face:0})}
   function startDeath(){G.phase='dying';G.pt=1.3;P.pose='ko';P.poseT=9;P.leanV-=6;word(P,T('ko'),RED,40);SFX.dead();G.shake=18;
     if(!G.auto&&G.score>G.best){G.best=G.score;try{localStorage.setItem('loadedDiceBest',G.best)}catch(e){}}}
 
@@ -476,7 +481,7 @@ export async function create({ mount, audio, send, hooks }) {
     if(G.state==='play'&&G.phase==='sweep'&&!G.pressed)doPress(true)}
   const canRun=()=>!online||isHost; // R and Esc are the host's, as in every game here
   const kb=createInput({Space:'go',Enter:'go',KeyZ:'go',KeyX:'go',KeyM:'mute',KeyL:'lang',KeyR:'again',Escape:'exit'},{onDown:name=>{
-    if(name==='go')press();else if(name==='mute')audio.toggle();else if(name==='lang'){nextLang();if(dom.pause.classList.contains('show'))renderMenu();if(dom.help.classList.contains('show'))showHelp(true)}
+    if(name==='go')press();else if(name==='mute')audio.toggle();else if(name==='lang')nextLang() // every screen of the app follows; relabel() redraws the cards
     else if(name==='again'){if(canRun())hooks.onRestart?.()}
     else if(overlayOpen()){showMenu(false);showHelp(false)}else if(canRun())hooks.onExit?.()}});
   cv.addEventListener('pointerdown',e=>{e.preventDefault();const r=cv.getBoundingClientRect();press(((e.clientX-r.left)*DPR-OX)/SC,((e.clientY-r.top)*DPR-OY)/SC)});
@@ -493,18 +498,20 @@ export async function create({ mount, audio, send, hooks }) {
       G.gradeSub=combo?T('sub.rigCombo',{act,n,c:combo}):T('sub.rig',{act,n});perfect||jp?SFX.perfect(combo||(P.combo|0)+1):SFX.good();if(perfect||jp)G.flashBG=1}
     else{G.grade='plain';G.gradeSub=T('sub.plain');G.gradeCol='#7d786c';SFX.plain()}}
   /* A press on this screen's bar (both modes). A double round's first crossing takes one press and the sweep goes on; returns
-     { pk, done }: what it picked, and whether the round's presses are all in (G.picks). */
-  function takePress(real){const two=G.bar.presses===2,u=real?G.cursor:-1;let pk=gradeAt(G.bar,u,perfNow());
-    if(two&&!G.picks.length&&real&&G.cursor<1){G.picks.push(u);G.firstSlot=pk.slot;if(pk.slot>=0)G.slots[pk.slot].used=1;return{pk,done:false}}
-    if(two&&!G.picks.length)G.picks.push(-1); // the first crossing went by
+     { pk, done }: what it picked, and whether the round's presses are all in (G.picks, with G.backs: how far the frame before each
+     one swept, so a slot the cursor jumped over between two frames still counts; bar.js). */
+  function takePress(real){const two=G.bar.presses===2,u=real?G.cursor:-1,w=real?G.back:0;let pk=gradeAt(G.bar,u,perfNow(),w);
+    if(two&&!G.picks.length&&real&&G.cursor<1){G.picks.push(u);G.backs.push(w);G.firstSlot=pk.slot;if(pk.slot>=0)G.slots[pk.slot].used=1;return{pk,done:false}}
+    if(two&&!G.picks.length){G.picks.push(-1);G.backs.push(0)} // the first crossing went by
     if(two&&pk.slot>=0&&pk.slot===G.firstSlot)pk={slot:-1,grade:'MISSED'}; // the same slot twice
-    G.picks.push(u);G.pressed=true;G.pressU=G.cursor;G.hitSlot=pk.slot;return{pk,done:true}}
+    G.picks.push(u);G.backs.push(w);G.pressed=true;G.pressU=G.cursor;G.hitSlot=pk.slot;return{pk,done:true}}
   /* the solo press: when the presses are in the whole round is played by the rules at once, so the dice can land on their numbers; the screen catches up when they have */
   function doPress(real){const h=SOLO.hero,F=SOLO.foe,lost=h.combo,first=G.picks.length?1:0,{pk,done}=takePress(SOLO.turn.swallow?false:real),rigged=(pk.grade==='PERFECT'||pk.grade==='GOOD')&&G.slots[pk.slot].k!=='bomb';
     showGrade(pk,G.slots[pk.slot],rigged?lost+1+first:0,lost);if(rigged){addScore(pk.grade==='PERFECT'?20:10);G.maxCombo=Math.max(G.maxCombo,lost+1+first)}if(!done)return;
-    const R=SOLO.R=playRound(SOLO.rnd,[h,F.f],[die.n,F.die],[G.bar,[]],[G.bar.presses===2?G.picks:G.picks[0],SOLO.turn.picks],SOLO.feat),me=R.r[0];
+    const R=SOLO.R=playRound(SOLO.rnd,[h,F.f],[die.n,F.die],[G.bar,[]],[G.bar.presses===2?G.picks.map(pressAt):pressAt(G.picks[0],0),SOLO.turn.picks],SOLO.feat),me=R.r[0];
     for(const r of[me,R.r2[0]])if(r&&r.slot>=0&&!r.jackpot&&G.slots[r.slot])G.slots[r.slot].k=r.act; // a mystery slot shows what it was
     G.phase='roll';slamSecond(dieB,me,R.r2[0]);dieSlam(die,faceOf(me),me.crit,soloResolve)}
+  const pressAt=(u,i)=>({u,w:G.backs[i]||0}); // a press as the rules take it
   const faceOf=r=>clamp(r.roll||r.base||1,1,99); // a bomb rolls nothing: the die lies as it was thrown
   /* the second die: a double round's second move, or the throw a hot round did not keep; it fades once it is down */
   function slamSecond(b,r,r2){if(b.live)dieSlam(b,clamp(r2?faceOf(r2):r.other+r.bonus,1,b.n),!!(r2&&r2.crit),()=>{b.fade=!r2})}
@@ -546,7 +553,7 @@ export async function create({ mount, audio, send, hooks }) {
   function update(dt,rdt){G.t+=dt;if(V.on)updateDuel(dt);const sp=G.phase==='sweep'||G.phase==='roll'||G.phase==='resolve'?pressure():1;
     if(V.on){}
     else if(G.phase==='intro'){G.pt-=dt;E.homeX=1050;if(E.x>1056)E.oy=-Math.abs(Math.sin(G.t*14))*18;if(G.pt<=0){E.oy=0;advance()}}
-    else if(G.phase==='sweep'){G.cursor+=dt*pressure()/SWEEP_T;sweepTick();const end=spanOf(G.bar),g=G.auto?gradeAt(G.bar,G.cursor,perfNow()):null;
+    else if(G.phase==='sweep'){G.back=dt*pressure()/SWEEP_T;G.cursor+=G.back;sweepTick();const end=spanOf(G.bar),g=G.auto?gradeAt(G.bar,G.cursor,perfNow()):null;
       if(g&&(G.autoMode==='early'?G.cursor>.2:G.autoMode==='aim'&&g.slot===G.autoT&&(g.grade==='PERFECT'||Math.random()<dt*5)))doPress(true);else if(G.cursor>=end){G.cursor=end;doPress(false)}}
     else if(G.phase==='resolve'){G.pt-=dt;if(G.pt<=0)advance()}
     else if(G.phase==='ko'){G.pt-=dt;E.alpha=clamp(G.pt*2.2,0,1);if(G.pt<=0){G.stage++;spawnEnemy()}}
@@ -599,7 +606,7 @@ export async function create({ mount, audio, send, hooks }) {
     zoom(228,105,1.3,()=>{drawHearts(228,105,P);portrait(P,228,97,-1);drawFever(228,122,P,SOLO.feat.fever);stat(T('score'),G.score.toLocaleString('en-US'),122,146);stat(T('combo'),''+P.combo,193,146);stat(T('die'),'D'+P.die,263,146,T('toHit',{n:P.toHit}));
     stat(T('speed'),sp.toFixed(2)+'×',335,146,null,sp>2.4?RED:sp>1.7?'#b0761a':INK);
     txt(T('lv',{n:G.lvl}),192,209,13,{a:'right',ls:1});shape('#ddd8c9',()=>rr(200,199,90,9,4.5),0);const xf=clamp(G.xp/G.need,0,1);if(xf>.02)shape('#e0b53c',()=>rr(200,199,90*xf,9,4.5),0);
-    ctx.beginPath();rr(200,199,90,9,4.5);ctx.lineWidth=2;ctx.strokeStyle=INK;ctx.stroke()},-44);
+    ctx.beginPath();rr(200,199,90,9,4.5);ctx.lineWidth=2;ctx.strokeStyle=INK;ctx.stroke();drawOwned()},-44);
     zoom(1050,105,1.3,()=>{drawHearts(1050,105,E);portrait(E,1050,97,1);stat(T('combo'),''+E.combo,970,146);stat(T('die'),'D'+E.die,1051,146,E.rolled?T('rolled',{r:E.rolled,n:E.toHit}):T('toHit',{n:E.toHit}));stat(T('speed'),eSpeed().toFixed(2)+'×',1135,146);
     txt(T('stageOf',{name:nameOf(E)+(E.tier?' +'+E.tier:''),n:G.stage+1}),1050,209,10,{ls:2,c:'#6d685c'})},44);
     // enemy intent bubble
@@ -607,12 +614,16 @@ export async function create({ mount, audio, send, hooks }) {
       zoom(bx,by,1.25,()=>{bubble(bx,by);
       icon(k,bx,by,.95);txt(T('intent.'+(E.hidden?'hidden':E.intent)),bx,by+46,9,{ls:1.5,c:'#6d685c',stroke:BG,sw:4})})}
     drawBar()}
+  /* the perk strip: chips in rows of eight under the hero's panel, left to right in the order they were taken */
+  function drawOwned(){G.owned.forEach((o,i)=>{const x=122+(i%8)*27,y=232+Math.floor(i/8)*27;shape('#fbf8f0',()=>rr(x-11,y-11,22,22,6),2.5);icon(o.icon,x,y,.42);
+    const tag=o.face?''+o.face:o.n>1?'×'+o.n:'';if(tag)txt(tag,x+10,y+12,9,{w:800,a:'right',stroke:BG,sw:3})})}
   function bubble(bx,by){shape('#fbf8f0',()=>{rr(bx-30,by-30,60,60,14)},4);shape('#fbf8f0',()=>poly([[bx+22,by+22],[bx+42,by+40],[bx+28,by+10]]),0);line(bx+24,by+29,bx+42,by+40,4);line(bx+42,by+40,bx+30,by+14,4)}
   const BX=455,BY=142,BW=370,BH=58;
   function drawBar(){zoom(640,BY+BH/2,1.4,drawBarIn)}
   function drawBarIn(){const m=MODS(),shk=G.barShake>0?Math.sin(G.t*90)*G.barShake*7:0;ctx.save();ctx.translate(shk,0);
     const u=G.pressed?G.pressU:G.cursor,now=slotsAt(G.bar,u),cur=cursorAt(G.bar,u),back=G.bar.v==='bounce'&&u>1,fog=G.bar.fog;
-    txt(T('barRig',{g:1+m.rigPlus,p:2+m.rigPlus}),BX+1,BY-14,10,{a:'left',ls:1.5});txt(T('barSweep',{x:pressure().toFixed(2)})+(G.bar.presses===2?'  ·  '+T('act.double'):G.bar.v!=='still'?'  ·  '+T('act.'+G.bar.v):''),BX+BW-1,BY-14,10,{a:'right',ls:1.5,c:pressure()>2.4?RED:'#6d685c'});
+    txt(T('barRig',{g:1+m.rigPlus,p:2+m.rigPlus}),BX+1,BY-14,10,{a:'left',ls:1.5});const pr=pressure(),foeP=pr-speed(); // a solo foe's combo leans on the sweep too: said, and tinted its purple
+    txt(T(foeP>.005?'barSweepFoe':'barSweep',{x:pr.toFixed(2),f:foeP.toFixed(2)})+(G.bar.presses===2?'  ·  '+T('act.double'):G.bar.v!=='still'?'  ·  '+T('act.'+G.bar.v):''),BX+BW-1,BY-14,10,{a:'right',ls:1.5,c:pr>2.4?RED:foeP>.005?'#7a5a9a':'#6d685c'});
     shape((G.grade==='MISSED'||G.grade==='bomb')&&G.gradeT<.5?'#ecd3cb':'#dbd8c8',()=>rr(BX,BY,BW,BH,9),4);
     if(P.hot){ctx.beginPath();rr(BX-4,BY-4,BW+8,BH+8,12);ctx.lineWidth=5;ctx.strokeStyle=Math.sin(G.t*14)>0?'#ffcd46':'#e0a93c';ctx.stroke()}
     if(fog){const fx=BX+fog[0]*BW,fw=(fog[1]-fog[0])*BW;ctx.save();ctx.beginPath();rr(BX+2,BY+2,BW-4,BH-4,7);ctx.clip();ctx.fillStyle='#3a3448';ctx.globalAlpha=G.pressed?.35:.9;ctx.fillRect(fx,BY,fw,BH);
@@ -633,7 +644,7 @@ export async function create({ mount, audio, send, hooks }) {
       txt(T('grade.'+G.grade),0,0,24,{w:800,c:G.gradeCol,ls:2});txt(G.gradeSub,0,17,10,{ls:1.5,c:G.gradeCol===RED?RED:'#6d685c'});ctx.restore()}}
   /* a blurb on two lines: broken at a space in English, at any character in Chinese */
   function wrap2(s,maxW,size){ctx.font=`600 ${size}px ${HUDF}`;if(LS)ctx.letterSpacing='0px';if(ctx.measureText(s).width<=maxW)return[s,''];
-    const cjk=lang==='zh',ws=cjk?[...s]:s.split(' '),sep=cjk?'':' ';let l1='';
+    const cjk=isZh(),ws=cjk?[...s]:s.split(' '),sep=cjk?'':' ';let l1='';
     for(let i=0;i<ws.length;i++){const next=l1+(l1?sep:'')+ws[i];if(l1&&ctx.measureText(next).width>maxW)return[l1,ws.slice(i).join(sep)];l1=next}return[l1,'']}
   const PERK_ZOOM=1.3; // the cards are hit-tested through the same zoom in press()
   function drawPerks(){ctx.fillStyle='rgba(243,238,227,.82)';ctx.fillRect(-400,compact?190:232,W+800,H+400);zoom(640,410,PERK_ZOOM,drawPerksIn)}
@@ -694,7 +705,8 @@ export async function create({ mount, audio, send, hooks }) {
     setBar(mine.bar);V.oppSlots=viewSlots(theirs.shown);G.phase='sweep';dieToss(die);dieToss(die2);roundFx(!!mine.hot,!!theirs.hot,!!theirs.two)}
   /* my press (or my bar running out): graded here at once with the host's own function, rolled by the host when both sides are in */
   function duelPress(real){const{pk,done}=takePress(real);showGrade(pk,G.slots[pk.slot],0,0);if(!done)return;
-    const two=G.bar.presses===2,u=G.picks[0],u2=two?G.picks[1]:-1;if(isHost)hostPick(V.me,two?[u,u2]:u);else send({t:'pick',m:V.m,n:V.n,u:+u.toFixed(4),u2:+u2.toFixed(4)})}
+    const two=G.bar.presses===2,u=G.picks[0],u2=two?G.picks[1]:-1,w=G.backs[0]||0,w2=two?G.backs[1]||0:0;
+    if(isHost)hostPick(V.me,two?[pressAt(u,0),pressAt(u2,1)]:pressAt(u,0));else send({t:'pick',m:V.m,n:V.n,u:+u.toFixed(4),u2:+u2.toFixed(4),w:+w.toFixed(4),w2:+w2.toFixed(4)})}
   function onResult(msg){if(msg.n!==V.n||V.res)return;V.res=msg;
     if(!G.pressed){G.pressed=true;G.pressU=G.cursor;G.hitSlot=-1;G.grade='late';G.gradeSub=T('sub.late');G.gradeCol='#7d786c';G.gradeT=0} // the host's deadline passed (this tab was hidden)
     const mine=msg.r[V.me],theirs=msg.r[1-V.me],r2=Array.isArray(msg.r2)?msg.r2:[null,null];for(const q of[mine,r2[V.me]])if(q&&q.slot>=0&&G.slots[q.slot]&&!q.jackpot)G.slots[q.slot].k=q.act; // a mystery slot shows what it was
@@ -716,7 +728,7 @@ export async function create({ mount, audio, send, hooks }) {
     banner(R.win===-1?T('doubleKo'):R.win===V.me?T('youTake'):T('theyTake',{name:nameOf(E)}),T('tally',{a:nameOf(P),x:P.wins,y:E.wins,b:nameOf(E)}))}
   function updateDuel(dt){if(G.phase==='draft'){G.perkT+=dt;V.draft.t+=dt}
     if(G.phase==='wait'&&V.n===0&&!isHost){V.helloT-=dt;if(V.helloT<=0){V.helloT=.5;send({t:'hello',m:V.m})}} // until the first round comes: the host may have started a moment later than this machine
-    if(G.phase==='sweep'&&!G.pressed){G.cursor+=dt*pressure()/SWEEP_T;sweepTick();const end=spanOf(G.bar);if(G.cursor>=end){G.cursor=end;duelPress(false)}}
+    if(G.phase==='sweep'&&!G.pressed){G.back=dt*pressure()/SWEEP_T;G.cursor+=G.back;sweepTick();const end=spanOf(G.bar);if(G.cursor>=end){G.cursor=end;duelPress(false)}}
     else if(G.phase==='resolve'){G.pt-=dt;if(G.pt<=0){if(V.res&&V.res.win!==null)duelKo();else G.phase='wait'}}
     else if(G.phase==='ko'){G.pt-=dt;if(G.pt<=0){if(V.res.over){G.phase='over';showResult(V.res)}else G.phase='wait'}}}
   function drawDuelPanel(f,cx,mine){drawHearts(cx,105,f);drawFever(cx,122,f,V.fever);const sp=f.sp||1;
@@ -773,26 +785,34 @@ export async function create({ mount, audio, send, hooks }) {
       case'round':if(msg.from===hostId&&Array.isArray(msg.f)&&msg.f.length===2&&Array.isArray(msg.w))onRound(msg);break;
       case'locked':if(msg.from===hostId&&msg.n===V.n&&!V.res){V.oppLocked=true;SFX.tick()}break;
       case'result':if(msg.from===hostId&&Array.isArray(msg.r)&&Array.isArray(msg.out)&&Array.isArray(msg.f))onResult(msg);break;
-      case'pick':if(isHost&&msg.from!==hostId){const p=cleanPick(msg);if(p&&p.n===HS.n&&HS.bars)hostPick(1-V.me,HS.bars[1-V.me].presses===2?[p.u,p.u2]:p.u)}break;
+      case'pick':if(isHost&&msg.from!==hostId){const p=cleanPick(msg);if(p&&p.n===HS.n&&HS.bars)hostPick(1-V.me,HS.bars[1-V.me].presses===2?[{u:p.u,w:p.w||0},{u:p.u2,w:p.w2||0}]:{u:p.u,w:p.w||0})}break;
       case'draft':if(msg.from===hostId&&Array.isArray(msg.cards)&&Array.isArray(msg.taken))onDraft(msg);break;
       case'drafted':if(isHost&&msg.from!==hostId&&Number.isInteger(msg.i))hostDrafted(1-V.me,msg.i);break;
       case'hello':if(isHost)HS.hello=true;break}}
 
-  /* ---------- cards: the ☰ menu, how to play, the duel's result ---------- */
+  /* ---------- cards: the ☰ menu, how to play, the duel's result ----------
+     The host (and a solo player) restarts and exits; a guest leaves the room (hooks.onLeave) and, once a duel is over, asks for another
+     one (hooks.onRematch). The host sees who asked (rematchVotes) under the result. */
   function buttons(el,list){el.innerHTML='';for(const[label,cls,fn]of list){const b=document.createElement('button');b.className='btn '+cls;b.textContent=label;b.onclick=fn;el.appendChild(b)}}
-  const nextLang=()=>setLang(LANGS[(LANGS.indexOf(lang)+1)%LANGS.length]);
-  function renderMenu(){const list=[[T('resume'),'primary',()=>showMenu(false)],[T(audio.muted?'soundOff':'soundOn'),'',()=>{audio.toggle();renderMenu()}],[T('lang'),'',()=>{nextLang();renderMenu()}],[T('howto'),'',()=>{showMenu(false);showHelp(true)}]];
+  function renderMenu(){const list=[[T('resume'),'primary',()=>showMenu(false)],[T(audio.muted?'soundOff':'soundOn'),'',()=>{audio.toggle();renderMenu()}],[T('lang'),'',()=>nextLang()],[T('howto'),'',()=>{showMenu(false);showHelp(true)}]];
     if(canRun())list.push([T(!online?'restart':'playAgain'),'',()=>{showMenu(false);hooks.onRestart?.()}],[T(!online?'quit':'toLobby'),'',()=>{showMenu(false);hooks.onExit?.()}]);
+    else list.push([T('leaveRoom'),'',()=>{showMenu(false);hooks.onLeave?.()}]);
     buttons(dom.pauseBtns,list)}
   function showMenu(on){dom.pause.classList.toggle('show',on);if(on)renderMenu()}
   function showHelp(on){dom.help.classList.toggle('show',on);if(on)dom.helpBody.innerHTML=T(V.on?'help.duel':'help.solo',{press:T(touch?'help.tap':'help.press'),hit:TO_HIT})}
-  function showResult(R,forfeit){V.over=true;const won=forfeit||R.win===V.me,hearts=n=>(n/2).toString().replace('.5','½').replace(/^0½/,'½');
+  /* the first game in this browser opens with how to play (a solo run waits under it; a duel's first round is a few seconds off) */
+  function firstHelp(){try{if(localStorage.getItem('loadedDiceHelp'))return;localStorage.setItem('loadedDiceHelp','1')}catch(e){return}showHelp(true)}
+  function showResult(R,forfeit){V.over=true;V.result={R,forfeit};renderResult();dom.result.classList.add('show');if(forfeit||R.win===V.me)SFX.level()}
+  function renderResult(){if(!V.result)return;const{R,forfeit}=V.result,won=forfeit||R.win===V.me,hearts=n=>(n/2).toString().replace('.5','½').replace(/^0½/,'½');
     dom.resKick.textContent=T('resKick',{n:V.target});dom.resTitle.textContent=T(forfeit?'walkedOff':won?'youWin':'youLose');dom.resTitle.className=won?'won':'lost';
     const row=(f,s,me)=>`<tr class="${me?'me':''}"><td><span class="sw" style="background:${esc(f.cfg.col)}"></span>${esc(nameOf(f))}</td><td>${s?s.wins:f.wins||0}</td><td>${s?s.perfects:'–'}</td><td>${s?s.crits:'–'}</td><td>${s?hearts(s.dealt):'–'}</td></tr>`;
     dom.resRows.innerHTML=`<table><tr><th></th><th>${T('thDuels')}</th><th>${T('thPerfects')}</th><th>${T('thCrits')}</th><th>${T('thDealt')}</th></tr>${row(P,R&&R.f[V.me],true)}${row(E,R&&R.f[1-V.me],false)}</table>`;
-    buttons(dom.resBtns,isHost?[[T(forfeit?'playSolo':'playAgain'),'primary',()=>hooks.onRestart?.()],[T('toLobby'),'',()=>hooks.onExit?.()]]:[]);
-    dom.resFoot.textContent=forfeit?T('leftRoom'):isHost?(touch?'':T('hostKeys')):T('waitHost');
-    dom.result.classList.add('show');if(won)SFX.level()}
+    buttons(dom.resBtns,isHost?[[T(forfeit?'playSolo':'playAgain'),'primary',()=>hooks.onRestart?.()],[T('toLobby'),'',()=>hooks.onExit?.()]]
+      :[...(forfeit?[]:[[T(V.rematch?'rematchOn':'rematch'),V.rematch?'primary on':'',()=>{V.rematch=!V.rematch;hooks.onRematch?.(V.rematch);renderResult()}]]),[T('leaveRoom'),'',()=>hooks.onLeave?.()]]);
+    const ids=isHost?V.votes.filter(id=>id!==session?.myId):[],who=ids.length===1&&session?.players.find(p=>p.id===ids[0]);
+    dom.resVote.textContent=!ids.length?'':who?T('rematchOne',{name:String(who.name||T('player')).toUpperCase()}):T('rematchN',{n:ids.length});
+    dom.resFoot.textContent=forfeit?T('leftRoom'):isHost?(touch?'':T('hostKeys')):V.rematch?T('rematchSent'):T('waitHost')}
+  function rematchVotes(ids){V.votes=Array.isArray(ids)?ids:[];if(dom.result.classList.contains('show'))renderResult()}
   dom.menuBtn.addEventListener('click',()=>{audio.init();showHelp(false);showMenu(!dom.pause.classList.contains('show'))});
   dom.pause.addEventListener('click',e=>{if(e.target===dom.pause)showMenu(false)});
   dom.help.addEventListener('click',e=>{if(e.target===dom.help)showHelp(false)});dom.helpOk.addEventListener('click',()=>showHelp(false));
@@ -807,16 +827,16 @@ export async function create({ mount, audio, send, hooks }) {
   const ticker=createTicker(10,()=>{if(document.hidden)hostTick(performance.now())});
 
   /* ---------- session API ---------- */
-  setLang(lang);
+  relabel();
   function start(s){session=s;isHost=!!s.isHost;online=!!s.online;hostId=s.hostId;
-    showMenu(false);showHelp(false);dom.result.classList.remove('show');parts.length=0;fx.length=0;words.length=0;G.shake=0;G.hitStop=0;G.flashBG=0;
+    showMenu(false);showHelp(false);dom.result.classList.remove('show');V.result=null;V.rematch=false;V.votes=[];parts.length=0;fx.length=0;words.length=0;G.shake=0;G.hitStop=0;G.flashBG=0;
     if(s.players.length>=2)duelStart(s);else{V.on=false;V.me=0;resetRun(false)} // alone, in a room or not, it is the run against the CPU ladder
-    audio.init();kb.attach();fit();loop.start();if(V.on&&isHost)ticker.start();else ticker.stop()}
+    audio.init();kb.attach();fit();loop.start();if(V.on&&isHost)ticker.start();else ticker.stop();firstHelp()}
   function stop(){session=null;V.on=false;HS.phase='idle';kb.detach();ticker.stop();loop.stop();showMenu(false);showHelp(false);dom.result.classList.remove('show')}
-  function destroy(){stop();ticker.dispose();unsubAudio();try{master?.disconnect()}catch{}ro?.disconnect();removeEventListener('resize',fit);root.remove();mount.innerHTML='';unloadCss();if(window.__dice===debug)delete window.__dice}
+  function destroy(){stop();ticker.dispose();unsubAudio();unsubLang();try{master?.disconnect()}catch{}ro?.disconnect();removeEventListener('resize',fit);root.remove();mount.innerHTML='';unloadCss();if(window.__dice===debug)delete window.__dice}
   function playerLeft(){if(!session||!V.on||V.over)return;HS.phase='idle';G.phase='over';showResult(V.res,true)} // a duel of one is over: the one who stayed takes it
   function onNetMessage(msg){if(!session||!V.on||V.over||!msg||msg.m!==V.m)return;handle(msg)}
   const debug={G,V,HS,SOLO,get P(){return P},get E(){return E},get compact(){return compact},press,fit,touch};
   window.__dice=debug;
-  return{start,stop,destroy,onNetMessage,playerLeft,debug};
+  return{start,stop,destroy,onNetMessage,playerLeft,rematchVotes,debug};
 }

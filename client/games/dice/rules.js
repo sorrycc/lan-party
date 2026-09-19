@@ -10,12 +10,12 @@
      shield  block: a roll of `toHit` or more stops an attack, unless the attack is a max roll and the block is not. A max-roll block parries for 1.
      skull   threaten: a roll of `toHit` or more dazes the other side for the next round (narrow slots; a CPU foe loses its turn) and breaks a shield for 1.
      heart   heal half a heart (a whole one on a max roll)
-     fast    rush: the OTHER side's bar sweeps faster from now on (the solo hero's own: `fastSelf`)          slow    my own bar sweeps slower
+     fast    rush: the OTHER side's bar sweeps faster from now on (the solo hero's own: `fastSelf`)          slow    my own bar sweeps slower (offered only while it is sped up)
      mystery one of the above, drawn from the round's `rnd`
      dodge   a CPU foe's hop: an attack that does not roll over the dodge, and is not a max roll, goes past          stun   a dazed CPU foe's lost turn
      smoke   ink: a roll of `toHit` or more puts a stretch of the other side's next bar under fog (bar.js)
      leech   an attack that hits for 1 less (never under 1) and heals its owner half a heart when it lands
-     counter a roll of `toHit` or more turns an attack that would have landed back on its owner; with nothing to turn, its owner is dazed next round
+     counter a roll of `toHit` or more turns an attack that would have landed back on its owner; one that does not roll its number leaves its owner dazed next round
      poison  a roll of `toHit` or more: half a heart off the other side at the top of each of the next POISON_T rounds (it does not stack, it starts over). No shield stops it.
      jackpot a sliver of gold: an attack rigged +3 that lands on the top face          bomb   usually right beside it: half a heart off whoever presses it, and their combo
 
@@ -37,7 +37,7 @@
 
    What is in play is the lobby's `spice` (`featsFor`): 'classic' is the seven slots above and nothing else, 'std' brings the rest in
    duel by duel (stage by stage in a solo run), 'wild' has all of it from the first round and more often. */
-import { gradeAt } from './bar.js';
+import { gradeAt, pressOf } from './bar.js';
 
 export const DIE_STEPS = [4, 5, 6, 8, 10, 12, 20];
 export const TO_HIT = 3, SWEEP_T = 1.75, PERF_W = 0.4, MAX_SPEED = 3.2, DAZE_W = 0.6, GROW_EVERY = 3;
@@ -76,13 +76,16 @@ export function wpick(rnd, weights) {
   let r = rnd() * sum; for (const k in weights) { r -= weights[k]; if (r <= 0) return k; }
   return Object.keys(weights)[0];
 }
+/* `slow` is on a bar only when it can do something: the bar was rushed (speedMod above 0), or the combo has it well over its base
+   speed. Either way a slow-down takes a real bite out of the speed, since speedMod may fall as far as cancelling the combo. */
+export const canSlow = f => f.speedMod > 0.001 || speedOf(f) > 1.6;
 /* A fighter's bar for one round: [{ k, x, w }] with x and w as fractions of the bar, left to right, never overlapping.
    The first 30% of the bar is always bare, so there is time to read it. `hint` overrides a kind's weight (the solo run reads the
    foe's intent: more shields against an attack, fewer skulls against a foe already dazed). With `feat.jackpot` a bar may carry a
    sliver of gold, usually with a bomb hard against one side of it, or a bomb on its own: four slots at most. */
 export function genSlots(rnd, f, round = 9, hint = null, feat = NO_FEATS) {
   let n = +wpick(rnd, { 1: round <= 1 ? 5 : 3, 2: 4, 3: round <= 1 ? 1 : 3 }); const hurt = f.hp < f.maxHp;
-  const weights = { sword: 10, shield: 6, skull: 3, heart: hurt ? (f.hp <= 2 ? 5 : 3) : 0, fast: 2.5, slow: speedOf(f) > 1.6 ? 3 : 0, mystery: 1.5, smoke: feat.fog ? 2 : 0, leech: feat.acts ? 3 : 0, counter: feat.acts ? 2.5 : 0, poison: feat.acts ? 2.5 : 0, ...hint };
+  const weights = { sword: 10, shield: 6, skull: 3, heart: hurt ? (f.hp <= 2 ? 5 : 3) : 0, fast: 2.5, slow: canSlow(f) ? 3 : 0, mystery: 1.5, smoke: feat.fog ? 2 : 0, leech: feat.acts ? 3 : 0, counter: feat.acts ? 2.5 : 0, poison: feat.acts ? 2.5 : 0, ...hint };
   let extra = null; // the gold and its bomb, laid out as one group
   if (feat.jackpot) { if (rnd() < JACKPOT_P * feat.odds) { extra = ['jackpot']; if (rnd() < BOMB_BESIDE_P) rnd() < 0.5 ? extra.push('bomb') : extra.unshift('bomb'); } else if (rnd() < BOMB_ALONE_P * feat.odds) extra = ['bomb']; }
   if (extra) n = Math.min(n, 4 - extra.length);
@@ -162,7 +165,8 @@ export function resolveDuel(A, B) {
         if (foe.act === 'shield') { fo.dmg += 1 + (me.crit ? 1 : 0); told[j].push(['break', 'red']); } else if (!hits[j]) told[j].push(['spooked', 'purple']); }
     } else if (me.act === 'counter') {
       if (atk[j] && turns(i)) { o.say.push(['counter', 'hot']); o.pose = 'block'; o.fx = 'block'; o.won = true; }
-      else { o.say.push([ok[i] ? 'opening' : 'fumble', 'dim']); o.pose = 'miss'; o.daze = true; }
+      else if (ok[i]) { o.say.push(['braced', 'dim']); o.pose = 'block'; } // rolled its number and nobody swung: no harm done
+      else { o.say.push(['fumble', 'dim']); o.pose = 'miss'; o.daze = true; }
     } else if (me.act === 'poison') {
       if (ok[i]) { fo.poison = true; o.won = true; o.say.push(['poison', 'green']); o.pose = 'threat'; o.fx = 'venom'; told[j].push(['poisoned', 'green']); } else { o.say.push(['fizzle', 'dim']); o.pose = 'slow'; }
     } else if (me.act === 'smoke') {
@@ -190,13 +194,13 @@ export function resolveDuel(A, B) {
 
 /* One whole round: grade both presses, roll, resolve, and write the outcome into the two duelists.
    `fs` are the two duelists (mutated), `bars` their bars (bar.js's, or just the slots of one that stands still), `picks` the sweep's
-   progress `u` at each press (a number; below 0: the bar ran out) or a CPU foe's { act, bonus }, `die` one die or one each. Returns { r, out, win } with win null while both stand, -1 for a double
+   progress `u` at each press (a number; below 0: the bar ran out; or { u, w } with the stretch swept in the frame before it) or a CPU foe's { act, bonus }, `die` one die or one each. Returns { r, out, win } with win null while both stand, -1 for a double
    K.O., otherwise the winner's index. */
 export function playRound(rnd, fs, die, bars, picks, feat = NO_FEATS) {
   const dice = Array.isArray(die) ? die : [die, die], hot = fs.map(isHot), tick = fs.map(f => f.poison > 0 ? 1 : 0), B = bars.map(b => Array.isArray(b) ? { v: 'still', slots: b } : b);
   const rolls = fs.map((f, i) => (Array.isArray(picks[i]) ? picks[i].slice(0, 2) : [picks[i]]).map((p, k, all) => {
-    let pick = typeof p === 'number' ? gradeAt(B[i], p, perfOf(f)) : p;
-    if (k && pick.slot >= 0 && typeof all[0] === 'number' && gradeAt(B[i], all[0], 1).slot === pick.slot) pick = { slot: -1, grade: 'MISSED' }; // the same slot twice
+    const q = pressOf(p), q0 = pressOf(all[0]); let pick = q ? gradeAt(B[i], q.u, perfOf(f), q.w) : p;
+    if (k && pick.slot >= 0 && q0 && gradeAt(B[i], q0.u, 1, q0.w).slot === pick.slot) pick = { slot: -1, grade: 'MISSED' }; // the same slot twice
     if (pick.grade === 'MISSED') { f.combo = 0; f.speedMod = Math.max(0, f.speedMod * 0.5); } else if (pick.grade) { f.combo++; if (pick.grade === 'PERFECT') f.perfects++; }
     const roll = rollFor(rnd, f, dice[i], B[i].slots, pick); roll.sx = roll.slot >= 0 ? B[i].slots[roll.slot].x : -1; return roll; // sx: which slot, for a screen that was shown a fake among them
   }));

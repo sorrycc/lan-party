@@ -1,18 +1,21 @@
 /* Loaded Dice - every word the game shows, in Chinese (the default) and English. The rules and the wire carry keys, each screen
    reads them in its own language. `{n}` in a string is filled from the vars. A key missing from a table falls back to English, then
-   to the key itself. No DOM: the two tables are checked against each other in node. */
+   to the key itself. The game draws them through core/i18n.js (`makeT(STR)`, the whole app's language); `mkT(lang)` reads one table
+   whatever the app is set to. No DOM: the two tables are checked against each other in node. */
+import { LANGS, fill } from '../../core/i18n.js';
+
 const en = {
   // what a fighter shouts (rules.js's `say`)
   hit: 'HIT', crit: 'CRIT!', whiff: 'WHIFF', clash: 'CLASH', attack: 'ATTACK', break: 'BREAK', parry: 'PARRY!', block: 'BLOCK', fumble: 'FUMBLE', guard: 'GUARD',
   dodge: 'DODGE', hop: 'HOP', meh: 'MEH', roar: 'ROAR!', threat: 'THREAT', spooked: 'SPOOKED', heal: 'HEAL', bigheal: 'BIG HEAL', fizzle: 'FIZZLE',
-  speedup: 'SPEED UP', rush: 'RUSH!', rushed: 'RUSHED', slowdown: 'SLOW DOWN', dazed: 'DAZED', missed: 'MISSED', jackpot: 'JACKPOT!', boom: 'BOOM', smoke: 'INK!', smoked: 'INKED', leech: 'LEECH', counter: 'COUNTER!', opening: 'WIDE OPEN', poison: 'POISON', poisoned: 'POISONED', fever: 'FEVER!', feverSub: 'TWO DICE, THE HIGHER COUNTS  ·  WIDE SWEET SPOTS  ·  +½ ♥ DAMAGE', feverCap: 'FEVER', ko: 'K.O.!', lucky: 'LUCKY!', rigged: '{base} +{bonus} RIG',
+  speedup: 'SPEED UP', rush: 'RUSH!', rushed: 'RUSHED', slowdown: 'SLOW DOWN', dazed: 'DAZED', missed: 'MISSED', jackpot: 'JACKPOT!', boom: 'BOOM', smoke: 'INK!', smoked: 'INKED', leech: 'LEECH', counter: 'COUNTER!', braced: 'BRACED', poison: 'POISON', poisoned: 'POISONED', fever: 'FEVER!', feverSub: 'TWO DICE, THE HIGHER COUNTS  ·  WIDE SWEET SPOTS  ·  +½ ♥ DAMAGE', feverCap: 'FEVER', ko: 'K.O.!', lucky: 'LUCKY!', rigged: '{base} +{bonus} RIG',
   // the press
   'grade.PERFECT': 'PERFECT', 'grade.GOOD': 'GOOD', 'grade.MISSED': 'MISSED', 'grade.plain': 'PLAIN ROLL', 'grade.late': 'TOO LATE', 'grade.jackpot': 'JACKPOT', 'grade.bomb': 'BOMB!', 'sub.bomb': 'HALF A HEART · NO MOVE',
   'sub.lost': '{n} COMBO LOST', 'sub.fumble': 'FUMBLE · ROLLS A 1', 'sub.rig': '{act} · RIG +{n}', 'sub.rigCombo': '{act} · RIG +{n} · {c} COMBO', 'sub.plain': 'NO RIG · ATTACK', 'sub.late': 'PLAIN ROLL',
   'act.sword': 'ATTACK', 'act.shield': 'BLOCK', 'act.skull': 'THREATEN', 'act.heart': 'HEAL', 'act.fast': 'RUSH THEM', 'act.fastSelf': 'SPEED UP', 'act.slow': 'SLOW DOWN', 'act.mystery': 'MYSTERY', 'act.plain': 'PLAIN ROLL', 'act.miss': 'MISSED', 'act.dodge': 'DODGE', 'act.stun': 'DAZED', 'act.jackpot': 'JACKPOT', 'act.bomb': 'BOMB', 'act.double': 'TWO PRESSES', 'tip.double': 'THE CURSOR CROSSES TWICE · ONE MOVE A CROSSING, NEVER THE SAME SLOT', 'act.none': '…',
   'intent.charge': 'WINDING UP', 'trick.flurry': 'FLURRY!', 'trick.ink': 'INK!', 'trick.steal': 'YOINK!', 'trick.charge': 'WINDING UP…', 'trick.smash': 'SMASH!', 'trick.jam': 'STRINGS PULLED!', 'trick.blank': 'FACELESS!', 'trick.freeze': 'FROZEN OVER!', 'trick.swallow': 'HEXED! YOUR DIE', 'trick.angry': 'THE BARON IS NOT AMUSED', 'trick.angry.d': 'A BIGGER DIE: D{die}  ·  HE WILL HEX YOURS',
   'act.smoke': 'INK', 'act.leech': 'LEECH', 'act.counter': 'COUNTER', 'act.poison': 'POISON',
-  'tip.leech': 'AN ATTACK FOR 1 LESS THAT HEALS YOU HALF A HEART', 'tip.counter': 'TURNS THEIR ATTACK BACK ON THEM · NOTHING TO TURN AND YOU ARE DAZED', 'tip.poison': 'HALF A HEART A ROUND FOR THREE ROUNDS · NO SHIELD STOPS IT',
+  'tip.leech': 'AN ATTACK FOR 1 LESS THAT HEALS YOU HALF A HEART', 'tip.counter': 'TURNS THEIR ATTACK BACK ON THEM · FUMBLE IT AND YOU ARE DAZED', 'tip.poison': 'HALF A HEART A ROUND FOR THREE ROUNDS · NO SHIELD STOPS IT',
   'face.vamp': 'VAMPIRE FACE · THE {n}', 'face.vamp.d': 'A move that lands on it heals half a heart', 'face.double': 'DOUBLE FACE · THE {n}', 'face.double.d': 'Damage or healing on it is doubled', 'face.guard': 'GUARD FACE · THE {n}', 'face.guard.d': 'On it you take half a heart less',
   'face.venom': 'VENOM FACE · THE {n}', 'face.venom.d': 'A move that lands on it poisons them', 'face.lucky': 'LUCKY FACE · THE {n}', 'face.lucky.d': 'A move that lands on it is +3 fever',
   draftPress: 'LOAD A FACE OF YOUR DIE  ·  PRESS WHEN IT LIGHTS UP  ·  {s}', draftTap: 'LOAD A FACE OF YOUR DIE  ·  TAP A CARD  ·  {s}', draftTheirs: '{name} IS PICKING A FACE  ·  {s}', draftDone: 'LOADED', 'act.bounce': 'THERE AND BACK', 'act.slide': 'SLIDING', 'act.shrink': 'SHRINKING', 'act.fog': 'INK ON YOUR BAR',
@@ -21,7 +24,7 @@ const en = {
   'intent.attack': 'ATTACK', 'intent.block': 'BLOCK', 'intent.dodge': 'DODGE', 'intent.stun': 'DAZED', 'intent.hidden': '???', 'opp.locked': 'LOCKED IN', 'opp.aiming': 'AIMING',
   // HUD
   score: 'SCORE', combo: 'COMBO', die: 'DIE', speed: 'SPEED', wins: 'WINS', toHit: '{n}+ TO HIT', rolled: '{r} ROLLED · {n}+ HITS', lv: 'LV {n}', stageOf: '{name}  ·  STAGE {n}', you: 'YOU  ·  {name}', isDazed: '{name}  ·  DAZED',
-  barRig: 'GOOD +{g} · PERFECT +{p}', barSweep: '{x}× SWEEP',
+  barRig: 'GOOD +{g} · PERFECT +{p}', barSweep: '{x}× SWEEP', barSweepFoe: '{x}× SWEEP · FOE +{f}',
   'hint.solo': 'SWORDS ATTACK · SHIELDS BLOCK · SKULLS THREATEN · HEARTS HEAL · << SLOW · >> FAST · MAX ROLL CRITS',
   'hint.duel1': 'SWORDS ATTACK · SHIELDS BLOCK SWORDS · SKULLS BREAK SHIELDS AND DAZE', 'hint.duel2': 'HEARTS HEAL · >> RUSHES THEIR BAR · << SLOWS YOURS · THE TOP FACE CRITS',
   'foot.touch': 'TAP ANYWHERE = THE ONLY BUTTON   ·   ☰ = MENU', 'foot.keys': 'SPACE / CLICK = THE ONLY BUTTON   ·   M = {mute}', 'foot.mute': 'MUTE', 'foot.muted': 'MUTED', 'foot.host': '   ·   R = {again}   ·   ESC = {exit}',
@@ -46,6 +49,7 @@ const en = {
   rotate: 'ROTATE YOUR DEVICE', rotateSub: 'LOADED DICE PLAYS IN LANDSCAPE',
   resKick: 'LOADED DICE  ·  FIRST TO {n}', walkedOff: 'THEY WALKED OFF', youWin: 'YOU WIN', youLose: 'SNAKE EYES', thDuels: 'DUELS', thPerfects: 'PERFECTS', thCrits: 'CRITS', thDealt: 'HEARTS TAKEN OFF',
   leftRoom: 'The other player left the room.', hostKeys: 'R = play again  ·  Esc = lobby', waitHost: 'Waiting for the host…',
+  leaveRoom: 'LEAVE ROOM', rematch: 'REMATCH?', rematchOn: 'REMATCH ✓', rematchSent: 'The host knows you want another duel.', rematchOne: '{name} WANTS A REMATCH', rematchN: '{n} PLAYERS WANT A REMATCH',
   'help.press': 'Press Space or click', 'help.tap': 'Tap anywhere',
   'help.solo': `<p><b>One button.</b> {press} while the cursor is over a slot: that is your move, and it rigs your die (+1, or +2 on the bright middle). Bare bar is a fumble; letting the bar run out is a plain attack.</p>
     <ul><li><i class="g"></i><b>Sword</b> attack &nbsp; <b>Shield</b> block &nbsp; <b>Heart</b> heal</li><li><i class="r"></i><b>Skull</b> threaten: dazes them for a round and breaks a block</li><li><b>&gt;&gt;</b> faster bar, more score &nbsp; <b>&lt;&lt;</b> slower bar &nbsp; <b>?</b> a surprise</li><li><b>Gold sliver</b> rig +3, a sure crit; the <b>bomb</b> beside it costs half a heart</li><li><b>FEVER</b> fills with good presses: then two dice, the higher counts</li><li>Later on: bars that move, <b>leech</b>, <b>counter</b>, <b>poison</b>, <b>ink</b>, rounds of two presses, and faces of your die loaded with a mark. A line under the bar says what each is the first time.</li></ul>
@@ -58,13 +62,13 @@ const en = {
 const zh = {
   hit: '命中', crit: '暴击!', whiff: '挥空', clash: '拼刀', attack: '进攻', break: '破防', parry: '弹反!', block: '格挡', fumble: '失手', guard: '架盾',
   dodge: '闪开', hop: '蹦跶', meh: '没吓住', roar: '怒吼!', threat: '恐吓', spooked: '吓懵了', heal: '回血', bigheal: '大回血', fizzle: '哑火',
-  speedup: '加速', rush: '催命!', rushed: '被催了', slowdown: '减速', dazed: '眩晕', missed: '按空了', jackpot: '头彩!', boom: '炸了', smoke: '泼墨!', smoked: '被泼了', leech: '偷血', counter: '反击!', opening: '露了破绽', poison: '下毒', poisoned: '中毒了', fever: '手气爆棚!', feverSub: '掷两颗取高的  ·  完美区加宽  ·  伤害 +半颗心', feverCap: '手气', ko: '倒地!', lucky: '走运!', rigged: '{base} +{bonus} 灌铅',
+  speedup: '加速', rush: '催命!', rushed: '被催了', slowdown: '减速', dazed: '眩晕', missed: '按空了', jackpot: '头彩!', boom: '炸了', smoke: '泼墨!', smoked: '被泼了', leech: '偷血', counter: '反击!', braced: '严阵以待', poison: '下毒', poisoned: '中毒了', fever: '手气爆棚!', feverSub: '掷两颗取高的  ·  完美区加宽  ·  伤害 +半颗心', feverCap: '手气', ko: '倒地!', lucky: '走运!', rigged: '{base} +{bonus} 灌铅',
   'grade.PERFECT': '完美', 'grade.GOOD': '不错', 'grade.MISSED': '按空了', 'grade.plain': '白掷', 'grade.late': '太慢了', 'grade.jackpot': '头彩', 'grade.bomb': '踩雷!', 'sub.bomb': '掉半颗心 · 这回合没动作',
   'sub.lost': '断了 {n} 连击', 'sub.fumble': '失手 · 只掷出 1', 'sub.rig': '{act} · 灌铅 +{n}', 'sub.rigCombo': '{act} · 灌铅 +{n} · {c} 连击', 'sub.plain': '没灌铅 · 普通攻击', 'sub.late': '白掷',
   'act.sword': '攻击', 'act.shield': '格挡', 'act.skull': '恐吓', 'act.heart': '回血', 'act.fast': '催对手', 'act.fastSelf': '加速', 'act.slow': '减速', 'act.mystery': '未知', 'act.plain': '白掷', 'act.miss': '按空了', 'act.dodge': '闪避', 'act.stun': '眩晕', 'act.jackpot': '头彩', 'act.bomb': '炸弹', 'act.double': '两连按', 'tip.double': '光标会扫两趟 · 每趟按一个动作,不能按同一格', 'act.none': '…',
   'intent.charge': '蓄力中', 'trick.flurry': '乱挥!', 'trick.ink': '泼墨!', 'trick.steal': '顺走一格!', 'trick.charge': '蓄力…', 'trick.smash': '重锤!', 'trick.jam': '扯线!', 'trick.blank': '没脸了!', 'trick.freeze': '结冰了!', 'trick.swallow': '下咒!封了你的骰子', 'trick.angry': '男爵生气了', 'trick.angry.d': '换大骰子:D{die}  ·  还会封你的骰子',
   'act.smoke': '泼墨', 'act.leech': '偷血', 'act.counter': '反击', 'act.poison': '下毒',
-  'tip.leech': '少打半颗心的攻击,命中给自己回半颗', 'tip.counter': '把对手的攻击弹回去 · 对手没攻击,你下回合眩晕', 'tip.poison': '三回合,每回合掉半颗心 · 盾挡不住',
+  'tip.leech': '少打半颗心的攻击,命中给自己回半颗', 'tip.counter': '把对手的攻击弹回去 · 没掷够点数,你下回合眩晕', 'tip.poison': '三回合,每回合掉半颗心 · 盾挡不住',
   'face.vamp': '吸血面 · {n} 点', 'face.vamp.d': '掷到它且动作成了,回半颗心', 'face.double': '双倍面 · {n} 点', 'face.double.d': '掷到它,伤害或回血翻倍', 'face.guard': '护盾面 · {n} 点', 'face.guard.d': '掷到它,这回合少掉半颗心',
   'face.venom': '毒面 · {n} 点', 'face.venom.d': '掷到它且动作成了,对手中毒', 'face.lucky': '幸运面 · {n} 点', 'face.lucky.d': '掷到它且动作成了,手气 +3',
   draftPress: '给你的骰子灌一面  ·  想要的亮起时按下  ·  {s}', draftTap: '给你的骰子灌一面  ·  点一张  ·  {s}', draftTheirs: '{name} 正在选  ·  {s}', draftDone: '灌好了', 'act.bounce': '来回扫', 'act.slide': '格子在滑', 'act.shrink': '格子在缩', 'act.fog': '你的条被泼了墨',
@@ -72,7 +76,7 @@ const zh = {
   'tip.bounce': '光标到头会折回来 · 回程的格子更窄', 'tip.slide': '格子在晃 · 按它现在的位置,不是刚才的', 'tip.shrink': '格子越来越小 · 越靠后的越难按', 'tip.fog': '墨下面的格子,光标靠近了才显形',
   'intent.attack': '要攻击', 'intent.block': '要格挡', 'intent.dodge': '要闪避', 'intent.stun': '眩晕中', 'intent.hidden': '???', 'opp.locked': '已出手', 'opp.aiming': '瞄准中',
   score: '分数', combo: '连击', die: '骰子', speed: '速度', wins: '胜局', toHit: '{n} 以上命中', rolled: '掷出 {r} · {n} 以上命中', lv: '{n} 级', stageOf: '{name}  ·  第 {n} 关', you: '你  ·  {name}', isDazed: '{name}  ·  眩晕',
-  barRig: '不错 +{g} · 完美 +{p}', barSweep: '{x}× 扫速',
+  barRig: '不错 +{g} · 完美 +{p}', barSweep: '{x}× 扫速', barSweepFoe: '{x}× 扫速 · 对手 +{f}',
   'hint.solo': '剑攻击 · 盾格挡 · 骷髅恐吓 · 心回血 · << 减速 · >> 加速 · 掷出顶面暴击',
   'hint.duel1': '剑攻击 · 盾挡剑 · 骷髅破盾并让对手眩晕', 'hint.duel2': '心回血 · >> 催快对手的条 · << 放慢自己的条 · 顶面暴击',
   'foot.touch': '点屏幕任意处 = 唯一的按钮   ·   ☰ = 菜单', 'foot.keys': '空格 / 点击 = 唯一的按钮   ·   M = {mute}', 'foot.mute': '静音', 'foot.muted': '已静音', 'foot.host': '   ·   R = {again}   ·   ESC = {exit}',
@@ -92,6 +96,7 @@ const zh = {
   rotate: '请把设备横过来', rotateSub: '灌铅骰子要横屏玩',
   resKick: '灌铅骰子  ·  先赢 {n} 局', walkedOff: '对手跑了', youWin: '你赢了', youLose: '蛇眼出局', thDuels: '胜局', thPerfects: '完美', thCrits: '暴击', thDealt: '打掉的心',
   leftRoom: '对方离开了房间。', hostKeys: 'R = 再来一场  ·  Esc = 回大厅', waitHost: '等房主操作…',
+  leaveRoom: '离开房间', rematch: '再来一场?', rematchOn: '想再来 ✓', rematchSent: '房主知道你想再来一场了。', rematchOne: '{name} 想再来一场', rematchN: '{n} 人想再来一场',
   'help.press': '按空格或点击', 'help.tap': '点屏幕任意处',
   'help.solo': `<p><b>只有一个按钮。</b>光标扫到格子上时{press}:那就是你这回合的动作,同时给骰子灌铅(+1,压中亮色的正中 +2)。按在空白处是失手;放着不按,就是一次普通攻击。</p>
     <ul><li><i class="g"></i><b>剑</b>攻击 &nbsp; <b>盾</b>格挡 &nbsp; <b>心</b>回血</li><li><i class="r"></i><b>骷髅</b>恐吓:让对手眩晕一回合,还能破盾</li><li><b>&gt;&gt;</b> 条变快、分更多 &nbsp; <b>&lt;&lt;</b> 条变慢 &nbsp; <b>?</b> 开出什么算什么</li><li><b>金色细格</b>灌铅 +3、必定暴击;紧挨着的<b>炸弹</b>按中掉半颗心</li><li><b>手气</b>靠压中格子攒满:下一回合掷两颗取高的</li><li>往后还有:会动的条、<b>偷血</b>、<b>反击</b>、<b>下毒</b>、<b>泼墨</b>、两连按的回合,以及给骰子的某一面灌上记号。每样第一次出现时,条下面会有一行说明。</li></ul>
@@ -101,9 +106,6 @@ const zh = {
     <p>对手红心下面的小条是他的:看得到他能选什么,看不到他选了什么。掷出 {hit} 或以上动作才算成,顶面是暴击,6 以上打得更狠。连击让你的条变快,也让你更容易走运暴击。</p>`,
 };
 
-export const STR = { zh, en }, LANGS = ['zh', 'en'];
-export const mkT = lang => (key, vars) => {
-  let s = STR[lang]?.[key] ?? en[key] ?? key;
-  if (vars) for (const k in vars) s = s.split('{' + k + '}').join(vars[k]);
-  return s;
-};
+export const STR = { zh, en };
+export { LANGS };
+export const mkT = lang => (key, vars) => fill(STR[lang]?.[key] ?? en[key] ?? key, vars);

@@ -46,6 +46,8 @@
 .dice .result tr.me td { background: #fff4c4; }
 .dice .result .sw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2.5px solid var(--ink); margin-right: 8px; vertical-align: -1px; }
 .dice .result p { margin: 12px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 2px; color: #6d685c; min-height: 1em; }
+.dice .result p.vote { color: #8a6a10; font-size: 14px; font-weight: 800; min-height: 0; } .dice .result p.vote:empty { display: none; } /* the host: a guest wants another duel */
+.dice .btn.on { box-shadow: 0 2px 0 var(--ink); transform: translateY(2px); } /* a guest's REMATCH, pressed in */
 
 /* Chinese (the default; `.dice.zh` is set by the game module): hanzi are not tracked out, and the small labels are a size up */
 .dice.zh .mcard h1, .dice.zh .btn, .dice.zh .rotate { letter-spacing: 1px; } .dice.zh .howto { letter-spacing: 0; line-height: 1.55; }
