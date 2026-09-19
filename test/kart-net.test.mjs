@@ -29,7 +29,7 @@ test('statusKey changes on the discrete fields and effect starts, not on motion'
 test('hazards round-trip with type, owner, velocity, flight and homing data', () => {
   const red = { id: 5, type: 'red', owner: 2, x: 1.5, z: 2.5, vx: 30, vz: 40, air: 0, fly: false, vy: 0, h: 0.75, target: { id: 1 }, fuse: 0 };
   let h = unpackHaz(JSON.parse(JSON.stringify(packHaz(red))));
-  assert.equal(h.id, 5); assert.equal(h.ty, 'red'); assert.equal(h.o, 2); assert.equal(h.vx, 30); assert.equal(h.h, 0.75); assert.equal(h.tg, -1); assert.equal(h.vy, 0);
+  assert.equal(h.id, 5); assert.equal(h.ty, 'red'); assert.equal(h.o, 2); assert.equal(h.vx, 30); assert.equal(h.h, 0.75); assert.equal(h.tg, 1); // a red shell carries its lock, so its target can be warned assert.equal(h.vy, 0);
   const banana = { id: 6, type: 'banana', owner: 0, x: 0, z: 0, vx: 20, vz: 0, air: 1.2, fly: true, vy: 5.5, h: 0, target: null, fuse: 0 };
   h = unpackHaz(packHaz(banana)); assert.equal(h.ty, 'banana'); assert.equal(h.a, 1.2); assert.equal(h.vy, 5.5);
   const blue = { id: 7, type: 'blue', owner: 4, x: 0, z: 0, vx: 0, vz: 68, air: 2.5, fly: false, vy: 0, h: 0, target: 3, fuse: 0 };

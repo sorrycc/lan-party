@@ -19,6 +19,9 @@ export const unpackStatus = a => ({ i: a[0] | 0, lp: a[1] | 0, cp: a[2] | 0, bo:
 /* the discrete part of a kart's status; when it changes the status goes out at once instead of waiting for the next slot */
 export const statusKey = k => `${k.lap}|${k.cpNext}|${k.item}|${k.itemN}|${k.held ? 1 : 0}|${k.coins}|${k.finished ? 1 : 0}|${k.boost > 0 ? 1 : 0}${k.spin > 0 ? 1 : 0}${k.star > 0 ? 1 : 0}${k.bullet > 0 ? 1 : 0}${k.shrink > 0 ? 1 : 0}${k.ink > 0 ? 1 : 0}`;
 
-/* hazards: id, type, owner kart, pose, velocity, height above the road and (while flying) vertical speed, heading (homing shells), target (blue) and fuse (bomb) */
-export const packHaz = h => [h.id, HAZ_TYPES.indexOf(h.type), h.owner, r2(h.x), r2(h.z), r2(h.vx), r2(h.vz), h.air > 0 ? r2(h.air) : 0, h.fly ? r2(h.vy) : 0, h.type === 'red' || h.type === 'blue' ? r3(h.h) : 0, h.type === 'blue' ? h.target : -1, h.type === 'bomb' ? r2(h.fuse) : 0];
+/* hazards: id, type, owner kart, pose, velocity, height above the road and (while flying) vertical speed, heading (homing shells),
+   target kart id (blue, and a red shell's lock so its target hears the warning) and fuse (bomb). The host holds a red shell's target
+   as the kart itself, a blue one's as an id. */
+const tgt = h => h.type === 'blue' ? h.target : h.type === 'red' && h.target && typeof h.target === 'object' ? h.target.id : -1;
+export const packHaz = h => [h.id, HAZ_TYPES.indexOf(h.type), h.owner, r2(h.x), r2(h.z), r2(h.vx), r2(h.vz), h.air > 0 ? r2(h.air) : 0, h.fly ? r2(h.vy) : 0, h.type === 'red' || h.type === 'blue' ? r3(h.h) : 0, tgt(h), h.type === 'bomb' ? r2(h.fuse) : 0];
 export const unpackHaz = a => ({ id: a[0] | 0, ty: HAZ_TYPES[a[1] | 0] || 'green', o: a[2] | 0, x: +a[3] || 0, z: +a[4] || 0, vx: +a[5] || 0, vz: +a[6] || 0, a: +a[7] || 0, vy: +a[8] || 0, h: +a[9] || 0, tg: a[10] === undefined ? -1 : a[10] | 0, f: +a[11] || 0 });

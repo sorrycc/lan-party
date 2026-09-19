@@ -129,6 +129,9 @@
 #results .dim { color: #8fa3c8; font-size: 15px; }
 #results tr.win td { background: rgba(255,213,74,.28); color: #ffd54a; }
 #results .laps { margin-top: 8px; font-size: 13px; color: #8fa3c8; letter-spacing: 1px; font-variant-numeric: tabular-nums; text-align: center; }
+#results .votes, #pause .votes { margin-top: 6px; text-align: center; font-size: 14px; font-weight: 700; color: #7fd0ff; letter-spacing: 2px; }
+#results .votes:empty, #pause .votes:empty { display: none; }
+#pause .votes { margin: 0 0 10px; }
 #results .next { margin-top: 8px; text-align: center; font-size: 18px; font-weight: 900; color: #ffd54a; letter-spacing: 3px; min-height: 22px; }
 #cupline { font-size: 12px; letter-spacing: 2px; color: #ffd54a; margin-bottom: 2px; }
 
@@ -136,6 +139,16 @@
 #hint { bottom: calc(12px + var(--sa-b)); right: calc(232px + var(--sa-r)); font-size: 11px; white-space: nowrap; color: rgba(255,255,255,.55); letter-spacing: 1px; }
 #wrong { top: 32%; left: 50%; transform: translateX(-50%); font-size: 40px; font-weight: 900; color: #ff5c6a; display: none; animation: blink .6s infinite; }
 @keyframes blink { 50% { opacity: .35; } }
+/* incoming threat: a red shell locked on, a blue shell out */
+#warn { top: calc(9% + var(--sa-t)); left: 50%; transform: translateX(-50%); font-size: 24px; font-weight: 900; font-style: italic; letter-spacing: 2px; color: #ff5c6a; padding: 4px 18px; border-radius: 10px; border: 2px solid #ff5c6a; background: rgba(40,6,12,.55); display: none; white-space: nowrap; animation: blink .45s infinite; }
+#warn.show { display: block; } #warn.blue { color: #7fd0ff; border-color: #7fd0ff; background: rgba(6,16,44,.55); }
+/* after the line: a small banner while the others finish; a click / tap on it (or SPACE) brings the results in */
+#finBanner { top: calc(12% + var(--sa-t)); left: 50%; transform: translateX(-50%); display: none; flex-direction: column; align-items: center; gap: 3px; padding: 8px 22px 7px; pointer-events: auto; cursor: pointer; max-width: calc(100vw - 24px); z-index: 8; }
+#finBanner.show { display: flex; animation: pop .35s ease-out; }
+#finBanner b { font-size: 26px; font-style: italic; letter-spacing: 2px; color: #ffd54a; white-space: nowrap; }
+#finBanner span { font-size: 13px; letter-spacing: 2px; color: #dbe9ff; text-align: center; }
+#finBanner span:empty { display: none; }
+#finBanner small { font-size: 10px; letter-spacing: 2px; color: rgba(255,255,255,.55); }
 
 /* frame + network readout: the corner line always, the panel on F3 / I, the banner when the host's snapshots stop */
 #corner { top: calc(10px + var(--sa-t)); left: 50%; transform: translateX(-50%); font-size: 11px; letter-spacing: 1px; color: rgba(255,255,255,.6); white-space: nowrap; }
@@ -162,6 +175,7 @@
 .btn-ctl.on { background: rgba(255,213,74,.55); border-color: #ffd54a; transform: scale(.94); }
 #btnBrake { right: calc(var(--edge-r) + 118px); bottom: var(--edge-b); }
 #btnItem { right: var(--edge-r); bottom: var(--edge-b); width: 104px; height: 104px; }
+#btnLook { right: calc(var(--edge-r) + 132px); bottom: calc(var(--edge-b) + 104px); width: 60px; height: 60px; font-size: 11px; opacity: .8; }
 #btnItem b { font-size: 13px; letter-spacing: 2px; color: rgba(255,255,255,.7); }
 #btnItem canvas { display: none; width: 52px; height: 52px; }
 #btnItem small { font-size: 16px; line-height: 1; color: #ffd54a; visibility: hidden; }
@@ -219,6 +233,8 @@
   #startTip { transform: translate(-50%, -72px); font-size: 12px; letter-spacing: 2px; }
   #help { width: min(460px, calc(100vw - 24px)); padding: 6px 12px 8px; } #help h2 { font-size: 11px; letter-spacing: 3px; margin-bottom: 4px; } #help dl { gap: 1px 10px; } #help dt { font-size: 9px; } #help dd { font-size: 10px; } #help button { margin-top: 6px; font-size: 11px; padding: 5px 12px; }
   #wrong { font-size: 28px; } #netwait { font-size: 20px; }
+  #warn { font-size: 16px; padding: 3px 12px; } #finBanner { padding: 5px 14px 4px; } #finBanner b { font-size: 18px; } #finBanner span { font-size: 11px; }
+  #btnLook { bottom: calc(var(--edge-b) + 96px); width: 52px; height: 52px; }
   #hint { font-size: 10px; }
   #results .card { padding: 14px 18px; border-radius: 16px; } #results h1 { font-size: 30px; } #results h2 { font-size: 12px; margin-bottom: 8px; letter-spacing: 2px; }
   #results table { font-size: 14px; } #results td { padding: 3px 6px; } #results #cupTable { font-size: 13px; } #results .dim { font-size: 12px; } #results .laps { font-size: 11px; }
@@ -228,3 +244,10 @@
   .touch #kartcard { bottom: calc(112px + var(--sa-b)); }
   .touch #map canvas { width: 100px; height: 100px; } /* keeps the map clear of the ITEM button */
 }
+
+/* Chinese: CJK glyphs need no tracking; the wide letter-spacing of the English caps comes down */
+html.zh .toast, html.zh #results h1, html.zh #results h2, html.zh #results h3, html.zh #results .next, html.zh #results .foot, html.zh .votes,
+html.zh #help h2, html.zh #help dt, html.zh #help dd, html.zh #startTip, html.zh #kartcard > span, html.zh #kartcard .bars div, html.zh #itemLabel,
+html.zh #cupline, html.zh #lap, html.zh .overlay .card h1, html.zh #rotate, html.zh #rotate small, html.zh #pad .lbl, html.zh .btn-ctl, html.zh #btnItem b,
+html.zh #warn, html.zh #finBanner b, html.zh #finBanner span, html.zh #finBanner small, html.zh #netwait, html.zh #hint { letter-spacing: 1px; }
+html.zh #pos sup { font-size: 30px; margin: 0 2px 0 0; }

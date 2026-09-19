@@ -26,10 +26,17 @@
    the correction a fresh snapshot brings is hidden in a decaying visual offset. A client shows a ghost of its own throw
    until the host's copy arrives. Hits are decided by the victim's machine. F3 / I shows frame and network stats.
 
+   Menu and flow: ESC (keyboard) or ☰ (touch) opens a menu card with the way out - R / ESC never end the room's race by accident. The
+   first race on a device explains the controls (touch or keyboard wording). A red shell locked on, or a blue shell out, blinks a
+   warning and beeps faster as it closes; C (or LOOK on touch) holds a rear view. After the line a small banner follows the leading
+   kart still racing until everyone is home, then the results; the host's countdown to the next race (cup, or online single race)
+   rides on the race clock so guests see it, and a guest gets LEAVE ROOM and a REMATCH toggle. The grid is seeded from the session
+   (reverse standings in a cup), and CPUs dodge hazards in their lookahead and have a capped rubber band (logic.js).
+
    Touch screens (core/touch.js): the left side is a steering pad (dead zone, curve and a sensitivity setting), gas is automatic,
-   BRAKE and ITEM sit under the right thumb and the item slot at the top left is a second ITEM button, holding anywhere else through
-   GO is the rocket start, ☰ opens a menu card, the first race explains itself, a phone held upright is asked to rotate, and
-   rendering starts a detail tier lower. The shell holds a screen wake lock while a game is running. */
+   BRAKE and ITEM sit under the right thumb (LOOK above them) and the item slot at the top left is a second ITEM button, holding
+   anywhere else through GO is the rocket start, ☰ opens the menu, a phone held upright is asked to rotate, and rendering starts a
+   detail tier lower. The shell holds a screen wake lock while a game is running. */
 import * as THREE from 'three';
 import { clamp, lerp, wrapAngle, ordinal, makeRng } from '../../core/math.js';
 import { createToasts, esc, fmtTime, loadStylesheet } from '../../core/ui.js';
@@ -39,6 +46,14 @@ import { createLoop, fixedStep } from '../../core/loop.js';
 import { nowSec, pushSnap, sampleSnaps, createSnapClock } from '../../core/interp.js';
 import { createTicker } from '../../core/ticker.js';
 import { NET_HZ, STATUS_HZ, F, HAZ_TYPES, packMotion, unpackMotion, packStatus, unpackStatus, statusKey, packHaz, unpackHaz } from './net.js';
+import { gridOrder as seedGrid, rubberBand, dodgeLat, resyncNext } from './logic.js';
+import { makeT, onLang, isZh, nextLang } from '../../core/i18n.js';
+import { STR } from './strings.js';
+const T = makeT(STR);
+/* the HUD's words are drawn in the current language; an ordinal is 第3 in Chinese */
+const ord = n => isZh() ? '第' + n : ordinal(n).toUpperCase();
+/* canvas text: the shell's face first, then the CJK fonts the page's own stack falls back to */
+const FONT = '"Trebuchet MS", Arial, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif';
 
 /* kart skins, indexed by the shared avatar index (core/avatars.js) */
 const SKINS = [
@@ -48,16 +63,16 @@ const SKINS = [
 ];
 /* weight classes: light karts launch and turn, heavy karts are fast and shove others aside; `bars` are the stat card */
 const WEIGHT = {
-  light: { label: 'LIGHT', vmax: 0.96, acc: 1.15, turn: 1.1, mass: 0.8, bars: [45, 95, 90] },
-  medium: { label: 'MEDIUM', vmax: 1, acc: 1, turn: 1, mass: 1, bars: [70, 70, 70] },
-  heavy: { label: 'HEAVY', vmax: 1.05, acc: 0.88, turn: 0.92, mass: 1.3, bars: [95, 45, 50] },
+  light: { label: 'w.light', vmax: 0.96, acc: 1.15, turn: 1.1, mass: 0.8, bars: [45, 95, 90] },
+  medium: { label: 'w.medium', vmax: 1, acc: 1, turn: 1, mass: 1, bars: [70, 70, 70] },
+  heavy: { label: 'w.heavy', vmax: 1.05, acc: 0.88, turn: 0.92, mass: 1.3, bars: [95, 45, 50] },
 };
 
 const HUD = `
 <canvas id="c"></canvas>
 <div id="item" class="hud panel"><canvas id="itemCanvas" width="168" height="168"></canvas><small>▲</small><div id="itemLabel"></div></div>
 <div id="standings" class="hud panel"></div>
-<div id="rightcol" class="hud"><div id="lapbox" class="panel"><div id="cupline" hidden></div><div id="lap">LAP <b>1</b>/3</div><div id="timer">0:00.00</div></div>
+<div id="rightcol" class="hud"><div id="lapbox" class="panel"><div id="cupline" hidden></div><div id="lap"></div><div id="timer">0:00.00</div></div>
 <div id="coinbox" class="panel"><i></i><b id="coinN">0</b></div></div>
 <div id="pos" class="hud">8<sup>th</sup></div>
 <div id="speedo" class="hud"><canvas id="speedCanvas" width="260" height="150"></canvas></div>
@@ -65,24 +80,27 @@ const HUD = `
 <div id="toasts" class="hud"></div>
 <div id="count" class="hud"></div>
 <div id="startTip" class="hud"></div>
-<div id="kartcard" class="hud panel"><b id="kcName"></b><span id="kcClass"></span><div class="bars"><div><i>SPEED</i><u><s></s></u></div><div><i>ACCEL</i><u><s></s></u></div><div><i>HANDLING</i><u><s></s></u></div></div></div>
-<div id="help" class="hud panel"><h2>HOW TO PLAY</h2><dl></dl><button class="btn small" type="button">GOT IT</button></div>
-<div id="wrong" class="hud">⟲ WRONG WAY</div>
+<div id="kartcard" class="hud panel"><b id="kcName"></b><span id="kcClass"></span><div class="bars"><div><i data-t="kc.speed"></i><u><s></s></u></div><div><i data-t="kc.accel"></i><u><s></s></u></div><div><i data-t="kc.handling"></i><u><s></s></u></div></div></div>
+<div id="help" class="hud panel"><h2 data-t="howto"></h2><dl></dl><button class="btn small" type="button" data-t="gotIt"></button></div>
+<div id="wrong" class="hud" data-t="wrongWay"></div>
+<div id="warn" class="hud"></div>
+<div id="finBanner" class="hud panel"><b></b><span></span><small></small></div>
 <div id="hint" class="hud"></div>
 <div id="corner" class="hud"></div>
 <pre id="stats" class="hud panel" hidden></pre>
-<div id="netwait" class="hud" hidden>WAITING FOR THE HOST…</div>
+<div id="netwait" class="hud" hidden data-t="netwait"></div>
 <div id="flash"></div>
 <div id="ink"></div>
-<div id="pad" class="ctl"><div class="ring"><div class="knob"></div></div><div class="lbl">◀ DRAG TO STEER ▶</div></div>
-<div id="btnBrake" class="ctl btn-ctl">BRAKE</div>
-<div id="btnItem" class="ctl btn-ctl"><b>ITEM</b><canvas id="btnItemCanvas" width="96" height="96"></canvas><small>▲</small></div>
+<div id="pad" class="ctl"><div class="ring"><div class="knob"></div></div><div class="lbl" data-t="padLbl"></div></div>
+<div id="btnBrake" class="ctl btn-ctl" data-t="brake"></div>
+<div id="btnLook" class="ctl btn-ctl" data-t="look"></div>
+<div id="btnItem" class="ctl btn-ctl"><b data-t="item"></b><canvas id="btnItemCanvas" width="96" height="96"></canvas><small>▲</small></div>
 <div id="btnMenu" class="ctl">☰</div>
-<div id="pause" class="overlay"><div class="card"><h1>MENU</h1><div id="pauseBtns"></div></div></div>
-<div id="rotate" class="overlay"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>FROSTLINE KART PLAYS IN LANDSCAPE</small></div></div>
-<div id="results"><div class="card"><h1 id="resTitle">FINISH!</h1><h2 id="resSub">FINAL STANDINGS</h2>
-  <div class="tables"><div><table id="resTable"></table><div id="resLaps" class="laps"></div></div><div id="cupBox" hidden><h3 id="cupSub">CUP STANDINGS</h3><table id="cupTable"></table></div></div>
-  <div class="foot" id="resFoot"></div><div id="resNext" class="next"></div></div></div>`;
+<div id="pause" class="overlay"><div class="card"><h1 data-t="menu"></h1><div id="pauseVotes" class="votes"></div><div id="pauseBtns"></div></div></div>
+<div id="rotate" class="overlay"><div><div class="phone">📱</div><span data-t="rotate"></span><small data-t="rotateSub"></small></div></div>
+<div id="results"><div class="card"><h1 id="resTitle"></h1><h2 id="resSub"></h2>
+  <div class="tables"><div><table id="resTable"></table><div id="resLaps" class="laps"></div></div><div id="cupBox" hidden><h3 id="cupSub"></h3><table id="cupTable"></table></div></div>
+  <div class="foot" id="resFoot"></div><div id="resNext" class="next"></div><div id="resVotes" class="votes"></div></div></div>`;
 
 function disposeScene(scene) {
   scene.traverse(o => {
@@ -105,13 +123,21 @@ if (touch) $('rightcol').appendChild($('map'));  // the minimap stacks under the
 const canvas = $('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: !touch, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
 const FOG_COLOR = new THREE.Color(0x3a4370);
 scene.fog = new THREE.Fog(FOG_COLOR, 160, 820);
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.3, 3200);
-const onResize = () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }; addEventListener('resize', onResize);
+const camera = new THREE.PerspectiveCamera(70, 1, 0.3, 3200);
+/* sizing follows the stage element, not the window: a ResizeObserver catches the shell showing the stage, a rotation, a split
+   screen or a docked devtools panel, and the resize event covers browsers without one. The canvas fills the stage through the
+   stylesheet; setSize only sets the drawing buffer and the camera's aspect. The HUD is DOM and lays itself out. */
+const view = { w: 0, h: 0 };
+function fit() {
+  const w = mount.clientWidth || innerWidth, h = mount.clientHeight || innerHeight; // the stage has no size while the shell still hides it
+  view.w = w; view.h = h; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+const onResize = () => fit();
+addEventListener('resize', onResize); const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(onResize) : null; ro?.observe(mount); fit();
 
 /* detail ladder: pixel ratio, point lights, pine and snow counts. Touch devices start on MEDIUM; auto mode steps down when the
    frame rate stays low mid-race (see the frame loop); L (or the touch menu) cycles auto -> HIGH -> MEDIUM -> LOW -> auto, remembered per browser. */
@@ -120,7 +146,7 @@ const defaultQuality = touch ? 1 : 0;
 let quality = defaultQuality, autoQuality = true, lowFpsT = 0, fps = 60, pineIm = null, snowRef = null;
 { let saved = null; try { saved = localStorage.getItem('lan_kart_quality'); } catch {} if (saved !== null && QUALITY[+saved]) { quality = +saved; autoQuality = false; } }
 function applyQuality() {
-  const q = QUALITY[quality]; renderer.setPixelRatio(Math.min(devicePixelRatio || 1, q.pr)); renderer.setSize(innerWidth, innerHeight);
+  const q = QUALITY[quality]; renderer.setPixelRatio(Math.min(devicePixelRatio || 1, q.pr)); fit();
   scene.traverse(o => { if (o.isPointLight) o.visible = q.lights; });
   if (pineIm) pineIm.count = Math.max(1, Math.round(pineIm.userData.total * q.pines));
   if (snowRef) snowRef.geo.setDrawRange(0, Math.round(snowRef.n * q.snow));
@@ -128,9 +154,10 @@ function applyQuality() {
 function setQuality(i, manual) { quality = clamp(i | 0, 0, QUALITY.length - 1); if (manual) { autoQuality = false; try { localStorage.setItem('lan_kart_quality', String(quality)); } catch {} } applyQuality(); }
 function cycleQuality() {
   if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; try { localStorage.removeItem('lan_kart_quality'); } catch {} setQuality(defaultQuality); }
-  toast((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 'blue');
+  toast(T('detailToast', { q: qualityName() }), 'blue');
 }
-const qualityLabel = () => 'DETAIL: ' + (autoQuality ? 'AUTO' : QUALITY[quality].name);
+const qualityName = () => T(autoQuality ? 'q.auto' : 'q.' + quality);
+const qualityLabel = () => T('detail', { q: qualityName() });
 
 scene.add(new THREE.HemisphereLight(0x8ea6ff, 0x4b5482, 1.15));
 scene.add(new THREE.AmbientLight(0x7080b0, 0.35));
@@ -386,7 +413,7 @@ function buildWorld(v) {
     const beam = new THREE.Mesh(new THREE.BoxGeometry(WALL * 2 + 4, 2.4, 1.6), dark); beam.position.y = 9.4; g.add(beam);
     const cv = document.createElement('canvas'); cv.width = 1024; cv.height = 128; const c = cv.getContext('2d');
     for (let y = 0; y < 4; y++) for (let x = 0; x < 32; x++) { c.fillStyle = (x + y) % 2 ? '#15181f' : '#f6f8ff'; c.fillRect(x * 32, y * 32, 32, 32); }
-    c.fillStyle = 'rgba(20,24,40,.9)'; c.fillRect(256, 16, 512, 96); c.fillStyle = '#ffd54a'; c.font = 'bold 72px Trebuchet MS, Arial'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('FROSTLINE', 512, 66);
+    c.fillStyle = 'rgba(20,24,40,.9)'; c.fillRect(256, 16, 512, 96); c.fillStyle = '#ffd54a'; c.font = 'bold 72px ' + FONT; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('FROSTLINE', 512, 66);
     const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
     const panel = new THREE.Mesh(new THREE.BoxGeometry(WALL * 2 + 2, 3.2, 0.5), [null, null, null, null, new THREE.MeshBasicMaterial({ map: tex }), new THREE.MeshBasicMaterial({ map: tex })].map(m => m || dark)); panel.position.y = 12.2; g.add(panel);
     for (const s of [-1, 1]) { const fl = new THREE.Mesh(new THREE.BoxGeometry(1, 0.6, 0.6), flatMat({ color: 0xfff2c0, emissive: 0xffe6a0, emissiveIntensity: 1.5 })); fl.position.set(s * 6, 8.0, 0.9); g.add(fl); }
@@ -637,7 +664,7 @@ function buildKart(def) {
 /* floating name tag for human karts */
 function makeLabel(text, color) {
   const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const c = cv.getContext('2d');
-  c.font = 'bold 34px Trebuchet MS, Arial'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = 'bold 34px ' + FONT; c.textAlign = 'center'; c.textBaseline = 'middle';
   const w = Math.min(244, c.measureText(text).width + 30);
   c.fillStyle = 'rgba(6,10,28,.72)'; c.beginPath(); c.roundRect(128 - w / 2, 8, w, 48, 12); c.fill();
   c.strokeStyle = '#' + color.toString(16).padStart(6, '0'); c.lineWidth = 4; c.stroke();
@@ -871,6 +898,19 @@ function bulletControl(k) {
   k.steer = clamp(wrapAngle(Math.atan2(RLX[j] - k.x, RLZ[j] - k.z) - k.h) * 3, -1, 1); k.throttle = 1;
 }
 /* ============================================================ AI */
+/* hazards a CPU steers around: what lies on the road (bananas, bombs) and shells rolling along it. It looks as far ahead as its
+   corner-speed lookahead reaches, scaled by skill (a hard CPU sees them sooner and keeps more clearance). */
+const DODGE_TYPES = new Set(['banana', 'bomb', 'green']), DODGE_W = 2.4, dodgeTmp = [];
+function hazardsAhead(k, reach, out) {
+  out.length = 0;
+  for (const h of hazards) {
+    if (!DODGE_TYPES.has(h.type) || h.fly || h.owner === k.id && h.age < 1) continue;
+    const s = S[h.idx], ahead = wrapHalf(h.idx * DS - k.dist); if (!s || ahead < 1 || ahead > reach) continue;
+    if (h.type === 'green' && h.vx * s.tx + h.vz * s.tz > Math.abs(k.vf)) continue; // a shell running away faster than the kart is no threat
+    out.push({ lat: (h.x - s.x) * s.lx + (h.z - s.z) * s.lz, ahead, j: h.idx });
+  }
+  return out;
+}
 function aiControl(k, dt) {
   const a = k.ai;
   a.laneTimer -= dt; if (a.laneTimer <= 0) { a.laneTimer = rr(1.5, 4.5); a.laneTarget = rr(-2.8, 2.8) * a.wander; }
@@ -879,8 +919,13 @@ function aiControl(k, dt) {
   for (const o of active) { if (o === k) continue; const dd = wrapHalf(o.dist - k.dist); if (dd > 0 && dd < bestD && Math.abs(o.lat - k.lat) < 2.6) { bestD = dd; block = o; } }
   let laneT = a.laneTarget;
   if (block) { const side = block.lat > k.lat ? -1 : 1; laneT = clamp(block.lat + side * 3.2 - RL[k.idx], -RLM - 1, RLM + 1); if (a.aggr > 0.6 && bestD < 4) laneT = block.lat - RL[k.idx]; }
-  a.lane = lerp(a.lane, clamp(laneT, -RLM - 1, RLM + 1), 1 - Math.exp(-2.2 * dt));
-  const vf = k.vf; const la = 4.5 + Math.abs(vf) * 0.34; const j = (k.idx + Math.round(la / DS)) % N;
+  // dodge: a hazard in the window pushes the lane aside at its distance (the lane is an offset from the racing line)
+  const vf = k.vf, reach = (6 + Math.abs(vf) * 1.05) * clamp((a.skill - 0.75) / 0.25, 0.45, 1.1);
+  const near = hazardsAhead(k, reach, dodgeTmp); let dodging = false;
+  if (near.length) { const j0 = near.reduce((m, h) => h.ahead < m.ahead ? h : m).j, base = RL[j0], want = base + laneT;
+    const got = dodgeLat(want, near.map(h => h.lat), DODGE_W * (0.8 + 0.3 * a.skill), HW - 0.6); if (got !== want) { laneT = got - base; dodging = true; } }
+  a.lane = lerp(a.lane, clamp(laneT, -RLM - 1, RLM + 1), 1 - Math.exp(-(dodging ? 6 : 2.2) * dt));
+  const la = 4.5 + Math.abs(vf) * 0.34; const j = (k.idx + Math.round(la / DS)) % N;
   const tx = RLX[j] + S[j].lx * a.lane, tz = RLZ[j] + S[j].lz * a.lane;
   const err = wrapAngle(Math.atan2(tx - k.x, tz - k.z) - k.h);
   k.steer = clamp(err * 2.6, -1, 1);
@@ -891,7 +936,7 @@ function aiControl(k, dt) {
   if (Math.abs(vf) < 1.5 && race.state !== 'countdown' && k.spin <= 0) a.stuck += dt; else a.stuck = 0;
   if (a.stuck > 1.3) { a.reverse = 0.9; a.stuck = 0; a.stuckCount = (a.stuckCount || 0) + 1; }
   if (a.reverse > 0) { a.reverse -= dt; k.throttle = -1; k.steer = -Math.sign(err); }
-  a.rubber = 1 + clamp((race.humanScore - k.score) / L * cpuCfg.pull, cpuCfg.rubber[0], cpuCfg.rubber[1]); // rubber-band toward the humans
+  a.rubber = race.humans ? rubberBand((race.humanMin - k.score) / L, (race.humanScore - k.score) / L, cpuCfg, a.skill) : 1; // rubber-band toward the humans (logic.js)
   // items
   if (k.item && k.roulette <= 0) {
     a.itemTimer += dt / cpuCfg.item; const ahead = active.some(o => o !== k && wrapHalf(o.dist - k.dist) > 0 && wrapHalf(o.dist - k.dist) < 45);
@@ -915,12 +960,14 @@ function aiControl(k, dt) {
 }
 
 /* ============================================================ race state */
-const race = { state: 'intro', t: 0, time: 0, laps: 3, stage: 0, shake: 0, flash: 0, placeCand: 0, placeCandT: 0, shownPlace: 0, resultsT: 0, humanScore: 0, zapCd: 0 };
+const race = { state: 'intro', t: 0, time: 0, laps: 3, stage: 0, shake: 0, flash: 0, placeCand: 0, placeCandT: 0, shownPlace: 0, resultsT: 0, humanScore: 0, humanMin: 0, humans: 0, zapCd: 0, watch: null };
 /* Grand Prix: one race per track variant, points carried across races while the same roster keeps going.
    The host banks the points when it moves the room on (auto-advance, R or the button) and tells everyone;
    `pending` holds them until the next start() so every machine agrees on the totals. */
 const CUP_POINTS = [15, 12, 10, 9, 8, 7, 6, 5];
 const series = { on: false, race: 0, total: VARIANTS.length, points: {}, last: {}, roster: '', pending: null, done: false, nextT: -1 };
+/* seconds until the host moves on once it has finished: [every human home, someone still racing]; a single race uses nextT too */
+const CUP_NEXT = [6, 20], SINGLE_NEXT = [12, 30];
 /* ============================================================ audio: kart cues on top of the shared synth */
 const sfx = (() => {
   const { beep, noise } = audio; let eng = null, engGain = null;
@@ -940,7 +987,9 @@ const sfx = (() => {
     explode() { noise(0.7, 0.8, 200, 0.4); beep(70, 0.6, 'sawtooth', 0.35); }, ink() { noise(0.4, 0.4, 600, 0.5); beep(200, 0.3, 'sine', 0.2); }, bullet() { noise(0.8, 0.5, 300, 0.3); beep(140, 0.9, 'sawtooth', 0.3); }, fire() { noise(0.15, 0.3, 1800, 0.6); beep(700, 0.1, 'square', 0.15); },
     lap() { beep(700, 0.1); beep(900, 0.1, 'square', 0.22, 0.1); beep(1200, 0.3, 'square', 0.22, 0.2); },
     star() { [523, 659, 784, 1046, 1318].forEach((f, i) => beep(f, 0.18, 'square', 0.2, i * 0.09)); }, lightning() { noise(0.8, 0.7, 900, 0.3); beep(60, 0.8, 'sawtooth', 0.35); },
-    finish() { [784, 784, 784, 1046].forEach((f, i) => beep(f, i === 3 ? 0.7 : 0.15, 'square', 0.25, i * 0.18)); }, };
+    finish() { [784, 784, 784, 1046].forEach((f, i) => beep(f, i === 3 ? 0.7 : 0.15, 'square', 0.25, i * 0.18)); },
+    warn(f) { beep(f, 0.07, 'square', 0.16); beep(f * 1.26, 0.06, 'square', 0.12, 0.07); }, // incoming: a two-note blip, pitched by how close it is
+  };
 })();
 
 /* ============================================================ music: a small chiptune loop, scheduled ahead on the shared context */
@@ -953,9 +1002,10 @@ const music = (() => {
   const freq = n => 440 * Math.pow(2, (n - 69) / 12);
   const tone = (n, t, d, type, vol) => { const o = ctx.createOscillator(), g = ctx.createGain(); o.type = type; o.frequency.value = freq(n); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + d); o.connect(g).connect(gain); o.start(t); o.stop(t + d + 0.02); };
   const hat = t => { const n = Math.floor(ctx.sampleRate * 0.03), b = ctx.createBuffer(1, n, ctx.sampleRate), dd = b.getChannelData(0); for (let i = 0; i < n; i++) dd[i] = (Math.random() * 2 - 1) * (1 - i / n); const s = ctx.createBufferSource(); s.buffer = b; const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 6000; const g = ctx.createGain(); g.gain.value = 0.2; s.connect(hp).connect(g).connect(gain); s.start(t); };
+  /* muted, or back from a stall, the clock jumps to now (logic.js resyncNext) instead of scheduling every sixteenth it missed */
   function schedule() {
-    if (!ctx || audio.muted) return; const spb = 60 / (138 * tempo) / 4;
-    while (nextT < ctx.currentTime + 0.3) { const i = step % LEAD.length; if (LEAD[i]) tone(LEAD[i], nextT, spb * 0.9, 'square', 0.5); if (BASS[i]) tone(BASS[i], nextT, spb * 0.95, 'triangle', 0.9); if (i % 2 === 0) hat(nextT); step++; nextT += spb; }
+    if (!ctx) return; nextT = resyncNext(nextT, ctx.currentTime, audio.muted); if (audio.muted) return; const spb = 60 / (138 * tempo) / 4;
+    for (let guard = 0; nextT < ctx.currentTime + 0.3 && guard < 16; guard++) { const i = step % LEAD.length; if (LEAD[i]) tone(LEAD[i], nextT, spb * 0.9, 'square', 0.5); if (BASS[i]) tone(BASS[i], nextT, spb * 0.95, 'triangle', 0.9); if (i % 2 === 0) hat(nextT); step++; nextT += spb; }
   }
   function begin() { step = 0; nextT = ctx.currentTime + 0.05; clearInterval(timer); timer = setInterval(schedule, 100); }
   return {
@@ -977,13 +1027,14 @@ function flash(color, strength = 0.6) { flashEl.style.background = color; race.f
    pressing the item key deploys them - a single one trails behind the kart, a triple orbits it - where they block incoming
    shells; releasing the key throws one (the brake key flips the default direction). Everything else fires on press.
    Rolls are weighted by the gap to the leader rather than by place. */
+/* an item's name is the strings key `item.<type>` */
 const ITEM_DEF = {
-  mushroom: { label: 'MUSHROOM' }, green: { label: 'GREEN SHELL', hold: true }, red: { label: 'RED SHELL', hold: true }, banana: { label: 'BANANA', hold: true },
-  tgreen: { label: 'TRIPLE GREEN SHELLS', base: 'green', n: 3 }, tred: { label: 'TRIPLE RED SHELLS', base: 'red', n: 3 }, tbanana: { label: 'TRIPLE BANANAS', base: 'banana', n: 3 },
-  star: { label: 'STAR' }, lightning: { label: 'LIGHTNING' }, coin: { label: 'COIN' },
-  blue: { label: 'BLUE SHELL' }, bomb: { label: 'BOB-OMB', hold: true }, blooper: { label: 'BLOOPER' }, bullet: { label: 'BULLET BILL' },
-  golden: { label: 'GOLDEN MUSHROOM', timed: 8 }, fire: { label: 'FIRE FLOWER', timed: 9 },
+  mushroom: {}, green: { hold: true }, red: { hold: true }, banana: { hold: true },
+  tgreen: { base: 'green', n: 3 }, tred: { base: 'red', n: 3 }, tbanana: { base: 'banana', n: 3 },
+  star: {}, lightning: {}, coin: {}, blue: {}, bomb: { hold: true }, blooper: {}, bullet: {},
+  golden: { timed: 8 }, fire: { timed: 9 },
 };
+const itemName = t => T('item.' + t);
 const HOLDABLE = t => !!(ITEM_DEF[t] && ITEM_DEF[t].hold);
 /* roll weights per gap bucket: 0 = leading, 1 = right behind the leader ... 5 = far behind */
 const ROLL = {
@@ -1009,7 +1060,7 @@ function rollItem(k) {
 function giveItem(k, roll) {
   const d = ITEM_DEF[roll]; k.item = d.base || roll; k.itemN = d.n || 1; k.held = false;
   if (k.kind === 'ai') { k.ai.itemTimer = 0; if (HOLDABLE(k.item)) k.held = true; } // bots deploy at once and carry the shield around
-  if (isMe(k)) { drawItemSlot(k.item, false, k.itemN); const el = $('item'); el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse'); toast(d.label + '!', 'blue'); }
+  if (isMe(k)) { drawItemSlot(k.item, false, k.itemN); const el = $('item'); el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse'); toast(T('got', { item: itemName(roll) }), 'blue'); }
 }
 function addCoins(k, n) { k.coins = clamp(k.coins + n, 0, 10); }
 function loseCoins(k, n) { const lost = Math.min(k.coins, n); k.coins -= lost; for (let i = 0; i < lost; i++) spawnP(k.x, k.y + 1, k.z, rr(-5, 5), rr(4, 8), rr(-5, 5), 0.8, 0xffd23f, 1.1, 14); }
@@ -1036,7 +1087,7 @@ function blast(x, z, r, by, cause, relay = true) {
   if (relay && online && isHost) send({ t: 'blast', x: +x.toFixed(2), z: +z.toFixed(2), r, by, c: cause });
 }
 /* a blooper inks everyone ahead of the thrower (by score) - each machine handles its own karts */
-function inkFrom(by, score) { for (const k of active) if (owned(k) && k.id !== by && k.score > score && k.star <= 0 && k.bullet <= 0) { k.ink = 6; if (isMe(k)) { toast('INKED!', 'down'); sfx.ink(); } } }
+function inkFrom(by, score) { for (const k of active) if (owned(k) && k.id !== by && k.score > score && k.star <= 0 && k.bullet <= 0) { k.ink = 6; if (isMe(k)) { toast(T('inked'), 'down'); sfx.ink(); } } }
 
 function pickRedTarget(k) {
   let target = null, best = Infinity;
@@ -1082,9 +1133,9 @@ function itemPress(k, dir = 1) {
   if (!k.item || k.roulette > 0) return;
   const t = k.item;
   if (HOLDABLE(t)) { if (!k.held) { k.held = true; if (isMe(k)) sfx.deploy(); } }
-  else if (t === 'golden') { if (k.timed <= 0) { k.timed = ITEM_DEF.golden.timed; if (isMe(k)) toast('GOLDEN MUSHROOM!', 'gold'); } k.boost = Math.max(k.boost, 1.0); if (isMe(k)) sfx.boost(); }
+  else if (t === 'golden') { if (k.timed <= 0) { k.timed = ITEM_DEF.golden.timed; if (isMe(k)) toast(T('got', { item: itemName('golden') }), 'gold'); } k.boost = Math.max(k.boost, 1.0); if (isMe(k)) sfx.boost(); }
   else if (t === 'fire') {
-    if (k.timed <= 0) { k.timed = ITEM_DEF.fire.timed; if (isMe(k)) toast('FIRE FLOWER!', 'orange'); }
+    if (k.timed <= 0) { k.timed = ITEM_DEF.fire.timed; if (isMe(k)) toast(T('got', { item: itemName('fire') }), 'orange'); }
     if (k.fireCd > 0) return; k.fireCd = 0.28;
     if (isHost) spawnHazard('fire', k, k.x, k.z, k.h, k.vf, null, dir);
     else throwRemote('fire', k, null, dir);
@@ -1106,7 +1157,7 @@ function takeOne(k) { k.itemN--; if (k.itemN <= 0) { k.item = null; k.itemN = 0;
 function shieldSpot(k, h) { if (!k.held) return null; for (const s of heldPositions(k, heldTmp)) if ((s.x - h.x) ** 2 + (s.z - h.z) ** 2 < 1.5 * 1.5) return { x: s.x, z: s.z }; return null; }
 function shieldBlock(k, spot) {
   for (let q = 0; q < 8; q++) spawnP(spot.x, k.y + 0.8, spot.z, rr(-3, 3), rr(2, 5), rr(-3, 3), 0.4, k.item === 'banana' ? 0xffe135 : 0xffffff, 0.7, 10);
-  takeOne(k); if (isMe(k)) { toast('BLOCKED!', 'up'); sfx.block(); }
+  takeOne(k); if (isMe(k)) { toast(T('blocked'), 'up'); sfx.block(); }
 }
 function dropHeld(k) {
   for (const s of heldPositions(k, heldTmp)) for (let q = 0; q < 5; q++) spawnP(s.x, k.y + 0.6, s.z, rr(-3, 3), rr(2, 5), rr(-3, 3), 0.4, 0xffffff, 0.6, 10);
@@ -1116,40 +1167,40 @@ function dropHeld(k) {
 function useItem(k) {
   const t = k.item; if (!t || k.roulette > 0 || HOLDABLE(t) || ITEM_DEF[t].timed) return;
   takeOne(k);
-  if (t === 'mushroom') { k.boost = Math.max(k.boost, 1.4); if (isMe(k)) { toast('MUSHROOM!', 'orange'); sfx.boost(); } }
-  else if (t === 'coin') { addCoins(k, 2); k.boost = Math.max(k.boost, 0.35); if (isMe(k)) { toast('+2 COINS', 'gold'); sfx.coin(); } }
-  else if (t === 'star') { k.star = 7.5; if (isMe(k)) { toast('★ STAR POWER!', 'gold'); sfx.star(); } }
-  else if (t === 'bullet') { k.bullet = 6; k.held = false; if (isMe(k)) { toast('BULLET BILL!', 'gold'); flash('#ffffff', 0.3); } sfx.bullet(); }
+  if (t === 'mushroom') { k.boost = Math.max(k.boost, 1.4); if (isMe(k)) { toast(T('got', { item: itemName('mushroom') }), 'orange'); sfx.boost(); } }
+  else if (t === 'coin') { addCoins(k, 2); k.boost = Math.max(k.boost, 0.35); if (isMe(k)) { toast(T('coins2'), 'gold'); sfx.coin(); } }
+  else if (t === 'star') { k.star = 7.5; if (isMe(k)) { toast(T('starPower'), 'gold'); sfx.star(); } }
+  else if (t === 'bullet') { k.bullet = 6; k.held = false; if (isMe(k)) { toast(T('got', { item: itemName('bullet') }), 'gold'); flash('#ffffff', 0.3); } sfx.bullet(); }
   else if (t === 'blue') {
     if (isHost) spawnHazard('blue', k, k.x, k.z, k.h, k.vf, null, 1);
     else throwRemote('blue', k, null, 1);
-    if (isMe(k)) { toast('BLUE SHELL!', 'blue'); sfx.throwIt(); }
+    if (isMe(k)) { toast(T('got', { item: itemName('blue') }), 'blue'); sfx.throwIt(); }
   }
   else if (t === 'blooper') {
     inkFrom(k.id, k.score); if (online) send({ t: 'ink', by: k.id, sc: +k.score.toFixed(2) });
-    if (isMe(k)) { toast('BLOOPER!', 'blue'); sfx.ink(); }
+    if (isMe(k)) { toast(T('got', { item: itemName('blooper') }), 'blue'); sfx.ink(); }
   }
   else if (t === 'lightning') {
     race.zapCd = 25;
     for (const o of active) if (o !== k && owned(o)) hitKart(o, 'lightning', k.id);
     if (online) send({ t: 'zap', by: k.id });
-    if (isMe(k)) { toast('⚡ LIGHTNING!', 'gold'); flash('#ffffff', 0.5); } sfx.lightning(); if (!isMe(k) && me.star <= 0) flash('#ffff80', 0.7);
+    if (isMe(k)) { toast(T('zap'), 'gold'); flash('#ffffff', 0.5); } sfx.lightning(); if (!isMe(k) && me.star <= 0) flash('#ffff80', 0.7);
   }
 }
 
 /* `by` is the id of the kart responsible, if any */
-const HIT_TOAST = { lightning: 'ZAPPED!', banana: 'SLIPPED!', star: 'BOWLED OVER!', bullet: 'RUN DOWN!', blue: 'BLUE SHELLED!', bomb: 'KABOOM!', fire: 'BURNED!' };
+const HIT_TOAST = new Set(['lightning', 'banana', 'star', 'bullet', 'blue', 'bomb', 'fire']); // the rest read `hit.shell`
 function hitKart(k, cause, by) {
   if (k.star > 0 || k.bullet > 0) return; if (k.hitCd > 0 && cause !== 'lightning') return;
   k.spin = cause === 'lightning' ? 1.0 : cause === 'fire' ? 0.9 : cause === 'blue' ? 2.0 : 1.5; k.spinAng = 0; k.hitCd = 2.4; k.boost = 0;
   if (cause === 'lightning') { k.shrink = 5.5; }
   loseCoins(k, 3); if (k.held) dropHeld(k);
   hitBurst(k, cause);
-  if (isMe(k)) { flash(cause === 'lightning' ? '#ffff60' : cause === 'bomb' || cause === 'blue' ? '#ffa030' : '#ff2030', 0.65); race.shake = cause === 'blue' || cause === 'bomb' ? 0.9 : 0.6; toast(HIT_TOAST[cause] || 'HIT!', 'down'); sfx.hit(); }
+  if (isMe(k)) { flash(cause === 'lightning' ? '#ffff60' : cause === 'bomb' || cause === 'blue' ? '#ffa030' : '#ff2030', 0.65); race.shake = cause === 'blue' || cause === 'bomb' ? 0.9 : 0.6; toast(T('hit.' + (HIT_TOAST.has(cause) ? cause : 'shell')), 'down'); sfx.hit(); }
   else if (by === me.id && cause !== 'lightning') niceShot();
 }
 function hitBurst(k, cause) { for (let i = 0; i < 14; i++) spawnP(k.x, k.y + 0.8, k.z, rr(-6, 6), rr(3, 9), rr(-6, 6), rr(0.4, 0.8), cause === 'lightning' ? 0xffff60 : 0xffb070, 1, 14); }
-function niceShot() { toast('NICE SHOT!', 'up'); sfx.up(); }
+function niceShot() { toast(T('niceShot'), 'up'); sfx.up(); }
 
 function killHazard(i) { const h = hazards[i]; hazBurst(h); scene.remove(h.mesh); hazards.splice(i, 1); }
 const BLAST_R = { bomb: 5.5, blue: 6 };
@@ -1324,32 +1375,47 @@ function clearHazards() {
 /* ============================================================ laps / finish */
 const fmtT = fmtTime;
 function onLapLine(k) {
-  if (race.state === 'intro' || race.state === 'countdown') return;
+  if (race.state === 'intro' || race.state === 'countdown' || k.finished) return; // a finished kart drives on (the AI takes it) but its time stands
   k.lap++;
   if (k.lap > 1) k.lapTimes.push(race.time - k.lapStart); k.lapStart = race.time;
   if (k.lap > race.laps) { k.finished = true; k.finishTime = race.time; if (isMe(k)) finishPlayer(); }
-  else if (isMe(k) && k.lap === race.laps && race.laps > 1) { toast('FINAL LAP!', 'orange'); $('lapbox').classList.add('final'); sfx.lap(); music.setTempo(1.12); }
-  else if (isMe(k) && k.lap > 1) { toast(`LAP ${k.lap}  ·  ` + fmtT(k.lapTimes[k.lapTimes.length - 1]), 'blue'); sfx.lap(); }
+  else if (isMe(k) && k.lap === race.laps && race.laps > 1) { toast(T('finalLap'), 'orange'); $('lapbox').classList.add('final'); sfx.lap(); music.setTempo(1.12); }
+  else if (isMe(k) && k.lap > 1) { toast(T('lapToast', { n: k.lap, t: fmtT(k.lapTimes[k.lapTimes.length - 1]) }), 'blue'); sfx.lap(); }
 }
+/* After the line: a small banner (place, time, what comes next) while the camera follows the leading kart still racing, until
+   everyone is home or RESULTS_WAIT runs out, then the full results. SPACE / a tap on the banner skips straight to them. */
+const RESULTS_WAIT = 15, RESULTS_ALL_HOME = 1.6;
 function finishPlayer() {
-  race.state = 'finished'; race.resultsT = 1.6; toast('FINISH!', 'gold'); music.stop(); sfx.finish(); flash('#ffffff', 0.4);
+  race.state = 'finished'; race.resultsT = RESULTS_WAIT; toast(T('finish'), 'gold'); music.stop(); sfx.finish(); flash('#ffffff', 0.4);
   for (let i = 0; i < 60; i++) spawnP(me.x + rr(-6, 6), me.y + rr(1, 6), me.z + rr(-6, 6), rr(-4, 4), rr(2, 10), rr(-4, 4), rr(0.8, 1.6), CROWD_COLORS[i % CROWD_COLORS.length], 1.2, 8);
+  finEl.classList.add('show'); drawBanner(true);
 }
-const nameCell = k => `<span class="sw" style="background:#${k.color.toString(16).padStart(6, '0')}"></span>${esc(k.name)}${k.kind === 'ai' ? ' <span class="cpu">CPU</span>' : ''}`;
+const resultsShown = () => $('results').classList.contains('show');
+function showResults() { race.resultsT = 0; finEl.classList.remove('show'); if (!resultsShown()) { $('results').classList.add('show'); renderResults(); } }
+const finEl = $('finBanner'); let bannerKey = '';
+function drawBanner(force) {
+  if (!finEl.classList.contains('show')) return;
+  const w = race.watch, key = [me.place, w ? w.id : -1, nextLine(), isZh()].join('|'); if (key === bannerKey && !force) return; bannerKey = key;
+  finEl.querySelector('b').textContent = T('finBanner', { place: ord(me.place), time: fmtT(me.finishTime) });
+  finEl.querySelector('span').textContent = [w ? T('watching', { name: w.name }) : '', nextLine()].filter(Boolean).join('  ·  ');
+  finEl.querySelector('small').textContent = T(touch ? 'skipTap' : 'skipKeys');
+}
+finEl.addEventListener('click', () => { if (race.state === 'finished') showResults(); });
+const nameCell = k => `<span class="sw" style="background:#${k.color.toString(16).padStart(6, '0')}"></span>${esc(k.name)}${k.kind === 'ai' ? ` <span class="cpu">${T('cpu')}</span>` : ''}`;
 function renderResults() {
   const sorted = active.slice().sort((a, b) => b.score - a.score), cup = series.on;
   const prov = {}; sorted.forEach((k, i) => { prov[k.id] = CUP_POINTS[i] || 0; }); // this race's points, provisional until the host banks them
   const earned = cup && series.done ? series.last : prov;
-  $('resTable').innerHTML = sorted.map((k, i) => `<tr class="${isMe(k) ? 'me' : ''}"><td>${ordinal(i + 1)}</td><td>${nameCell(k)}</td><td class="t">${k.finished ? fmtT(k.finishTime) : 'racing…'}</td><td class="t dim">${k.coins} ¢</td>${cup ? `<td class="t pts">+${earned[k.id] ?? 0}</td>` : ''}</tr>`).join('');
+  $('resTable').innerHTML = sorted.map((k, i) => `<tr class="${isMe(k) ? 'me' : ''}"><td>${ord(i + 1)}</td><td>${nameCell(k)}</td><td class="t">${k.finished ? fmtT(k.finishTime) : T('racing')}</td><td class="t dim">${k.coins} ¢</td>${cup ? `<td class="t pts">+${earned[k.id] ?? 0}</td>` : ''}</tr>`).join('');
   const pp = sorted.indexOf(me) + 1;
-  $('resSub').textContent = `YOU FINISHED ${ordinal(pp).toUpperCase()} · ${fmtT(me.finishTime)}` + (me.lapTimes.length ? ` · BEST LAP ${fmtT(Math.min(...me.lapTimes))}` : '');
-  $('resLaps').textContent = me.lapTimes.length > 1 ? 'LAPS  ' + me.lapTimes.map(fmtT).join('  ·  ') : '';
-  $('resTitle').textContent = cup ? (series.done ? '🏆 GRAND PRIX' : `RACE ${series.race + 1} OF ${series.total}`) : 'FINISH!';
+  $('resSub').textContent = T('youFinished', { place: ord(pp), time: fmtT(me.finishTime) }) + (me.lapTimes.length ? T('bestLap', { t: fmtT(Math.min(...me.lapTimes)) }) : '');
+  $('resLaps').textContent = me.lapTimes.length > 1 ? T('laps', { list: me.lapTimes.map(fmtT).join('  ·  ') }) : '';
+  $('resTitle').textContent = cup ? (series.done ? T('grandPrix') : T('raceOf', { n: series.race + 1, of: series.total })) : T('finish');
   $('cupBox').hidden = !cup;
   if (cup) {
     const totals = active.map(k => ({ k, pts: (series.points[k.id] || 0) + (series.done ? 0 : prov[k.id]), tie: earned[k.id] || 0 })).sort((a, b) => b.pts - a.pts || b.tie - a.tie);
-    $('cupSub').textContent = series.done ? 'FINAL STANDINGS' : `CUP STANDINGS · AFTER RACE ${series.race + 1} OF ${series.total}`;
-    $('cupTable').innerHTML = totals.map((t, i) => `<tr class="${isMe(t.k) ? 'me' : ''}${series.done && i === 0 ? ' win' : ''}"><td>${series.done && i === 0 ? '🏆' : ordinal(i + 1)}</td><td>${nameCell(t.k)}</td><td class="t pts">${t.pts}</td></tr>`).join('');
+    $('cupSub').textContent = series.done ? T('finalStandings') : T('cupAfter', { n: series.race + 1, of: series.total });
+    $('cupTable').innerHTML = totals.map((t, i) => `<tr class="${isMe(t.k) ? 'me' : ''}${series.done && i === 0 ? ' win' : ''}"><td>${series.done && i === 0 ? '🏆' : ord(i + 1)}</td><td>${nameCell(t.k)}</td><td class="t pts">${t.pts}</td></tr>`).join('');
   }
 }
 /* host / solo: bank this race's points; returns true when that was the last race of the cup */
@@ -1368,8 +1434,8 @@ function nextRace() {
   hooks.onRestart?.();
 }
 function restartKey() {
-  if (online && !isHost) return;
-  if (series.on && !series.done && race.state !== 'finished') { toast('FINISH THE RACE FIRST', 'blue'); return; }
+  if (online && !isHost) { setRematch(!rematchOn); return; } // a guest's R asks the host for another round
+  if (series.on && !series.done && race.state !== 'finished') { toast(T('finishFirst'), 'blue'); return; }
   nextRace();
 }
 
@@ -1378,10 +1444,10 @@ function resetRace() {
   clearHazards();
   for (const b of itemBoxes) { b.active = true; b.g.visible = true; b.hideUntil = 0; }
   for (const c of coins) { c.active = true; c.hideUntil = 0; }
-  Object.assign(race, { state: 'countdown', t: 0, time: 0, stage: 0, shake: 0, placeCand: active.length, placeCandT: 0, shownPlace: active.length, resultsT: 0, humanScore: 0, zapCd: 0 });
-  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length);
+  Object.assign(race, { state: 'countdown', t: 0, time: 0, stage: 0, shake: 0, placeCand: active.length, placeCandT: 0, shownPlace: active.length, resultsT: 0, humanScore: 0, humanMin: 0, humans: 0, zapCd: 0, watch: null });
+  $('results').classList.remove('show'); finEl.classList.remove('show'); setWarn(''); $('lapbox').classList.remove('final'); toasts.clear(); drawItemSlot(null); setGantry(0); setPosHud(active.length);
   holds.clear(); brakeMuted = false; input.up = input.down = input.left = input.right = false; tc.releaseAll(); drawStartTip();
-  showHelp(touch && !helpSeen);                                 // the very first race on this device explains the controls
+  showHelp(!helpSeen && me.kind === 'local');                  // the very first race on this device explains the controls
   music.stop(); music.setTempo(1);
   karts.forEach(k => { k.startDelay = k.kind === 'ai' ? rr(0.05, 0.45) : 0; });
   camState.pos.copy(trackPoint(L - 40, 0)).add(new THREE.Vector3(0, 8, 0)); camState.init = true;
@@ -1404,11 +1470,13 @@ function drawItemIcon(c, type, cx, cy, r) {
   else if (type === 'fire') { c.strokeStyle = '#2f9e44'; c.lineWidth = r * 0.14; c.beginPath(); c.moveTo(0, r * 0.2); c.lineTo(0, r); c.stroke(); c.strokeStyle = '#1a1e30'; c.lineWidth = r * 0.1; c.fillStyle = '#ff7a1a'; for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2; c.beginPath(); c.ellipse(Math.cos(a) * r * 0.5, Math.sin(a) * r * 0.5 - r * 0.2, r * 0.3, r * 0.2, a, 0, 7); c.fill(); c.stroke(); } c.fillStyle = '#ffe94a'; c.beginPath(); c.arc(0, -r * 0.2, r * 0.32, 0, 7); c.fill(); c.stroke(); c.fillStyle = '#222'; c.beginPath(); c.arc(-r * 0.1, -r * 0.25, r * 0.05, 0, 7); c.arc(r * 0.1, -r * 0.25, r * 0.05, 0, 7); c.fill(); }
   c.restore();
 }
+let slotShown = { type: null, spinning: false, n: 1, ring: 0 }; // redrawn as it was when the language changes
 function drawItemSlot(type, spinning = false, n = 1, ring = 0) {
   const c = itemCtx; c.clearRect(0, 0, 168, 168); if (type) { c.globalAlpha = spinning ? 0.75 : 1; drawItemIcon(c, type, 84, 84, 58); c.globalAlpha = 1; }
   if (ring > 0) { c.strokeStyle = '#ffd54a'; c.lineWidth = 7; c.lineCap = 'round'; c.beginPath(); c.arc(84, 84, 78, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ring); c.stroke(); } // time left on a timed item
-  if (type && !spinning && n > 1) { c.fillStyle = '#ffd54a'; c.strokeStyle = '#1a1e30'; c.lineWidth = 6; c.font = 'italic 900 44px Trebuchet MS, Arial'; c.textAlign = 'right'; c.textBaseline = 'alphabetic'; c.strokeText('×' + n, 160, 160); c.fillText('×' + n, 160, 160); }
-  $('itemLabel').textContent = type && !spinning ? ITEM_DEF[type].label + (n > 1 ? ' ×' + n : '') : (spinning ? '???' : '');
+  if (type && !spinning && n > 1) { c.fillStyle = '#ffd54a'; c.strokeStyle = '#1a1e30'; c.lineWidth = 6; c.font = 'italic 900 44px ' + FONT; c.textAlign = 'right'; c.textBaseline = 'alphabetic'; c.strokeText('×' + n, 160, 160); c.fillText('×' + n, 160, 160); }
+  $('itemLabel').textContent = type && !spinning ? itemName(type) + (n > 1 ? ' ×' + n : '') : (spinning ? '???' : '');
+  slotShown = { type, spinning, n, ring };
   if (btnItemCtx) { btnItemCtx.clearRect(0, 0, 96, 96); if (type && !spinning) drawItemIcon(btnItemCtx, type, 48, 48, 32); } // the touch ITEM button shows the same icon
 }
 /* coins: instanced, spinning, hidden while collected */
@@ -1431,7 +1499,7 @@ function drawSpeedo(speed, boosting) {
   c.lineWidth = 12; c.beginPath(); c.arc(cx, cy, R, a0, a2); c.stroke();
   c.strokeStyle = 'rgba(255,255,255,.5)'; c.lineWidth = 2; for (let i = 0; i <= 10; i++) { const a = a0 + (a1 - a0) * i / 10; c.beginPath(); c.moveTo(cx + Math.cos(a) * (R - 14), cy + Math.sin(a) * (R - 14)); c.lineTo(cx + Math.cos(a) * (R - 22), cy + Math.sin(a) * (R - 22)); c.stroke(); }
   const na = a0 + (a1 - a0) * f; c.strokeStyle = '#fff'; c.lineWidth = 4; c.beginPath(); c.moveTo(cx, cy); c.lineTo(cx + Math.cos(na) * (R - 26), cy + Math.sin(na) * (R - 26)); c.stroke(); c.fillStyle = '#fff'; c.beginPath(); c.arc(cx, cy, 6, 0, 7); c.fill();
-  c.fillStyle = boosting ? '#ffb060' : '#fff'; c.font = 'italic 900 40px Trebuchet MS, Arial'; c.textAlign = 'center'; c.fillText(Math.round(Math.abs(speed) * 3.3), cx, cy + 4); c.font = 'bold 13px Trebuchet MS, Arial'; c.fillStyle = 'rgba(255,255,255,.75)'; c.fillText(boosting ? 'BOOST' : 'km/h', cx, cy + 22);
+  c.fillStyle = boosting ? '#ffb060' : '#fff'; c.font = 'italic 900 40px ' + FONT; c.textAlign = 'center'; c.fillText(Math.round(Math.abs(speed) * 3.3), cx, cy + 4); c.font = 'bold 13px ' + FONT; c.fillStyle = 'rgba(255,255,255,.75)'; c.fillText(T(boosting ? 'boost' : 'kmh'), cx, cy + 22);
 }
 const mapCanvas = $('mapCanvas'), mapCtx = mapCanvas.getContext('2d');
 function drawMap() {
@@ -1440,7 +1508,7 @@ function drawMap() {
   for (const k of order) { const x = mapX(k.x), z = mapZ(k.z), mine = isMe(k), human = k.kind !== 'ai'; c.beginPath(); c.arc(x, z, mine ? 11 : human ? 9 : 8, 0, 7); c.fillStyle = '#' + k.color.toString(16).padStart(6, '0'); c.fill(); c.lineWidth = mine ? 4 : human ? 3 : 2; c.strokeStyle = mine || human ? '#fff' : 'rgba(0,0,0,.6)'; c.stroke(); if (k.item) { c.fillStyle = '#fff'; c.beginPath(); c.arc(x, z, 2.5, 0, 7); c.fill(); } }
 }
 const posEl = $('pos');
-function setPosHud(p) { posEl.innerHTML = `${p}<sup>${ordinal(p).slice(-2)}</sup>`; posEl.className = 'hud p' + p; posEl.classList.add('bump'); setTimeout(() => posEl.classList.remove('bump'), 160); }
+function setPosHud(p) { posEl.innerHTML = isZh() ? `<sup>第</sup>${p}` : `${p}<sup>${ordinal(p).slice(-2)}</sup>`; posEl.className = 'hud p' + p; posEl.classList.add('bump'); setTimeout(() => posEl.classList.remove('bump'), 160); }
 /* live standings column: every racer by place, refreshed a few times a second */
 const standEl = $('standings'); let standN = 0, standKey = '';
 function drawStandings() {
@@ -1470,14 +1538,15 @@ const holdOff = src => holds.delete(src);
 const holdAge = () => { let a = Infinity; for (const h of holds.values()) a = Math.min(a, Math.max(0, Math.min(nowSec() - h.real, race.t - h.race))); return a; };
 const rocketHeld = () => holdAge() < ROCKET_WINDOW;
 const rocketEarly = () => holds.size > 0 && !rocketHeld();
-const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'item', Enter: 'item', KeyE: 'item' }, {
-  onDown: (name, e, wasHeld) => { audio.init(); if (name === 'up' && !wasHeld) holdOn('key'); if (name === 'item' && !wasHeld && canAct()) itemPress(me); },
+const kb = createInput({ ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'item', Enter: 'item', KeyE: 'item', KeyC: 'back' }, {
+  onDown: (name, e, wasHeld) => { audio.init(); if (name === 'up' && !wasHeld) holdOn('key'); if (name === 'item' && !wasHeld && canAct()) itemPress(me);
+    if (name === 'item' && !wasHeld && race.state === 'finished' && finEl.classList.contains('show')) showResults(); }, // SPACE on the finish banner: the results now
   onUp: name => { if (name === 'up') holdOff('key'); if (name === 'item' && canAct()) itemRelease(me, throwDir(me, input.down)); },
   onKey: e => {
     audio.init();
     if (e.code === 'KeyR') restartKey();
-    if (e.code === 'Escape') hooks.onExit?.();
-    if (e.code === 'KeyM') toast(audio.toggle() ? 'SOUND OFF' : 'SOUND ON', 'blue');
+    if (e.code === 'Escape') showMenu(!pauseEl.classList.contains('show')); // the menu holds the way out, so a stray ESC never ends the room's race
+    if (e.code === 'KeyM') { toast(T(audio.toggle() ? 'soundOffToast' : 'soundOnToast'), 'blue'); if (pauseEl.classList.contains('show')) renderMenu(); }
     if (e.code === 'F3' || e.code === 'KeyI') { e.preventDefault(); toggleStats(); }
     if (e.code === 'KeyL') cycleQuality();
   },
@@ -1491,22 +1560,25 @@ const tc = createTouch();
 const ITEM_FLIP_PX = 36;
 /* how far the thumb travels for full lock; a smaller range steers harder. The pad's dead zone swallows the wobble of a
    thumb landing and its curve keeps the first few degrees fine, so a small correction stays small. */
-const STEER = [{ name: 'LOW', range: 112 }, { name: 'NORMAL', range: 78 }, { name: 'HIGH', range: 56 }];
+const STEER = [{ name: 'LOW', range: 112 }, { name: 'NORMAL', range: 78 }, { name: 'HIGH', range: 56 }]; // names for the stats panel; players read `steer.<i>`
 let steerLevel = 1;
 { let saved = null; try { saved = localStorage.getItem('lan_kart_steer'); } catch {} if (saved !== null && STEER[+saved]) steerLevel = +saved; }
 const padS = touch ? tc.pad($('pad'), { range: STEER[steerLevel].range, dead: 5, curve: 1.6, onDown: () => { audio.init(); holdOn('pad'); }, onUp: () => holdOff('pad') }) : null;
 function cycleSteer() {
   steerLevel = (steerLevel + 1) % STEER.length; try { localStorage.setItem('lan_kart_steer', String(steerLevel)); } catch {}
   if (padS) padS.range = STEER[steerLevel].range;
-  toast('STEERING: ' + STEER[steerLevel].name, 'blue');
+  toast(steerLabel(), 'blue');
 }
-const steerLabel = () => 'STEERING: ' + STEER[steerLevel].name;
+const steerLabel = () => T('steering', { s: T('steer.' + steerLevel) });
 /* a thumb resting on BRAKE for the start hold must not brake the instant the lights go green: that press is ignored until it lifts */
 let brakeMuted = false;
 const brakeS = touch ? tc.button($('btnBrake'), { onDown: () => { audio.init(); holdOn('brake'); }, onUp: () => { holdOff('brake'); brakeMuted = false; } }) : null;
 const braking = () => !!(brakeS && brakeS.held && !brakeMuted);
 /* the bare screen - whatever the pad and the buttons do not cover - is a start hold and nothing else */
 const screenS = touch ? tc.button(canvas, { onDown: () => { audio.init(); holdOn('screen'); }, onUp: () => holdOff('screen') }) : null;
+/* LOOK (touch) and C (keyboard): held, the camera looks back over the kart */
+const lookS = touch ? tc.button($('btnLook'), { onDown: () => audio.init() }) : null;
+const lookingBack = () => race.state === 'race' && (input.back || !!(lookS && lookS.held));
 const shake = el => { el.classList.remove('nope'); void el.offsetWidth; el.classList.add('nope'); };
 function bindItemControl(el) {
   const s = tc.button(el, {
@@ -1536,22 +1608,20 @@ const tipEl = $('startTip'); let tipShown = '';
 function drawStartTip() {
   let txt = '', cls = 'hud';
   if (race.state === 'countdown' && race.stage >= 3 && me.kind === 'local' && !helpEl.classList.contains('show')) { // the help card says the same thing, in its place
-    if (rocketHeld()) { txt = 'BOOST READY'; cls = 'hud ok'; }
-    else if (rocketEarly()) { txt = 'TOO EARLY · LIFT AND HOLD AGAIN'; cls = 'hud bad'; }
-    else txt = touch ? 'HOLD ANYWHERE TO BOOST' : 'HOLD ↑ TO BOOST';
+    if (rocketHeld()) { txt = T('boostReady'); cls = 'hud ok'; }
+    else if (rocketEarly()) { txt = T('tooEarly'); cls = 'hud bad'; }
+    else txt = T(touch ? 'holdTouch' : 'holdKey');
   }
   const key = cls + txt; if (key === tipShown) return; tipShown = key;
   tipEl.textContent = txt; tipEl.className = cls;
 }
-/* the first race on a touch screen opens with a card explaining the controls, which steps aside at the "1" so the line
-   above has the screen; ☰ brings it back later. Only its button takes touches, so a thumb resting on the card is still a hold. */
+/* the first race on this device opens with a card explaining the controls (touch or keyboard wording), which steps aside at
+   the "1" so the line above has the screen; the menu (☰ / ESC) brings it back later. Only its button takes touches, so a thumb
+   resting on the card is still a hold. */
 const helpEl = $('help');
-helpEl.querySelector('dl').innerHTML = [
-  ['STEER', 'Drag the left half of the screen. The gas is automatic.'],
-  ['BRAKE', 'The BRAKE button. Held, it also flips a throw.'],
-  ['ITEM', 'Touch to carry, lift to throw, drag down to throw back.'],
-  ['ROCKET START', 'Hold anywhere while the 1 shows, through GO.'],
-].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+const HELP_ROWS = touch ? [['ht.steer', 'hd.steer'], ['ht.brake', 'hd.brake'], ['ht.item', 'hd.item'], ['ht.look', 'hd.lookTouch'], ['ht.rocket', 'hd.rocket']]
+  : [['ht.drive', 'hk.drive'], ['ht.item', 'hk.item'], ['ht.look', 'hk.look'], ['ht.rocket', 'hk.rocket'], ['ht.menu', 'hk.menu']];
+const drawHelp = () => { helpEl.querySelector('dl').innerHTML = HELP_ROWS.map(([k, v]) => `<dt>${esc(T(k))}</dt><dd>${esc(T(v))}</dd>`).join(''); };
 let helpSeen = false; try { helpSeen = localStorage.getItem('lan_kart_help') === '1'; } catch {}
 function showHelp(on) {
   helpEl.classList.toggle('show', on);
@@ -1564,9 +1634,13 @@ const camState = { pos: new THREE.Vector3(0, 10, -30), look: new THREE.Vector3()
 function updateCamera(dt) {
   const k = me; const fx = Math.sin(k.h), fz = Math.cos(k.h); const want = camWant, look = camLook;
   if (race.state === 'countdown') { const a = race.t * 0.45 + 2.2; want.set(k.x + Math.sin(a) * 13, k.y + 4.5 + race.t * 0.3, k.z + Math.cos(a) * 13); look.set(k.x, k.y + 1.2, k.z); }
+  else if (race.state === 'finished' && race.watch) { // the finish banner is up: chase the leading kart still racing
+    const w = race.watch, wx = Math.sin(w.h), wz = Math.cos(w.h); want.set(w.x + w.ox - wx * 11, w.y + 4.6, w.z + w.oz - wz * 11); look.set(w.x + w.ox + wx * 5, w.y + 1.4, w.z + w.oz + wz * 5); }
   else if (race.state === 'finished') { const a = timeU.value * 0.4; want.set(k.x + Math.sin(a) * 15, k.y + 6, k.z + Math.cos(a) * 15); look.set(k.x, k.y + 1, k.z); }
+  else if (lookingBack()) { want.set(k.x + fx * 7.5, k.y + 3.4, k.z + fz * 7.5); look.set(k.x - fx * 8, k.y + 1.2, k.z - fz * 8); } // the rear view
   else { const sp = clamp(Math.abs(k.vf) / VMAX, 0, 1.4); const back = 8.5 + sp * 2.2, up = 3.6 + sp * 0.4; want.set(k.x - fx * back, k.y + up, k.z - fz * back); look.set(k.x + fx * 5, k.y + 1.4, k.z + fz * 5); }
   want.y = Math.max(want.y, terrainH(want.x, want.z) + 1.4);
+  const flip = lookingBack(); if (flip !== camState.back) { camState.back = flip; camState.init = false; } // the rear view cuts, it does not swing through the kart
   const rate = race.state === 'race' ? 1 - Math.exp(-7 * dt) : 1 - Math.exp(-3 * dt);
   if (!camState.init) { camState.pos.copy(want); camState.look.copy(look); camState.init = true; }
   camState.pos.lerp(want, rate); camState.look.lerp(look, 1 - Math.exp(-12 * dt));
@@ -1604,7 +1678,7 @@ function drawStats() {
   if (!showStats) return;
   const lines = [
     `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   HUD ${timing.hud.toFixed(1)}   RENDER ${timing.render.toFixed(1)}`,
-    `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${innerWidth}X${innerHeight}   (L CYCLES)`,
+    `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   ${view.w}X${view.h}   (L CYCLES)`,
   ];
   if (touch) { // a control that stays HELD after the finger left is the bug these lines are for
     lines.push(`TOUCH    PAD ${ctlWord(padS)}   BRAKE ${ctlWord(brakeS)}${brakeMuted ? ' (MUTED)' : ''}   SCREEN ${ctlWord(screenS)}`);
@@ -1637,7 +1711,7 @@ function netTick() {
   if (ts !== lastSentTs) { // only when the simulation has moved on since the last tick
     lastSentTs = ts;
     const msg = { t: 's', ts, k: [] }; for (const k of active) if (owned(k)) msg.k.push(packMotion(k));
-    if (isHost) { msg.r = { p: race.state === 'countdown' ? 'countdown' : 'race', t: +race.t.toFixed(3), tm: +race.time.toFixed(3), nx: series.on ? +series.nextT.toFixed(1) : -1 }; msg.z = hazards.map(packHaz); }
+    if (isHost) { msg.r = { p: race.state === 'countdown' ? 'countdown' : 'race', t: +race.t.toFixed(3), tm: +race.time.toFixed(3), nx: +series.nextT.toFixed(1) }; msg.z = hazards.map(packHaz); }
     if (msg.k.length || isHost) sendCounted(msg);
   }
   let due = tickN % Math.round(NET_HZ / STATUS_HZ) === 0;
@@ -1662,6 +1736,30 @@ function syncRace(r) {
 }
 const kartOf = pid => karts.find(k => k.pid === pid && k.kind !== 'none');
 
+/* ============================================================ incoming threats
+   A red shell locked onto my kart within THREAT_R, or any blue shell in the air: a blinking line under the toasts and a blip that
+   repeats faster and higher as it closes in. The host knows a red shell's target; a guest reads it off the wire (net.js). */
+const THREAT_R = 40, warnEl = $('warn'); let warnShown = '', warnT = 0;
+const tgtId = h => h.target && typeof h.target === 'object' ? h.target.id : h.target;
+function setWarn(key) { if (key === warnShown) return; warnShown = key; warnEl.textContent = key ? T(key) : ''; warnEl.classList.toggle('show', !!key); warnEl.classList.toggle('blue', key.startsWith('warnBlue')); }
+function threatCue(dt) {
+  let key = '', d = Infinity;
+  if (race.state === 'race' && me.kind === 'local' && !me.finished) { // the most urgent wins: a blue shell on me, a red one locked on, a blue one elsewhere
+    let red = Infinity, blueMe = Infinity, blue = false;
+    const see = h => {
+      const r = Math.hypot(h.x - me.x, h.z - me.z);
+      if (h.type === 'red' && tgtId(h) === me.id && h.owner !== me.id) red = Math.min(red, r);
+      else if (h.type === 'blue') { if (tgtId(h) === me.id) blueMe = Math.min(blueMe, r); else blue = true; }
+    };
+    for (const h of hazards) see(h); for (const h of remoteHaz.values()) if (!h.ghost) see(h);
+    if (blueMe < Infinity) { key = 'warnBlueMe'; d = blueMe; } else if (red < THREAT_R) { key = 'warnRed'; d = red; } else if (blue) { key = 'warnBlue'; d = THREAT_R; }
+  }
+  setWarn(key);
+  if (!key) { warnT = 0; return; }
+  const f = 1 - clamp(d / THREAT_R, 0, 1); warnT -= dt;
+  if (warnT <= 0) { warnT = lerp(0.6, 0.12, f); sfx.warn(lerp(620, 1250, f)); }
+}
+
 /* ============================================================ main loop */
 const lapEl = $('lap'), timerEl = $('timer'), countEl = $('count'), inkEl = $('ink');
 /* simulation step: fixed-size sub-steps so game time keeps up with real time even on a slow machine */
@@ -1673,24 +1771,30 @@ function simStep(dt) {
       if (stage >= 3) showHelp(false);                           // the "1": the rocket-start line takes over from here
       countEl.className = 'hud'; void countEl.offsetWidth;
       if (stage < 4) { countEl.textContent = 4 - stage; countEl.className = 'hud show'; sfx.count(); }
-      else { countEl.textContent = 'GO!'; countEl.className = 'hud show go'; sfx.go(); race.state = 'race'; race.time = 0; $('kartcard').classList.remove('show'); showHelp(false); music.start();
+      else { countEl.textContent = T('go'); countEl.className = 'hud show go'; sfx.go(); race.state = 'race'; race.time = 0; $('kartcard').classList.remove('show'); showHelp(false); music.start();
         if (brakeS && brakeS.held) brakeMuted = true;            // that thumb was the start hold, not a brake
-        if (me.kind === 'local' && rocketHeld()) { me.boost = 1.6; toast('ROCKET START!', 'orange'); sfx.boost(); }
+        if (me.kind === 'local' && rocketHeld()) { me.boost = 1.6; toast(T('rocket'), 'orange'); sfx.boost(); }
         for (const k of active) if (k.kind === 'ai' && owned(k) && Math.random() < 0.45) k.boost = rr(0.6, 1.1); } }
   }
   if (race.state === 'race' || race.state === 'finished') race.time += dt;
   race.zapCd -= dt;
   if (race.state === 'finished') {
-    race.resultsT -= dt; if (race.resultsT <= 0 && !$('results').classList.contains('show')) { $('results').classList.add('show'); renderResults(); }
-    resultsRefresh -= dt; if (resultsRefresh <= 0 && $('results').classList.contains('show') && !series.done) { resultsRefresh = 0.5; renderResults(); }
-    if (series.on && !series.done && (isHost || !online)) { // the host moves the cup on: soon after everyone finishes, or eventually anyway
-      const all = active.every(k => k.kind === 'ai' || k.finished);
-      if (series.nextT < 0) series.nextT = all ? 6 : 20; else { if (all && series.nextT > 6) series.nextT = 6; series.nextT -= dt; if (series.nextT <= 0) { series.nextT = -1; nextRace(); } }
+    if (!resultsShown()) { // the finish banner: follow the leader of those still racing; everyone home brings the results in shortly
+      let w = null; for (const k of active) if (!k.finished && k.kind !== 'none' && (!w || k.score > w.score)) w = k; race.watch = w;
+      if (!w && race.resultsT > RESULTS_ALL_HOME) race.resultsT = RESULTS_ALL_HOME;
+      race.resultsT -= dt; if (race.resultsT <= 0) showResults();
+    } else race.watch = null;
+    resultsRefresh -= dt; if (resultsRefresh <= 0 && resultsShown() && !series.done) { resultsRefresh = 0.5; renderResults(); }
+    /* the host moves the room on by itself: the next cup race, or online a fresh single race, soon after every human is home
+       or eventually anyway. The countdown goes out with the race clock, so the guests see it too. Solo single races wait for R. */
+    if ((isHost || !online) && (series.on ? !series.done : online)) {
+      const all = active.every(k => k.kind === 'ai' || k.finished), soon = series.on ? CUP_NEXT[0] : SINGLE_NEXT[0], late = series.on ? CUP_NEXT[1] : SINGLE_NEXT[1];
+      if (series.nextT < 0) series.nextT = all ? soon : late; else { if (all && series.nextT > soon) series.nextT = soon; series.nextT -= dt; if (series.nextT <= 0) { series.nextT = -1; nextRace(); } }
     }
     drawNext();
   }
   const moving = race.state === 'race' || race.state === 'finished';
-  { let s = 0, n = 0; for (const k of active) if (k.kind !== 'ai') { s += k.score; n++; } race.humanScore = n ? s / n : 0; }
+  { let s = 0, n = 0, lo = Infinity; for (const k of active) if (k.kind !== 'ai') { s += k.score; n++; lo = Math.min(lo, k.score); } race.humanScore = n ? s / n : 0; race.humanMin = n ? lo : 0; race.humans = n; }
   // controls + physics for the karts this machine owns; everyone else is interpolated
   for (const k of active) {
     if (owned(k)) {
@@ -1706,7 +1810,7 @@ function simStep(dt) {
   const sorted = active.slice().sort((a, b) => b.score - a.score); sorted.forEach((k, i) => k.place = i + 1);
   if (race.state === 'race' && !me.finished) {
     if (me.place !== race.placeCand) { race.placeCand = me.place; race.placeCandT = 0; } else race.placeCandT += dt;
-    if (race.placeCand !== race.shownPlace && race.placeCandT > 0.22) { const up = race.placeCand < race.shownPlace; race.shownPlace = race.placeCand; setPosHud(race.shownPlace); toast((up ? '▲ ' : '▼ ') + ordinal(race.shownPlace).toUpperCase(), up ? 'up' : 'down'); up ? sfx.up() : sfx.down(); }
+    if (race.placeCand !== race.shownPlace && race.placeCandT > 0.22) { const up = race.placeCand < race.shownPlace; race.shownPlace = race.placeCand; setPosHud(race.shownPlace); toast((up ? '▲ ' : '▼ ') + ord(race.shownPlace), up ? 'up' : 'down'); up ? sfx.up() : sfx.down(); }
   }
 }
 /* once per rendered frame: visuals every frame, the HUD at 20 Hz and only the parts that changed */
@@ -1717,14 +1821,16 @@ function present(dt) {
   updateCamera(dt); updateParticles(dt); updateAmbient(dt); drawCoins();
   if (race.flash > 0) { race.flash -= dt * 1.8; flashEl.style.opacity = Math.max(race.flash, 0); }
   sfx.engine(Math.abs(me.vf), me.boost > 0);
+  threatCue(dt);
   hudAcc += dt; if (hudAcc >= 0.05) { hudAcc = hudAcc > 0.5 ? 0 : hudAcc - 0.05; hudRefresh(); }
 }
 function hudRefresh() {
-  const lapTxt = `LAP <b>${clamp(me.lap, 1, race.laps)}</b>/${race.laps}`; if (lapTxt !== lapShown) { lapShown = lapTxt; lapEl.innerHTML = lapTxt; }
+  const lapTxt = T('lap', { n: clamp(me.lap, 1, race.laps), of: race.laps }); if (lapTxt !== lapShown) { lapShown = lapTxt; lapEl.innerHTML = lapTxt; }
   timerEl.textContent = fmtT(race.time);
   drawSpeedo(me.vf, me.boost > 0); drawMap(); drawStandings(); drawCoinHud(); drawTouchHud(); drawStartTip();
   if (me.item && ITEM_DEF[me.item].timed && me.timed > 0) drawItemSlot(me.item, false, 1, me.timed / ITEM_DEF[me.item].timed);
   const ink = me.ink > 0 ? clamp(me.ink / 1.5, 0, 1) : 0; if (ink !== inkShown) { inkShown = ink; inkEl.style.opacity = ink; }
+  drawBanner();
   const wrong = me.wrongWay > 0.8 && race.state === 'race'; if (wrong !== wrongShown) { wrongShown = wrong; wrongEl.style.display = wrong ? 'block' : 'none'; }
   waitEl.hidden = !(online && !isHost && hostSeen > 0 && nowSec() - hostSeen > 0.8);
   netSample(); statsAcc += 0.05; if (statsAcc >= 0.25) { statsAcc = 0; drawStats(); }
@@ -1739,7 +1845,7 @@ const loop = createLoop((real, now) => {
   timing.sim = lerp(timing.sim, t1 - t0, 0.1); timing.hud = lerp(timing.hud, t2 - t1, 0.1); timing.render = lerp(timing.render, t3 - t2, 0.1); timing.frame = lerp(timing.frame, real * 1000, 0.1);
   fps = lerp(fps, 1 / Math.max(real, 1e-3), 0.05);
   if (autoQuality && race.state === 'race' && race.time > 3) { // detail steps down by itself when the frame rate stays low
-    if (fps < 40) { lowFpsT += real; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; toast('LOW FRAME RATE · ' + QUALITY[quality].name + ' DETAIL', 'blue'); } } else lowFpsT = 0;
+    if (fps < 40) { lowFpsT += real; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; toast(T('lowFps', { q: T('q.' + quality) }), 'blue'); } } else lowFpsT = 0;
   }
 });
 karts.forEach((k, i) => resetKart(k, i)); karts.forEach(k => kartVisual(k, 0.016));
@@ -1754,33 +1860,58 @@ function slotsFor({ players, opts }) {
   for (const p of players) if (SKINS[p.avatar]) slots[p.avatar] = { kind: 'human', id: p.id, name: p.name };
   return slots;
 }
+/* the result screen's buttons: the host (and solo) moves on or leaves; a guest asks for a rematch (R too) or leaves the room */
+const keyTag = (label, key) => touch ? label : `${label}  (${key})`;
 function renderFoot() {
   const f = $('resFoot'); f.innerHTML = '';
   const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
-  const again = series.on ? (series.done ? 'NEW CUP  (R)' : 'NEXT RACE  (R)') : 'RACE AGAIN  (R)';
-  if (!online) { btn(again, 'primary', restartKey); btn('MENU  (ESC)', '', () => hooks.onExit?.()); }
-  else if (isHost) { btn(again, 'primary', restartKey); btn('BACK TO LOBBY  (ESC)', '', () => hooks.onExit?.()); }
-  else f.textContent = series.on && !series.done ? 'THE NEXT RACE STARTS WHEN EVERYONE HAS FINISHED…' : 'WAITING FOR THE HOST TO RESTART OR RETURN TO THE LOBBY…';
+  const again = keyTag(T(series.on ? (series.done ? 'newCup' : 'nextRace') : 'raceAgain'), 'R');
+  if (!online) { btn(again, 'primary', restartKey); btn(T('quit'), '', () => hooks.onExit?.()); }
+  else if (isHost) { btn(again, 'primary', restartKey); btn(T('toLobby'), '', () => hooks.onExit?.()); }
+  else { btn(keyTag(T(rematchOn ? 'rematchOn' : 'rematch'), 'R'), rematchOn ? 'primary' : '', () => setRematch(!rematchOn)); btn(T('leave'), '', () => hooks.onLeave?.()); }
 }
-/* touch: the ☰ button opens a card with what R, ESC, M and L do on a keyboard; the race keeps running underneath */
+/* a guest's rematch vote goes to the shell (and on to the host); it is cleared by the next start() */
+let rematchOn = false;
+function setRematch(on) { rematchOn = !!on; hooks.onRematch?.(rematchOn); renderFoot(); if (pauseEl.classList.contains('show')) renderMenu(); }
+/* the host hears who wants another round: a toast when the count goes up, a line on the result card and in the menu */
+let votes = [];
+function rematchVotes(ids) {
+  const n = (ids || []).length, more = n > votes.length; votes = (ids || []).slice();
+  if (more && isHost && online) toast(votesText(), 'blue');
+  drawVotes();
+}
+const votesText = () => votes.length ? T(votes.length === 1 ? 'votes1' : 'votesN', { n: votes.length }) : '';
+function drawVotes() { const t = isHost && online ? votesText() : ''; $('resVotes').textContent = t; $('pauseVotes').textContent = t; }
+/* the menu: ☰ on a touch screen, ESC on a keyboard; the race keeps running underneath */
 const pauseEl = $('pause');
 function renderMenu() {
   const f = $('pauseBtns'); f.innerHTML = '';
   const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
-  btn('RESUME', 'primary', () => showMenu(false));
-  btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); renderMenu(); });
+  btn(T('resume'), 'primary', () => showMenu(false));
+  btn(T(audio.muted ? 'soundOff' : 'soundOn'), '', () => { audio.toggle(); renderMenu(); });
   btn(qualityLabel(), '', () => { cycleQuality(); renderMenu(); });
-  if (touch) { btn(steerLabel(), '', () => { cycleSteer(); renderMenu(); }); btn('HOW TO PLAY', '', () => { showMenu(false); showHelp(true); }); }
-  btn(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { toggleStats(); renderMenu(); });
-  if (!online || isHost) { btn(series.on ? (series.done ? 'NEW CUP' : 'NEXT RACE') : 'RESTART', '', () => { showMenu(false); restartKey(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
+  if (touch) btn(steerLabel(), '', () => { cycleSteer(); renderMenu(); });
+  btn(T('howto'), '', () => { showMenu(false); showHelp(true); });
+  btn(T('lang'), '', () => nextLang());
+  btn(T(showStats ? 'statsOn' : 'statsOff'), '', () => { toggleStats(); renderMenu(); });
+  if (!online || isHost) { btn(T(series.on ? (series.done ? 'newCup' : 'nextRace') : 'restart'), '', () => { showMenu(false); restartKey(); }); btn(T(!online ? 'quit' : 'toLobby'), '', () => { showMenu(false); hooks.onExit?.(); }); }
+  else { btn(T(rematchOn ? 'rematchOn' : 'rematch'), rematchOn ? 'primary' : '', () => setRematch(!rematchOn)); btn(T('leave'), '', () => { showMenu(false); hooks.onLeave?.(); }); }
+  drawVotes();
 }
 function showMenu(on) { pauseEl.classList.toggle('show', on); if (on) renderMenu(); }
-if (touch) { $('btnMenu').addEventListener('click', () => { audio.init(); showMenu(!pauseEl.classList.contains('show')); }); pauseEl.addEventListener('click', e => { if (e.target === pauseEl) showMenu(false); }); }
-let nextShown = '';
-function drawNext() {
-  const txt = series.on && !series.done && series.nextT >= 0 && race.state === 'finished' ? `NEXT RACE IN ${Math.ceil(series.nextT)}` : '';
-  if (txt !== nextShown) { nextShown = txt; $('resNext').textContent = txt; }
+$('btnMenu').addEventListener('click', () => { audio.init(); showMenu(!pauseEl.classList.contains('show')); });
+pauseEl.addEventListener('click', e => { if (e.target === pauseEl) showMenu(false); });
+/* what comes after this race, for the result card and the finish banner: the host's countdown (it rides on the race clock), or a
+   guest's word on what the host is doing */
+function nextLine() {
+  if (race.state !== 'finished' || series.done) return '';
+  if (series.nextT >= 0) return T(series.on ? 'nextRaceIn' : 'newRaceIn', { n: Math.ceil(series.nextT) });
+  if (!online || isHost) return '';
+  const host = session && kartOf(session.hostId);
+  return host && !host.finished ? T('waitHostRacing') : T(series.on ? 'waitCup' : 'waitHost');
 }
+let nextShown = '';
+function drawNext() { const txt = nextLine(); if (txt !== nextShown) { nextShown = txt; $('resNext').textContent = txt; } }
 function start(s) {
   session = s; isHost = !!s.isHost; online = !!s.online; me = null;
   const o = s.opts || {};
@@ -1788,8 +1919,8 @@ function start(s) {
   const cup = o.mode === 'cup', roster = s.players.map(p => p.id + ':' + p.avatar).sort().join(',');
   if (cup && series.on && !series.done && series.pending && series.roster === roster) { series.race++; series.points = series.pending.points; series.last = series.pending.last; }
   else if (cup) Object.assign(series, { on: true, race: 0, points: {}, last: {}, roster, done: false });
-  else series.on = false;
-  series.pending = null; series.nextT = -1;
+  else Object.assign(series, { on: false, done: false });
+  series.pending = null; series.nextT = -1; rematchOn = false; votes = [];
   const v = series.on ? VARIANTS[series.race % VARIANTS.length] : VARIANTS[clamp(Math.round(Number(o.variant)) || 0, 0, VARIANTS.length - 1)]; if (v !== variant) { buildWorld(v); applyQuality(); }
   const slots = slotsFor(s);
   for (const k of karts) {
@@ -1801,29 +1932,26 @@ function start(s) {
   }
   if (!me) { me = karts.find(k => k.kind !== 'none') || karts[0]; } // spectator fallback
   active = karts.filter(k => k.kind !== 'none');
-  gridOrder = active.filter(k => k.kind === 'ai').map(k => k.id).concat(active.filter(k => k.kind !== 'ai').map(k => k.id));
+  gridOrder = seedGrid(active.map(k => k.id), s.seed, series.on && series.race > 0 ? series.points : null); // logic.js: the same grid on every machine
   for (const k of karts) if (k.kind === 'none') k.place = 99;
   resetRace();
-  hintEl.textContent = touch ? '☰  MENU · HOW TO PLAY'
-    : 'ARROWS / WASD · SPACE hold + release to throw (↓ flips) · ' + (!online ? 'R restart · ESC menu · ' : isHost ? 'R again · ESC lobby · ' : '') + 'M sound · L detail · F3 stats';
-  const cupline = $('cupline'); cupline.hidden = !series.on; cupline.textContent = series.on ? `RACE ${series.race + 1}/${series.total} · ${v.name}` : '';
-  $('kcName').textContent = me.name; $('kcClass').textContent = me.w.label; $('kartcard').querySelectorAll('.bars s').forEach((el, i) => { el.style.width = me.w.bars[i] + '%'; }); $('kartcard').classList.add('show');
-  if (series.on) { toast(`RACE ${series.race + 1} OF ${series.total}`, 'gold'); toast(v.name, 'blue'); }
-  renderFoot(); drawNext();
+  $('kcName').textContent = me.name; $('kartcard').querySelectorAll('.bars s').forEach((el, i) => { el.style.width = me.w.bars[i] + '%'; }); $('kartcard').classList.add('show');
+  if (series.on) { toast(T('raceOf', { n: series.race + 1, of: series.total }), 'gold'); toast(T('track.' + v.id), 'blue'); }
+  applyWords();
   clocks.clear(); hostClock = null; hostSeen = nowSec(); simNow = performance.now(); tickN = 0; lastSentTs = -1; ghostN = 0;
   Object.assign(netStats, { corr: 0, corrM: 0, snaps: 0, frozen: 0, ghosts: 0, lead: 0, hostFps: 0 });
   audio.init(); kb.attach(); if (touch) tc.attach(); loop.start(); if (online) ticker.start(); else ticker.stop();
 }
 function stop() {
   session = null; race.state = 'intro'; clearHazards(); series.on = false; series.pending = null; series.nextT = -1;
-  $('results').classList.remove('show'); $('lapbox').classList.remove('final'); toasts.clear(); countEl.className = 'hud'; $('wrong').style.display = 'none'; flashEl.style.opacity = 0;
+  $('results').classList.remove('show'); finEl.classList.remove('show'); setWarn(''); $('lapbox').classList.remove('final'); toasts.clear(); countEl.className = 'hud'; $('wrong').style.display = 'none'; flashEl.style.opacity = 0;
   for (const k of karts) { setLabel(k, null); k.vis.g.visible = true; k.vis.bodyMat.color.set(k.color); k.vis.bodyMat.emissive.set(0); k.vis.bodyMat.emissiveIntensity = 0; }
   active = karts; karts.forEach((k, i) => resetKart(k, i)); for (const b of itemBoxes) { b.active = true; b.g.visible = true; } for (const c of coins) c.active = true;
   $('kartcard').classList.remove('show'); music.stop();
   kb.detach(); tc.detach(); showMenu(false); showHelp(false); holds.clear(); brakeMuted = false; drawStartTip(); loop.stop(); ticker.stop(); sfx.silence(); waitEl.hidden = true;
 }
 function destroy() {
-  stop(); sfx.dispose(); music.dispose(); ticker.dispose(); removeEventListener('resize', onResize); document.removeEventListener('visibilitychange', onVisibility);
+  stop(); sfx.dispose(); music.dispose(); ticker.dispose(); offLang(); removeEventListener('resize', onResize); ro?.disconnect(); document.removeEventListener('visibilitychange', onVisibility);
   disposeScene(scene); renderer.dispose(); renderer.forceContextLoss?.();
   mount.classList.remove('touch'); mount.innerHTML = ''; unloadCss(); if (window.__kart === debug) delete window.__kart;
 }
@@ -1865,11 +1993,30 @@ function onNetMessage(msg) {
     case 'blast': if (!isHost) blast(msg.x, msg.z, msg.r, msg.by, msg.c, false); break;
     case 'ink': inkFrom(msg.by, msg.sc); break;
     case 'cup': if (!isHost && series.on) { // the host banked this race's points
-      if (msg.final) { Object.assign(series, { points: msg.points || {}, last: msg.last || {}, done: true, pending: null, nextT: -1 }); if (race.state === 'race') { race.state = 'finished'; race.resultsT = 0.8; } else if (race.state === 'finished') { $('results').classList.add('show'); renderResults(); } renderFoot(); drawNext(); sfx.finish(); }
+      if (msg.final) { Object.assign(series, { points: msg.points || {}, last: msg.last || {}, done: true, pending: null, nextT: -1 }); if (race.state === 'race') { race.state = 'finished'; race.resultsT = 0.8; } else if (race.state === 'finished') showResults(); renderFoot(); drawNext(); sfx.finish(); }
       else series.pending = { points: msg.points || {}, last: msg.last || {} };
     } break;
   }
 }
+/* ============================================================ words
+   Everything on screen that is not a toast (those are gone in a second) is redrawn here: at start() and whenever the language
+   changes (the shell's 中/EN button, or LANGUAGE in the menu). */
+function applyWords() {
+  mount.querySelectorAll('[data-t]').forEach(el => { el.textContent = T(el.dataset.t); });
+  drawHelp(); lapShown = ''; tipShown = ''; drawStartTip(); if (race.state !== 'intro') hudRefresh();
+  setPosHud(race.shownPlace || active.length); posEl.classList.remove('bump');
+  drawItemSlot(slotShown.type, slotShown.spinning, slotShown.n, slotShown.ring);
+  const r = !online ? 'hint.solo' : isHost ? 'hint.host' : 'hint.guest';
+  hintEl.textContent = touch ? T('hint.touch') : T('hint.keys', { r: T(r) });
+  const cupline = $('cupline'); cupline.hidden = !series.on; cupline.textContent = series.on && variant ? T('cupline', { n: series.race + 1, of: series.total, track: T('track.' + variant.id) }) : '';
+  $('kcClass').textContent = T(me.w.label);
+  { const k = warnShown; warnShown = null; setWarn(k || ''); }
+  renderFoot(); nextShown = null; drawNext(); drawVotes(); if (resultsShown()) renderResults(); drawBanner(true);
+  if (pauseEl.classList.contains('show')) renderMenu();
+}
+const offLang = onLang(() => applyWords());
+applyWords();
+
 const debug = { karts, race, series, get net() { return netStats; }, clocks, timing, get fps() { return fps; }, get hostClock() { return hostClock; }, get simNow() { return simNow; }, nextRace, awardCup, hazards, remoteHaz, VARIANTS, ITEM_DEF, giveItem, itemPress, itemRelease, useItem, rollItem, blast, inkFrom, debugSpawn: spawnHazard, spawnStats, get coins() { return coins; }, get itemBoxes() { return itemBoxes; }, get variant() { return variant; }, get S() { return S; }, get L() { return L; }, get N() { return N; }, get me() { return me; }, get active() { return active; }, get isHost() { return isHost; }, get online() { return online; }, get session() { return session; },
   get tune() { return { VMAX, ACC, TURN, cpu: cpuCfg }; },
   get detail() { return { tier: QUALITY[quality].name, auto: autoQuality, fps: Math.round(fps), pixelRatio: renderer.getPixelRatio() }; }, setQuality, cycleQuality,
@@ -1877,5 +2024,5 @@ const debug = { karts, race, series, get net() { return netStats; }, clocks, tim
   get holds() { return holds; }, rocketHeld,
   restartWith(opts) { if (session) start({ ...session, opts: { ...session.opts, ...opts } }); } };
 window.__kart = debug;
-return { start, stop, destroy, onNetMessage, playerLeft, debug };
+return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };
 }
