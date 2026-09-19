@@ -44,7 +44,7 @@ back-swipe gesture. (Safari cannot go full screen on an iPhone any other way.) W
 does not dim or lock mid-game (iOS 16.4 and later; it is taken again when the page comes back from the background), and it asks for its sound to be
 played as media, so the game is heard with the ring/silent switch on silent (iOS 17 and later).
 
-Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the word tables in both languages, the lobby server, the snapshot clock, the Kart and Hog wire formats, the QR encoder, the touch controls, the Fable Theft Auto movement code, its host simulation run headless, its arena and its killcam, the Loaded Dice rules, bars, solo run and word tables, the Sundown Showdown arena, wire format and simulation). `npm run icons` redraws the home-screen icons.
+Use `PORT=4000 npm start` to change the port. `npm test` runs the node tests (the word tables in both languages, the lobby server, the snapshot clock, the render quality controller, the Kart and Hog wire formats, the QR encoder, the touch controls, the Fable Theft Auto movement code, its host simulation run headless, its arena and its killcam, the Loaded Dice rules, bars, solo run and word tables, the Sundown Showdown arena, wire format and simulation). `npm run icons` redraws the home-screen icons.
 `FAKE_LAG_MS=60 FAKE_JITTER_MS=40 npm start` delays every relayed in-game message by that much, to try the netcode on a pretend bad Wi-Fi.
 
 ## Layout
@@ -68,6 +68,7 @@ client/
     ticker.js     a worker-driven timer that keeps ticking in a hidden tab    math.js    clamp / lerp / seeded rng
     ui.js         toasts, escaping, stylesheet loading   prefs.js  name / colour / last game
     i18n.js       the language: Chinese by default, one remembered pref, makeT(STR) for a module's word table, pick() for a { zh, en } label
+    quality.js    a render quality level picked from the frame times: down after two seconds of long frames, back up after ten of full-rate ones, and no flapping
     avatars.js    the shared colour palette players pick from
   games/
     registry.js   the game manifest (see below)
@@ -187,6 +188,7 @@ Healing out of the fight is 7% of your health a second (`HEAL_RATE`), ramping in
 The last brawler standing wins; a fallen player watches whoever beat them and cycles through the living with A / D, the arrows or the ◀ ▶ buttons, and the showdown ends early once no human is left in it.
 CPU brawlers step out from under a telegraphed bomb as their skill allows (easy late and not always, hard every time). The pick screen shows each brawler's health, range, damage, speed and reload.
 A player who drops out mid-game is taken over by a CPU.
+The picture gives way before the frame rate does (`core/quality.js`): two seconds of long frames (a 1000 Hz mouse on top of a full frame is enough) drop the bloom and some pixels, two more the shadow map, and ten seconds of full-rate frames bring a step back; `__showdown.quality` shows the level and the frame time.
 
 On a touch screen (iPhone, iPad, any tablet) the controls are twin sticks: the left part of the screen is the move stick (touch anywhere there and drag), and **FIRE** under the right thumb is an aim stick: drag it to see the shot's
 shape on the ground and let go to shoot, tap it to shoot at the nearest enemy in sight (or the nearest power box), or drag back to the middle to cancel. **SUPER** next to it fills up as it charges and works the same way; a press

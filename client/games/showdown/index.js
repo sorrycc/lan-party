@@ -34,6 +34,7 @@ import { createInput } from '../../core/input.js';
 import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { createTicker } from '../../core/ticker.js';
+import { createQuality } from '../../core/quality.js';
 import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
 import { T, N, HALF, E, STONE, CRATE, WATER, GRASS, BOX, WALL, ti, wx, blocksShot, makeMap } from './map.js';
 import { CLASSES, BULLETS, GAS_R, STEP, CUBE_FLY, createSim, angDiff, hiddenFrom, statBars, moveMul } from './sim.js';
@@ -187,15 +188,25 @@ export async function create({ mount, audio, send, hooks }) {
       bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), .8, .6, 1.0); composer.addPass(bloom); composer.addPass(new OutputPass());
     } catch (e) { console.warn('Sundown Showdown: no bloom', e); composer = bloom = null; }
   }
-  const glow = k => composer || k <= 1 ? k : 1 + (k - 1) * .12;
+  /* the picture gives way before the frame rate does: a busy main thread (a 1000 Hz mouse is enough) on top of a full frame
+     stutters, so long frames first drop the bloom and some pixels, then the shadow map; full-rate frames bring them back */
+  const QUALITY = [{ bloom: true, dpr: 1.5, shadow: 2048 }, { bloom: false, dpr: 1.25, shadow: 2048 }, { bloom: false, dpr: 1, shadow: 1024 }];
+  const quality = createQuality({ levels: QUALITY.length, onChange: applyQuality });
+  const bloomOn = () => !!composer && QUALITY[quality.level].bloom;
+  const glow = k => bloomOn() || k <= 1 ? k : 1 + (k - 1) * .12;
   const view = { w: 1, h: 1, dpr: 1, left: 0, top: 0, tall: 1 };
   /* one fit() sizes the renderer, the bloom, the camera and the overlay canvas together, from the stage and not the window */
   function fit() {
     const w = root.clientWidth || innerWidth, h = root.clientHeight || innerHeight, rect = root.getBoundingClientRect();
-    view.w = w; view.h = h; view.left = rect.left; view.top = rect.top; view.dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    view.w = w; view.h = h; view.left = rect.left; view.top = rect.top; view.dpr = Math.min(window.devicePixelRatio || 1, QUALITY[quality.level].dpr);
     renderer.setPixelRatio(view.dpr); renderer.setSize(w, h, false); if (composer) { composer.setPixelRatio(view.dpr); composer.setSize(w, h); }
     camera.aspect = w / h; camera.updateProjectionMatrix(); view.tall = clamp(1.45 / camera.aspect, 1, 1.9); // an upright screen is narrow: pull the camera back so the sides stay in view
     ov.width = Math.round(w * view.dpr); ov.height = Math.round(h * view.dpr);
+  }
+  function applyQuality() {
+    const q = QUALITY[quality.level], size = touch ? Math.min(1024, q.shadow) : q.shadow;
+    if (sun.shadow.mapSize.x !== size) { sun.shadow.mapSize.set(size, size); sun.shadow.map?.dispose(); sun.shadow.map = null; }
+    cubeMat.color.set(0x35ff8a).multiplyScalar(glow(2.2)); fit(); // the one glowing colour that is not set again every frame or every shot
   }
   const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null; ro?.observe(root); addEventListener('resize', fit); fit();
 
@@ -998,13 +1009,13 @@ export async function create({ mount, audio, send, hooks }) {
   const ticker = createTicker(NET_HZ, () => { if (session && online && isHost && document.hidden) step(performance.now()); });
   const loop = createLoop((real, now) => {
     if (!session) return;
-    const raw = step(now), dt = raw * G.slow;
+    const raw = step(now), dt = raw * G.slow; quality.sample(real);
     if (G.state !== 'pick') syncBrawlers(raw); else updatePickStatus();
     for (const b of B) animateBrawler(b, dt);
     updateBullets(dt); updateBombs(dt); updateZones(dt); updateTurrets(dt); updateCubes(dt); updateGas();
     for (const q of boxV) { if (q.dead) continue; if (q.flash > 0 || q.shake > 0) { q.flash = Math.max(0, q.flash - dt * 6); q.shake = Math.max(0, q.shake - dt); q.mat.emissiveIntensity = 1 + q.flash * 5; q.mesh.position.x = q.q.x + RR(-1, 1) * q.shake * .4; q.mesh.scale.setScalar(1 + q.flash * .08); } else q.mat.emissiveIntensity = 1 + Math.sin(G.time * 3 + q.q.i) * .35; }
     updateAimIndicator(); updateParticles(dt); updateFX(dt); updateCamera(raw); updateSky(dt, cf);
-    if (composer) composer.render(); else renderer.render(scene, camera);
+    if (bloomOn()) composer.render(); else renderer.render(scene, camera);
     drawOverlay(dt); if (G.state !== 'pick') updateHud(raw);
     sfx.music(G.state === 'play' || G.state === 'end', G.gasStage, B.reduce((n, b) => n + (b.alive ? 1 : 0), 0));
   });
@@ -1053,7 +1064,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
   words(); const offLang = onLang(words);
   dom.specnav.addEventListener('click', e => { const b = e.target.closest('button'); if (b) cycleWatch(b.hasAttribute('data-sprev') ? -1 : 1); });
-  const debug = { G, get B() { return B; }, get me() { return me; }, get sim() { return sim; }, get session() { return session; }, get map() { return map; }, input, pred, view, packSnapshot, applySnapshot, loop,
+  const debug = { G, get B() { return B; }, get me() { return me; }, get sim() { return sim; }, get session() { return session; }, get map() { return map; }, input, pred, view, quality, packSnapshot, applySnapshot, loop,
     touch: { on: touch, move: moveS, fire: fireS, sup: supS, showMenu }, choose, lockIn, cycleWatch, words };
   window.__showdown = debug;
   return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };

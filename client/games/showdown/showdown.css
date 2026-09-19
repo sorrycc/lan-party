@@ -14,7 +14,7 @@
 .showdown.touch { touch-action: none; }
 .showdown [hidden] { display: none !important; }
 .showdown .gl, .showdown .ov { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.showdown .gl { touch-action: none; } .showdown .ov { pointer-events: none; }
+.showdown .gl { touch-action: none; cursor: crosshair; } .showdown .ov { pointer-events: none; }
 .showdown .stroke { text-shadow: -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 4px 0 #000; }
 
 /* ---------------------------------------------------------------- hud */
