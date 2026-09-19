@@ -8,8 +8,9 @@
      the bits, the camera yaw and the click counter), so the sim runs a bot through exactly the movement, the guns,
      the damage, the feed, the killcam and the awards a human gets. A bot walks (it never takes a car), hunts the
      nearest live player, keeps a fighting distance and strafes, routes along the road grid when it cannot see its
-     target, goes for a health crate when hurt, and shoots with an aim error, a reaction delay and a cadence set by
-     the lobby's `botSkill`. */
+     target, goes for a health crate when hurt and for a gun or ammo crate when it lacks one (returning fire on the way),
+     draws the gun that suits the range, and shoots with an aim error, a reaction delay and a cadence set by the lobby's
+     `botSkill`. It aims with its own eyes, not through a human's soft lock (sim.js fireWeapon), so the error is what it misses by. */
 import { makeRng } from '../../core/math.js';
 import { X, nearestNode, bfsRoute, dist2 } from './world.js';
 import { IN } from './motion.js';
@@ -18,12 +19,14 @@ export const BOT_FILL = 4; // bots fill the room up to this many players
 export const BOT_PREFIX = 'bot:';
 export const isBot = id => typeof id === 'string' && id.startsWith(BOT_PREFIX);
 export const BOT_NAMES = ['Vinny', 'Rocco', 'Lupe', 'Sal', 'Trixie', 'Duke', 'Marla', 'Ziggy', 'Bruno', 'Cleo', 'Rex', 'Nadia'];
-/* what the lobby's skill means: aim error (radians, each side), seconds from seeing a target to shooting at it,
-   the pause between shots (a factor on the weapon's own rate), how far away a bot will engage, and how long an SMG burst runs */
+/* what the lobby's skill means: aim error (radians, each side, drawn afresh for every shot: a bot shoots from its chest along
+   the way it faces with no soft lock, so a body at 15 m, about ±0.045 rad wide, is hit by roughly one easy shot in seven, one
+   normal shot in four and one hard shot in two), seconds from seeing a target to shooting at it, the pause between shots (a
+   factor on the weapon's own rate), how far away a bot will engage, and how long an SMG burst runs */
 export const BOT_SKILLS = {
-  easy:   { aim: 0.24, react: 0.9, cadence: 2.2, engage: 34, burst: 0.25 },
-  normal: { aim: 0.13, react: 0.5, cadence: 1.4, engage: 44, burst: 0.4 },
-  hard:   { aim: 0.05, react: 0.25, cadence: 1.0, engage: 56, burst: 0.6 },
+  easy:   { aim: 0.3, react: 0.9, cadence: 2.4, engage: 34, burst: 0.25 },
+  normal: { aim: 0.17, react: 0.55, cadence: 1.6, engage: 44, burst: 0.4 },
+  hard:   { aim: 0.09, react: 0.3, cadence: 1.2, engage: 56, burst: 0.55 },
 };
 export const skillOf = opts => BOT_SKILLS[opts && opts.botSkill] || BOT_SKILLS.normal;
 export const fillOn = opts => !opts || opts.fillAI !== false;
@@ -48,15 +51,40 @@ export const withBots = session => ({ ...session, players: rosterOf(session.play
 
 /* ---------------------------------------------------------------- the brain */
 const THINK = 0.25, WANT_D = 11, TOO_CLOSE = 5, HEALTH_SEEK = 45, HEALTH_RANGE2 = 70 * 70, WP_REACH = 3, ROUTE_EVERY = 1.5, STUCK_T = 1, STUCK_D2 = 1, UNSTICK_T = 0.7;
-export const makeBrain = () => ({ target: null, goal: null, thinkT: 0, routeT: 0, wps: [], seenT: 0, aimErr: 0, fireT: 0, burstT: 0, strafe: 1, strafeT: 0, clicks: 0, stuckT: 0, sx: 0, sz: 0, unstickT: 0, unstickYaw: 0 });
+/* the crates worth a detour: a gun it lacks (or rounds for one it has), and ammo when it runs low; within this range, farther when the gun hand is nearly empty */
+const LOOT_RANGE2 = 45 * 45, LOOT_RANGE_DRY2 = 90 * 90, LOW_AMMO = 12;
+const GUNS = ['pistol', 'shotgun', 'smg', 'sniper', 'rpg']; // WEAPONS order (entities.js)
+export const makeBrain = () => ({ target: null, goal: null, goalKind: null, thinkT: 0, routeT: 0, wps: [], seenT: 0, aimErr: 0, fireT: 0, burstT: 0, strafe: 1, strafeT: 0, clicks: 0, stuckT: 0, sx: 0, sz: 0, unstickT: 0, unstickYaw: 0, wantW: undefined });
 /* a fresh route along the road grid from where I stand to the goal, without the node behind me: the first node is dropped while I am already nearer the one after it than it is */
 function routeTo(P, goal) {
   const wps = bfsRoute(nearestNode(P.x, P.z), nearestNode(goal.x, goal.z)).map(([i, j]) => ({ x: X(i), z: X(j) }));
   while (wps.length > 1 && dist2(P.x, P.z, wps[1].x, wps[1].z) <= dist2(wps[0].x, wps[0].z, wps[1].x, wps[1].z)) wps.shift();
   return wps;
 }
+const rounds = w => w.owned ? w.ammo + w.reserve : 0;
+/* the gun for a target `d` metres away, by the weapons' index: a rocket at a safe middle distance, the rifle far off, the shotgun
+   up close, the SMG in between, the pistol when nothing better has rounds */
+export function gunFor(weapons, d) {
+  const has = k => { const i = GUNS.indexOf(k); return weapons[i] && rounds(weapons[i]) > 0 ? i : -1; };
+  const order = d > 40 ? ['sniper', 'rpg', 'smg', 'pistol', 'shotgun'] : d > 14 ? ['rpg', 'smg', 'pistol', 'sniper', 'shotgun'] : d > 8 ? ['shotgun', 'smg', 'pistol', 'sniper', 'rpg'] : ['shotgun', 'smg', 'pistol', 'sniper', 'rpg']; // never a rocket at arm's length
+  for (const k of order) { const i = has(k); if (i >= 0) return i; }
+  return 0;
+}
+/* a crate I would walk to: [goal, kind] or null */
+function lootGoal(pl, pickups, P) {
+  const ws = pl.weapons, total = ws.reduce((n, w) => n + rounds(w), 0), dry = total < LOW_AMMO;
+  let best = null, bd = dry ? LOOT_RANGE_DRY2 : LOOT_RANGE2;
+  for (const p of pickups) { if (p.released) continue; const i = GUNS.indexOf(p.kind);
+    const useful = p.kind === 'ammo' ? total < 60 : i >= 0 ? (!ws[i] || !ws[i].owned || rounds(ws[i]) < 4) : false; if (!useful) continue;
+    const d = dist2(p.x, p.z, P.x, P.z); if (d < bd) { bd = d; best = p; } }
+  return best ? { x: best.x, z: best.z } : null;
+}
 
-/* one tick of a bot's mind. ctx: { players, pickups, hasLOS(ax, az, bx, bz), skill, alive(pl), rnd() } */
+/* one tick of a bot's mind. ctx: { players, pickups, hasLOS(ax, az, bx, bz), skill, alive(pl), rnd() }
+   A bot that sees its target within range fights it: faces it (with the aim error) and shoots, whatever else it is doing. What
+   it walks toward is a health crate when hurt, a gun or ammo crate when it lacks one and the fight is not on top of it, else its
+   target (keeping a fighting distance and strafing once there). The stick is relative to the camera yaw, so walking one way while
+   facing another is just the walk turned into the facing's frame; a bot that is stuck sidesteps and keeps shooting. */
 export function botThink(pl, ctx, dt) {
   const B = pl.brain || (pl.brain = makeBrain()), P = pl.ped, sk = ctx.skill, rnd = ctx.rnd || Math.random;
   B.thinkT -= dt; B.routeT -= dt; B.fireT -= dt; B.strafeT -= dt;
@@ -65,18 +93,21 @@ export function botThink(pl, ctx, dt) {
     let best = null, bd = Infinity;
     for (const o of ctx.players) { if (o === pl || !ctx.alive(o)) continue; const d = dist2(o.ped.x, o.ped.z, P.x, P.z); if (d < bd) { bd = d; best = o; } }
     if (best !== B.target) { B.target = best; B.seenT = 0; }
-    // hurt and a health crate near: go for it instead
-    B.goal = null;
-    if (P.health < HEALTH_SEEK) { let hb = null, hd = HEALTH_RANGE2; for (const p of ctx.pickups) { if (p.kind !== 'health' || p.released) continue; const d = dist2(p.x, p.z, P.x, P.z); if (d < hd) { hd = d; hb = p; } } if (hb) B.goal = { x: hb.x, z: hb.z }; }
+    // hurt and a health crate near: go for it; short of a gun or of rounds, a crate (unless the target is close)
+    B.goal = null; B.goalKind = null;
+    if (P.health < HEALTH_SEEK) { let hb = null, hd = HEALTH_RANGE2; for (const p of ctx.pickups) { if (p.kind !== 'health' || p.released) continue; const d = dist2(p.x, p.z, P.x, P.z); if (d < hd) { hd = d; hb = p; } } if (hb) { B.goal = { x: hb.x, z: hb.z }; B.goalKind = 'health'; } }
+    if (!B.goal && pl.weapons && !(best && bd < WANT_D * WANT_D * 2)) { const g = lootGoal(pl, ctx.pickups, P); if (g) { B.goal = g; B.goalKind = 'loot'; } }
+    if (pl.weapons) B.wantW = gunFor(pl.weapons, best ? Math.sqrt(bd) : 30);
     B.aimErr = (rnd() * 2 - 1) * sk.aim;
     if (B.strafeT <= 0) { B.strafe = rnd() < 0.5 ? -1 : 1; B.strafeT = 0.8 + rnd() * 1.2; }
   }
   const T = B.target, TP = T ? T.ped : null;
   const goal = B.goal || (TP ? { x: TP.x, z: TP.z } : null);
-  let bits = 0, mx = 0, mz = 0, yaw = P.yaw;
+  let bits = 0, yaw = P.yaw, mvx = 0, mvz = 0, sprint = false; // mv: the way to walk, in the world
   if (!goal) { pl.bits = 0; pl.sx = pl.sz = 0; return; }
-  const gd = Math.hypot(goal.x - P.x, goal.z - P.z), seeGoal = ctx.hasLOS(P.x, P.z, goal.x, goal.z);
-  const fighting = !B.goal && TP && seeGoal && gd < sk.engage;
+  const td = TP ? Math.hypot(TP.x - P.x, TP.z - P.z) : Infinity, seeT = TP ? ctx.hasLOS(P.x, P.z, TP.x, TP.z) : false;
+  const fighting = TP && seeT && td < sk.engage;
+  const gd = Math.hypot(goal.x - P.x, goal.z - P.z), seeGoal = B.goal ? ctx.hasLOS(P.x, P.z, goal.x, goal.z) : seeT;
   // where to walk: straight at the goal when I can see it and it is near, else along the road grid
   let wx = goal.x, wz = goal.z;
   if (!(seeGoal && gd < sk.engage * 1.5)) {
@@ -84,23 +115,28 @@ export function botThink(pl, ctx, dt) {
     while (B.wps.length && dist2(B.wps[0].x, B.wps[0].z, P.x, P.z) < WP_REACH * WP_REACH) B.wps.shift();
     if (B.wps.length) { wx = B.wps[0].x; wz = B.wps[0].z; }
   } else B.wps.length = 0;
-  let dx = wx - P.x, dz = wz - P.z, dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
-  if (fighting) { // face the target, keep the distance, strafe
-    yaw = Math.atan2(TP.x - P.x, TP.z - P.z) + B.aimErr; // the stick is relative to the camera yaw, so forward is at the target
-    mz = gd > WANT_D ? 1 : gd < TOO_CLOSE ? -1 : 0; mx = B.strafe * 0.8;
+  let dx = wx - P.x, dz = wz - P.z; const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+  if (fighting) { // face the target (the aim error on top), and shoot once I have reacted
+    const bear = Math.atan2(TP.x - P.x, TP.z - P.z); yaw = bear + B.aimErr;
+    if (B.goal) { mvx = dx; mvz = dz; } // still off to the crate: backing away and returning fire
+    else { const fx = Math.sin(bear), fz = Math.cos(bear), f = td > WANT_D ? 1 : td < TOO_CLOSE ? -1 : 0, st = B.strafe * 0.8; mvx = fx * f - fz * st; mvz = fz * f + fx * st; } // keep the distance, strafe
     B.seenT += dt;
-    const w = pl.weapons[pl.curW], inRange = gd < (w.key === 'shotgun' ? 22 : sk.engage);
+    const w = pl.weapons[pl.curW], inRange = td < (w.key === 'shotgun' ? 22 : w.key === 'sniper' ? 200 : sk.engage);
     if (B.seenT >= sk.react && inRange && w.ammo > 0 && pl.reloadT <= 0) {
       if (w.auto) { B.burstT -= dt; if (B.burstT <= -sk.burst * 0.6) B.burstT = sk.burst; if (B.burstT > 0) bits |= IN.FIRE; }
-      else if (B.fireT <= 0) { B.fireT = w.rate * sk.cadence; B.clicks++; }
+      else if (B.fireT <= 0) { B.fireT = w.rate * sk.cadence; B.clicks++; B.aimErr = (rnd() * 2 - 1) * sk.aim; } // a fresh error for the next shot
     }
   } else { // walking: face the way I go, sprint
-    yaw = Math.atan2(dx, dz); mz = 1; bits |= IN.SPRINT; B.seenT = 0;
+    yaw = Math.atan2(dx, dz); mvx = dx; mvz = dz; sprint = true; B.seenT = 0;
   }
-  // stuck on something while trying to move: sidestep for a moment
+  // stuck on something while trying to move: sidestep for a moment (still facing, and shooting at, the target in a fight)
   B.unstickT -= dt;
-  if (mx || mz) { B.stuckT += dt; if (B.stuckT >= STUCK_T) { if (dist2(P.x, P.z, B.sx, B.sz) < STUCK_D2 && B.unstickT <= 0) { B.unstickT = UNSTICK_T; B.unstickYaw = yaw + (rnd() < 0.5 ? 1 : -1) * Math.PI / 2; B.wps.length = 0; B.routeT = 0; } B.stuckT = 0; B.sx = P.x; B.sz = P.z; } }
+  if (mvx || mvz) { B.stuckT += dt; if (B.stuckT >= STUCK_T) { if (dist2(P.x, P.z, B.sx, B.sz) < STUCK_D2 && B.unstickT <= 0) { B.unstickT = UNSTICK_T; B.unstickYaw = Math.atan2(mvx, mvz) + (rnd() < 0.5 ? 1 : -1) * Math.PI / 2; B.wps.length = 0; B.routeT = 0; } B.stuckT = 0; B.sx = P.x; B.sz = P.z; } }
   else { B.stuckT = 0; B.sx = P.x; B.sz = P.z; }
-  if (B.unstickT > 0) { yaw = B.unstickYaw; mx = 0; mz = 1; bits = IN.SPRINT; }
-  pl.camYaw = yaw; pl.camPitch = 0; pl.assist = true; pl.bits = bits; pl.sx = mx; pl.sz = mz; pl.clicks = B.clicks;
+  if (B.unstickT > 0) { mvx = Math.sin(B.unstickYaw); mvz = Math.cos(B.unstickYaw); sprint = true; if (!fighting) yaw = B.unstickYaw; }
+  if (sprint && !(bits & IN.FIRE)) bits |= IN.SPRINT;
+  // the walk in the stick's frame: forward along the yaw, right is (-cos, sin) (motion.js)
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  pl.camYaw = yaw; pl.camPitch = 0; pl.assist = false; pl.bits = bits; pl.sx = mvx * -fz + mvz * fx; pl.sz = mvx * fx + mvz * fz; pl.clicks = B.clicks;
+  if (Math.abs(pl.sx) < 1e-9) pl.sx = 0; if (Math.abs(pl.sz) < 1e-9) pl.sz = 0;
 }

@@ -72,6 +72,12 @@
 .gta .reload.hot { opacity: 1; border-color: #ffe14d; }
 /* ☰: pause, sound, detail, look sensitivity, stats, restart, leave */
 .gta .menu-btn { top: calc(6px + var(--sa-t)); left: 50%; transform: translateX(-50%); width: 46px; height: 32px; border-radius: 10px; border: 2px solid rgba(255,255,255,.35); background: rgba(6,10,28,.55); color: #fff; font-size: 16px; text-align: center; line-height: 28px; z-index: 7; }
+/* SCORES: the scoreboard on a touch screen (TAB on a keyboard), left of the ☰ */
+.gta .board-btn { left: auto; right: calc(50% + 30px); transform: none; width: auto; padding: 0 9px; font-size: 11px; font-weight: 900; letter-spacing: 1px; }
+.gta .board-btn.on { background: rgba(255,225,77,.45); border-color: #ffe14d; }
+/* the results card's foot: the host's count of rematch votes, a guest's wait line */
+.gta .foot .votes { flex-basis: 100%; color: #ffe14d; font-size: 13px; min-height: 1em; }
+.gta .foot .wait { flex-basis: 100%; }
 /* a phone held upright is asked to rotate (a tablet held upright still fits) */
 .gta .rotate { position: absolute; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center; background: #0a0e24; text-align: center; font-weight: 900; font-size: 20px; letter-spacing: 3px; color: #fff; }
 .gta .rotate .phone { font-size: 64px; margin-bottom: 14px; animation: gta-rot 1.6s ease-in-out infinite alternate; }
@@ -98,6 +104,13 @@
   .gta .pill { width: 68px; height: 40px; border-width: 2px; border-radius: 11px; }
   .gta .weapon { right: calc(var(--edge-r) + 96px); bottom: calc(var(--edge-b) + 78px); } .gta .weapon canvas { width: 36px; height: 18px; } .gta .weapon b { font-size: 8px; letter-spacing: 1px; }
   .gta .reload { right: calc(var(--edge-r) + 96px); bottom: calc(var(--edge-b) + 124px); height: 28px; font-size: 9px; }
-  .gta .menu-btn { width: 38px; height: 26px; line-height: 22px; font-size: 14px; }
+  .gta .menu-btn { width: 38px; height: 26px; line-height: 22px; font-size: 14px; } .gta .board-btn { width: auto; font-size: 10px; }
   .gta .rotate .phone { font-size: 48px; }
 }
+
+/* ---------------------------------------------------------------- Chinese (the shell sets html.zh): the shell's font stack already
+   falls back to a CJK face; hanzi are not tracked out like the capitals, and read a touch bigger in the small labels */
+html.zh .gta .overlay h1 { letter-spacing: 2px; font-style: normal; }
+html.zh .gta .overlay .sub, html.zh .gta .foot, html.zh .gta .controls, html.zh .gta .score .aw, html.zh .gta .score .left, html.zh .gta .rotate, html.zh .gta .rotate small { letter-spacing: 1px; }
+html.zh .gta .tbtn, html.zh .gta .pill, html.zh .gta .fire b, html.zh .gta .weapon b, html.zh .gta .ctl .lbl, html.zh .gta .board-btn { letter-spacing: 0; }
+html.zh .gta .weapon b { font-size: 11px; } html.zh .gta .jump.car { font-size: 13px; }

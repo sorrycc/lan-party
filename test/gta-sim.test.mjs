@@ -1,7 +1,7 @@
 /* Fable Theft Auto's host simulation (sim.js) run headless: a stub world with nothing to bump into and pools that
    swallow every draw, so the rules (modes, the mark, the wanted level, the world events, the wire) can be checked
    in node without a browser. */
-import test from 'node:test';
+import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { createSim, MODES, MARK_CASH_PER_S, MARK_BOUNTY, MARK_PICK_T, MARK_STARS, ESCAPE_BONUS, AIRDROP_T, AIRDROP_FALL, aimTol } from '../client/games/gta/sim.js';
@@ -10,8 +10,13 @@ import { CAUSES, EVENT_KINDS, CAR_TYPES } from '../client/games/gta/entities.js'
 import { NEWS, STREAK_NEWS, AWARD_KEYS, AWARDS_SHOWN, ARENA_TRAFFIC, ARENA_CIVS, ARENA_MARGIN, WASTED_T, DM_WASTED_T, wastedTimeOf } from '../client/games/gta/sim.js';
 import { REPLAY_DELAY, REPLAY_KEEP } from '../client/games/gta/replay.js';
 import { arenaOf, arenaSpawns, farthestSpawn, inArena, ARENA_BLOCKS, OUT_WARN_T, OUT_DMG_PER_S } from '../client/games/gta/arena.js';
-import { HALF, ROAD, PITCH } from '../client/games/gta/world.js';
+import { HALF, ROAD, PITCH, streetRef, districtRef, districtName } from '../client/games/gta/world.js';
 
+/* the sim and the bots roll Math.random (the crowd, the traffic, aim errors, spread): each test runs on the same seeded sequence, so a
+   result never depends on the luck of the draw (the thresholds still hold with room to spare on unseeded runs) */
+const seeded = seed => { let s = seed >>> 0; return () => { s = (s + 0x6d2b79f5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; };
+const realRandom = Math.random;
+beforeEach(() => { Math.random = seeded(20260919); }); afterEach(() => { Math.random = realRandom; });
 const pool = () => ({ alloc() { return 0; }, release() {}, color() {}, hide() {}, set() {}, dirty() {} });
 const stubWorld = () => ({ THREE, aabbs: [], nearAabbs: () => [], hasLOS: () => true, pickPool: pool(), pedPools: Array.from({ length: 7 }, pool), gunPool: pool(), carBody: pool(), carCabin: pool(), carWheel: pool(), carLight: pool(), dirtyDynamic() {} });
 const players = n => Array.from({ length: n }, (_, i) => ({ id: 'p' + i, name: 'P' + i, avatar: i }));
@@ -137,7 +142,7 @@ test('the deathmatch is fought in the arena: everyone starts on foot inside it, 
 test('the fence: outside the arena a clock runs and the block says so, after the warning it hurts, back inside it stops, and staying out is a death of its own', () => {
   const sim = make(2, { mode: 'deathmatch' }); const A = sim.arena, [a, b] = sim.players; a.godT = b.godT = 0;
   a.ped.x = A.x1 + 10; a.ped.z = A.cz; run(sim, 1); assert.ok(a.outT > 0.9 && a.outT < 1.2, 'the clock runs'); assert.equal(a.ped.health, 100, 'not yet');
-  assert.ok(parseBlock(sim.block(a)).outT > 0.9); assert.ok(snapshot(sim, 0).ev.some(e => e[0] === 'float' && e[1] === 0 && /ARENA/.test(e[2])), 'told once');
+  assert.ok(parseBlock(sim.block(a)).outT > 0.9); assert.ok(snapshot(sim, 0).ev.some(e => e[0] === 'float' && e[1] === 0 && e[2] === 'f.outArena'), 'told once');
   run(sim, OUT_WARN_T); assert.ok(a.ped.health < 100 && a.ped.health > 100 - OUT_DMG_PER_S * 2, 'it hurts, about a second of it: ' + a.ped.health);
   a.ped.x = A.cx; run(sim, 0.2); assert.equal(a.outT, 0, 'back inside: the clock stops'); const h = a.ped.health; run(sim, 1); assert.equal(a.ped.health, h, 'and it stops hurting');
   a.ped.x = A.x0 - 10; run(sim, OUT_WARN_T + 100 / OUT_DMG_PER_S + 1); assert.ok(a.dead, 'staying out is death'); assert.equal(a.killer, -1); assert.equal(CAUSES[a.cause], 'fence'); assert.equal(b.kills, 0, 'nobody gets it');
@@ -692,9 +697,9 @@ test('the news: five stars, a five-star escape, the precinct, a special gun foun
   sim.debug.takeWeapon(b, 'rpg', 3); n = newsIn(snapshot(sim, 0), 'gun'); assert.equal(n.length, 1); assert.equal(n[0][2], 1); assert.equal(n[0][3], 'rpg');
   sim.debug.takeWeapon(b, 'rpg', 3); assert.equal(newsIn(snapshot(sim, 0), 'gun').length, 0, 'topping up is not news');
   sim.debug.takeWeapon(b, 'shotgun', 3); assert.equal(newsIn(snapshot(sim, 0), 'gun').length, 0, 'nor is a basic gun');
-  assert.ok(sim.debug.startEvent('airdrop')); run(sim, AIRDROP_FALL + 0.5); n = newsIn(snapshot(sim, 1), 'drop'); assert.equal(n.length, 1); assert.equal(typeof n[0][3], 'string');
+  assert.ok(sim.debug.startEvent('airdrop')); run(sim, AIRDROP_FALL + 0.5); n = newsIn(snapshot(sim, 1), 'drop'); assert.equal(n.length, 1); assert.equal(n[0][3], districtRef(sim.WE.x, sim.WE.z), 'the district as a number, named on each screen'); assert.ok(districtName(n[0][3]).length > 1);
   sim.WE.t = 0; run(sim, 0.1); assert.ok(sim.debug.startEvent('truck')); const truck = sim.WE.car; truck.lastHitBy = a; truck.damage(truck.hp);
-  n = newsIn(snapshot(sim, 1), 'truck'); assert.equal(n.length, 1); assert.equal(n[0][2], 0, 'credited to whoever hit it last');
+  n = newsIn(snapshot(sim, 1), 'truck'); assert.equal(n.length, 1); assert.equal(n[0][2], 0, 'credited to whoever hit it last'); assert.equal(n[0][3], streetRef(truck.x, truck.z), 'the street as a number');
   sim.playerLeft('p1'); m = snapshot(sim, 0); n = newsIn(m, 'left'); assert.equal(n.length, 1); assert.equal(n[0][2], 1);
   assert.ok(!m.ev.some(e => e[0] === 'float' && e[1] === -1), 'no room-wide float for that either');
 });

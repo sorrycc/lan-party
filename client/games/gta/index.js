@@ -12,80 +12,85 @@
    the host as an analog pair next to the key bits (motion.js), a touch player's shots get a wider soft lock, ☰ opens
    the pause card, the canvas HUD keeps clear of the notch and a phone held upright is asked to rotate.
 
+   Words: strings.js (Chinese by default, English from the shell's toggle; core/i18n.js). The host's simulation sends keys and
+   vars, never sentences: a float is ['float', player, key, colour, vars], a place is a streetRef / districtRef number, a world
+   event is its kind and x, z. The canvas HUD draws Chinese with fillText beside the pixel font (font.js), the DOM cards and
+   the touch labels are redrawn on onLang.
+
+   Guests: the pause card and the results card offer LEAVE ROOM (hooks.onLeave) and, once the round is over, a REMATCH toggle
+   (hooks.onRematch); the host's results card counts the votes (rematchVotes). The host (or a solo player) can END ROUND from
+   the pause card, which an unlimited round needs to ever reach its results. TAB (or SCORES on a touch screen) shows the table.
+
    Files: world.js (the city + pools), entities.js (how peds/cars draw), sim.js (the host's simulation),
-   remote.js (a client's copy), fx.js (particles/decals/tracers), font.js (the bitmap font). */
+   remote.js (a client's copy), fx.js (particles/decals/tracers), font.js (the bitmap font), strings.js (the words). */
 import * as THREE from 'three';
 import { clamp, lerp } from '../../core/math.js';
 import { esc, hex, loadStylesheet } from '../../core/ui.js';
+import { makeT, onLang, isZh } from '../../core/i18n.js';
+import { STR } from './strings.js';
 import { createInput } from '../../core/input.js';
 import { createTouch, isCoarse } from '../../core/touch.js';
 import { createLoop } from '../../core/loop.js';
 import { AVATARS } from '../../core/avatars.js';
-import { buildWorld, computeCamera, districtAt, streetAt, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
+import { buildWorld, computeCamera, districtRef, streetRef, streetName, districtName, nearestNode, bfsRoute, PLAZA, HOSPITAL, POLICE_DOOR, SPRAY, TAXI_RANK, X, MAP, dist2, angDiff, PI, TAU } from './world.js';
 import { seatOffset, WEAPONS, CAUSES, EVENT_KINDS } from './entities.js';
 import { createFx } from './fx.js';
-import { createSim, IN, HINT, MISSION_STATES, OBJECTIVES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn, modeOf, wastedTimeOf } from './sim.js';
+import { createSim, IN, MISSION_STATES, INTRO_T, START_CLOCK, aimTol, MODES, MARK_CASH_PER_S, MARK_BOUNTY, AIRDROP_T, AIRDROP_FALL, RACE_END_T, KILL_CAP, lapsOf, killCapOf, gunsOn, modeOf, wastedTimeOf } from './sim.js';
 import { arenaOf, OUT_WARN_T } from './arena.js';
 import { withBots } from './bots.js';
 import { raceCourse, planLap, raceRoute, raceGuide, nodeXZ, LAPS, ordinal } from './race.js';
-import { createRemote, parseBlock, parseMode, INTERP } from './remote.js';
+import { createRemote, parseBlock, parseMode } from './remote.js';
 import { createPredictor } from './predict.js';
 import { createReplay, REPLAY_DELAY } from './replay.js';
 import { ptext, textW, wrapText, ICONS, drawIcon } from './font.js';
 
 const NET_HZ = 30;
-const BRIEF = "Vinny 'Snitch' Voxel sold out the crew to the LPPD. He's hiding at Diamond Plaza downtown with hired muscle. Make him disappear.";
-const BRIEF_MW = `Someone in Los Pixeles carries the mark. It pays $${MARK_CASH_PER_S} a second to whoever holds it, and whoever kills them takes it, plus a $${MARK_BOUNTY} bounty.`;
-const briefDm = (cap, guns) => `Everyone is fair game and nobody gets a star for it, inside the red fence. Leave it and you have ${OUT_WARN_T} seconds to get back. First to ${cap} kills wins, or the most when the clock runs out. ${guns ? 'Guns, cars, whatever works.' : 'No guns: cars and your fists.'}`;
-const briefRace = (laps, guns) => `${laps} lap${laps === 1 ? '' : 's'} through the checkpoints and back across the line. ${guns ? 'Anything goes: guns, traffic, cops.' : 'No guns: traffic, cops and your bumper.'} The first one home gives the rest ${RACE_END_T} seconds.`;
-/* what the death card says for each CAUSES entry; a name is filled in when a player did it */
-const CAUSE_TEXT = { pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG', sniper: 'SNIPER RIFLE', rpg: 'ROCKET', runover: 'RUN OVER', explosion: 'BLOWN UP', cop: 'SHOT BY THE LPPD', guard: 'SHOT BY THE BODYGUARDS', swat: 'SHOT BY SWAT', fence: 'LEFT THE ARENA' };
-const PICK_TEXT = { sniper: 'SNIPER RIFLE', rpg: 'ROCKET LAUNCHER', pistol: 'PISTOL', shotgun: 'SHOTGUN', smg: 'SMG' };
-/* the feed's line for a kill: a gun draws its icon between the two names, anything else is a verb; without a killer the victim's fate */
-const KILL_VERB = { runover: 'RAN OVER', explosion: 'BLEW UP', crash: 'KNOCKED OFF THE BIKE' };
-const DIED_TEXT = { cop: 'SHOT BY THE LPPD', swat: 'SHOT BY SWAT', guard: 'SHOT BY THE BODYGUARDS', runover: 'RUN OVER', explosion: 'BLOWN UP', crash: 'CAME OFF THE BIKE', fence: 'LEFT THE ARENA' };
-/* the feed: how long a line stays, how long it takes to fade, how many show (fewer on a phone) */
-const FEED_T = 8, FEED_FADE = 1.5, FEED_LINES = 5, FEED_LINES_PHONE = 3;
-/* the letter a weapon lying in the street shows on the minimap, and its square's colour */
+const T = makeT(STR);
+/* the words that need a little logic around them: an ordinal (1ST / 第1名), a lap count, the mode briefings */
+const ord = n => isZh() ? T('ord', { n }) : ordinal(n);
+const lapsText = n => T(n === 1 ? 'laps.1' : 'laps.n', { n });
+const briefDm = (cap, guns) => T('brief.dm', { t: OUT_WARN_T, cap, guns: T(guns ? 'brief.dm.guns' : 'brief.dm.noguns') });
+const briefRace = (laps, guns) => T('brief.race', { laps: lapsText(laps), guns: T(guns ? 'brief.race.guns' : 'brief.race.noguns'), t: RACE_END_T });
+/* the feed's line for a kill: a gun draws its icon between the two names, anything else is a verb ('kv.<cause>'); without a killer the victim's fate ('died.<cause>') */
+const KILL_VERBS = new Set(['runover', 'explosion', 'crash']), DIED = new Set(['cop', 'swat', 'guard', 'runover', 'explosion', 'crash', 'fence']);
+/* the feed: how long a line stays, how long it takes to fade, how many show (fewer on a phone); the floating messages: how many at once */
+const FEED_T = 8, FEED_FADE = 1.5, FEED_LINES = 5, FEED_LINES_PHONE = 3, FLOATS_MAX = 6, FLOAT_T = 2.5;
+/* the letter a weapon lying in the street shows on the minimap, and its square's colour (map symbols, like the N and the T: not words) */
 const PICK_MAP = { sniper: ['S', '#f4f4ff'], rpg: ['R', '#ff7a20'], pistol: ['P', '#c8c8d8'], shotgun: ['G', '#c8c8d8'], smg: ['M', '#c8c8d8'] };
-/* the control hints that mean nothing in a round without guns */
-const GUN_KEYS = new Set(['CLICK', '1-5 / Q', 'R', 'FIRE', 'WEAPON', 'RELOAD']);
+/* the rows of the controls card (strings.js `controls` / `controlsTouch`) that mean nothing in a round without guns */
+const GUN_CTL = new Set([2, 3, 4]), GUN_CTL_TOUCH = new Set([2, 5]);
 /* the driving jobs on the HUD, by JOB_KINDS index: the title, what rides along, the colour of its marker */
-const JOB_TEXT = [null, { title: 'TAXI DRIVER', who: 'FARE', color: 0xf2c014 }, { title: 'PARAMEDIC', who: 'PATIENT', color: 0xff4d4d }];
-const EVENT_TEXT = ['ARMORED TRUCK', 'AIRDROP'];
+const JOB_TEXT = [null, { title: 'job.taxi', who: 'who.fare', color: 0xf2c014 }, { title: 'job.ambulance', who: 'who.patient', color: 0xff4d4d }];
 /* players further than this (or off screen) get an arrow at the edge of the screen; nearer ones have their name over their head */
 const ARROW_FROM = 120;
 /* how fast a touch player's camera is pulled onto the soft-locked target while FIRE is held (per second) */
 const MAGNET = 5;
-const CONTROLS = [['WASD', 'move / drive'], ['MOUSE', 'look / aim'], ['CLICK', 'shoot (from the passenger seat too)'], ['1-5 / Q', 'switch weapon (or the wheel)'], ['R', 'reload'], ['F', 'enter / exit a car, ride along in a friend\'s, turn yourself in'], ['SHIFT', 'sprint'], ['SPACE', 'jump / handbrake'], ['M', 'sound on / off'], ['F3 / I', 'stats panel'], ['L', 'graphics detail'], ['ESC', 'pause']];
-const CONTROLS_TOUCH = [['LEFT SIDE', 'drag to move or drive · push all the way to run'], ['RIGHT SIDE', 'drag to look and aim'], ['FIRE', 'hold to shoot (from the passenger seat too) · drag on it to aim while shooting'], ['JUMP', 'jump on foot, handbrake in a car'], ['USE', 'enter or exit a car, ride along in a friend\'s, turn yourself in'], ['WEAPON', 'next weapon · RELOAD reloads'], ['☰', 'pause, sound, detail, look sensitivity']];
-/* the on-screen hints on a touch screen: the USE and JUMP buttons already say what they do, so only the two with no button stay */
-const HINT_TOUCH = ['', '', '', '', HINT[4], 'TURN YOURSELF IN   $100 A STAR', '', ''];
-/* graphics detail levels; the auto mode steps down when the frame rate stays low */
-const QUALITY = [{ name: 'HIGH', pr: 1.5, shadow: 2048 }, { name: 'MEDIUM', pr: 1, shadow: 1024 }, { name: 'LOW', pr: 1, shadow: 0 }];
-/* how far a thumb's drag turns the camera (radians per CSS pixel); the pitch moves a little less than the yaw */
-const LOOK = [{ name: 'LOW', k: 0.0045 }, { name: 'NORMAL', k: 0.0065 }, { name: 'HIGH', k: 0.0095 }];
+/* graphics detail levels ('q.<i>' names them); the auto mode steps down when the frame rate stays low */
+const QUALITY = [{ pr: 1.5, shadow: 2048 }, { pr: 1, shadow: 1024 }, { pr: 1, shadow: 0 }];
+/* how far a thumb's drag turns the camera (radians per CSS pixel; 'look.<i>' names them); the pitch moves a little less than the yaw */
+const LOOK = [{ k: 0.0045 }, { k: 0.0065 }, { k: 0.0095 }];
 const HTML = `<canvas class="gl"></canvas><canvas class="hud"></canvas><div class="sa"></div>
-<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl">DRAG HERE TO MOVE</div></div>
-<div class="look ctl" data-look><div class="lbl">DRAG HERE TO LOOK</div></div>
-<div class="tbtn ctl fire" data-fire><b>FIRE</b><small data-ammo></small></div>
-<div class="tbtn ctl jump" data-jump>JUMP</div>
-<div class="tbtn ctl use" data-use>USE</div>
-<div class="pill ctl weapon" data-weapon><canvas width="48" height="24"></canvas><b data-wname>PISTOL</b></div>
-<div class="pill ctl reload" data-reload>RELOAD</div>
+<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl" data-l="dragMove"></div></div>
+<div class="look ctl" data-look><div class="lbl" data-l="dragLook"></div></div>
+<div class="tbtn ctl fire" data-fire><b data-l="t.fire"></b><small data-ammo></small></div>
+<div class="tbtn ctl jump" data-jump></div>
+<div class="tbtn ctl use" data-use></div>
+<div class="pill ctl weapon" data-weapon><canvas width="48" height="24"></canvas><b data-wname></b></div>
+<div class="pill ctl reload" data-reload data-l="t.reload"></div>
 <div class="menu-btn ctl" data-menu>☰</div>
+<div class="menu-btn ctl board-btn" data-board data-l="t.board"></div>
 <div class="overlay" hidden><div class="card"><h1 data-title></h1><div class="sub" data-sub></div><div class="controls" data-controls></div><table class="score" data-score hidden></table><table class="score awards" data-awards hidden></table><div class="foot" data-foot></div></div></div>
-<div class="rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>FABLE THEFT AUTO PLAYS IN LANDSCAPE</small></div></div>`;
+<div class="rotate"><div><div class="phone">📱</div><span data-l="rotate"></span><small data-l="rotate.sub"></small></div></div>`;
 const rr = (a, b) => a + Math.random() * (b - a);
 const r2 = v => Math.round(v * 100) / 100, r3 = v => Math.round(v * 1000) / 1000;
 const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-/* the results card's awards: what the host's key is called and how its value reads (the extra is the nemesis's victim or the driver's distance) */
+/* the results card's awards: how the host's value reads ('aw.<key>' is its name; the extra is the nemesis's victim or the driver's distance) */
 const AWARDS = {
-  lap: ['FASTEST LAP', v => `${fmtClock(v)}.${Math.floor((v % 1) * 10)}`], killer: ['MOST KILLS', v => `${v} KILL${v === 1 ? '' : 'S'}`],
-  nemesis: ['NEMESIS', (v, x, nameOf) => `WASTED ${nameOf(x).toUpperCase()} ${v} TIMES`], victim: ['MOST WASTED', v => `${v} DEATHS`],
-  fugitive: ['LONGEST CHASE', v => `${fmtClock(v)} ON THE RUN`], cabbie: ['BEST CABBIE', v => `${v} FARES IN A ROW`],
-  speed: ['SPEED DEMON', v => `${Math.round(v)} KM/H`], driver: ['SAFEST DRIVER', (v, km) => `${v === 0 ? 'NO' : v} CRASH${v === 1 ? '' : 'ES'} IN ${km} KM`],
-  loot: ['BIGGEST LOOTER', v => `$${v} PICKED UP`],
+  lap: v => `${fmtClock(v)}.${Math.floor((v % 1) * 10)}`, killer: v => T(v === 1 ? 'awv.kills.1' : 'awv.kills', { n: v }),
+  nemesis: (v, x, nameOf) => T('awv.nemesis', { name: nameOf(x), n: v }), victim: v => T('awv.victim', { n: v }),
+  fugitive: v => T('awv.fugitive', { t: fmtClock(v) }), cabbie: v => T('awv.cabbie', { n: v }),
+  speed: v => T('awv.speed', { n: Math.round(v) }), driver: (v, km) => T(v === 0 ? 'awv.driver.0' : v === 1 ? 'awv.driver.1' : 'awv.driver', { n: v, km }),
+  loot: v => T('awv.loot', { n: v }),
 };
 
 /* ============================================================ sound - the original synth on the shell's shared AudioContext */
@@ -220,9 +225,10 @@ export async function create({ mount, audio, send, hooks }) {
   { let saved = null; try { saved = localStorage.getItem('lan_gta_quality'); } catch {} if (saved !== null && QUALITY[+saved]) setQuality(+saved, true); else if (touch) setQuality(1); } // phones and tablets start a tier down, still in auto mode
   function cycleQuality() { // HIGH -> MEDIUM -> LOW -> AUTO
     if (autoQuality) setQuality(0, true); else if (quality < QUALITY.length - 1) setQuality(quality + 1, true); else { autoQuality = true; setQuality(touch ? 1 : 0); try { localStorage.removeItem('lan_gta_quality'); } catch {} }
-    floatText((autoQuality ? 'AUTO' : QUALITY[quality].name) + ' DETAIL', 0x9fb4dc);
+    floatText(() => T('q.float', { q: qualityName() }), 0x9fb4dc);
   }
-  const qualityLabel = () => 'DETAIL: ' + (autoQuality ? 'AUTO (' + QUALITY[quality].name + ')' : QUALITY[quality].name);
+  const qualityName = () => autoQuality ? T('q.auto', { q: T('q.' + quality) }) : T('q.' + quality);
+  const qualityLabel = () => T('btn.detail', { q: qualityName() });
   const cam = { x: 0, y: 5, z: 0, dx: 0, dy: 0, dz: 1, lx: 0, ly: 0, lz: 1 };
   /* the view model the camera, HUD and audio read; filled from the sim (host) or the snapshot store (client) */
   const V = { me: null, subj: { x: 0, y: 0, z: 0, inCar: null, dead: false }, car: null, timeLeft: -1, phase: 0, ms: 0, vin: null, cops: [], players: [], blocks: [], md: parseMode(null) };
@@ -250,22 +256,28 @@ export async function create({ mount, audio, send, hooks }) {
   }
 
   /* ---- events from the simulation (host: as they happen; client: from the snapshots) -> local effects and sounds */
-  const floatText = (text, color) => floats.push({ text, color, t: 0 });
+  /* a floating message: its text is a function, so a language switch rewords the ones on screen; at most FLOATS_MAX (the oldest
+     go first), and each eases to its slot instead of jumping when the one below it expires */
+  const floatText = (text, color) => { floats.push({ text: typeof text === 'function' ? text : () => text, color, t: 0, slot: floats.length }); if (floats.length > FLOATS_MAX) floats.splice(0, floats.length - FLOATS_MAX); };
   const mine = idx => idx === myIdx;
   const nameOf = idx => ((session && session.players[idx]) || {}).name || '?';
-  /* the feed in the top-left corner: a line is a few parts, each a coloured word or a gun icon; the newest line is on top */
+  /* the vars of a key off the wire, put into words here: a player `p` becomes `name`, a street `st` and a district `d` are named, a job's `who` said */
+  const sayVars = v => { const o = { ...v }; if (v.p !== undefined) o.name = nameOf(v.p); if (v.st !== undefined) o.st = streetName(v.st); if (v.d !== undefined) o.d = districtName(v.d); if (v.who !== undefined) o.who = T('who.' + v.who); return o; };
+  const sayFloat = (key, v) => { if (!v) return T(key); let str = T(key, sayVars(v)); if (v.tip) str += '  ' + T('f.tip', { n: v.tip }); if (v.streak) str += '  ' + T('f.streak', { k: v.k, n: v.streak }); return str; };
+  /* the feed in the top-left corner: a line is a few parts, each a coloured word (a string or a function of the language) or a gun icon; the newest line is on top */
   const feedLine = (...parts) => { feed.unshift({ parts, t: 0 }); if (feed.length > 12) feed.length = 12; };
   const pname = idx => ({ t: nameOf(idx), c: idx === myIdx ? '#ffffff' : hex(playerColor(idx)) });
   const said = (t, c = '#dddddd') => ({ t, c });
+  const partText = p => typeof p.t === 'function' ? p.t() : String(p.t);
   const NEWS_LINE = { // what a `news` event puts in the feed
-    gun: (idx, key) => [pname(idx), said('FOUND A ' + (PICK_TEXT[key] || key), '#ffe14d'), { icon: key }],
-    stars: idx => [pname(idx), said('IS WANTED  *****', '#ffe14d')],
-    escape: (idx, bonus) => [pname(idx), said('ESCAPED A 5-STAR CHASE  +$' + bonus, '#7fe0ff')],
-    busted: idx => [pname(idx), said('WENT TO THE PRECINCT', '#4d8bff')],
-    truck: (idx, street) => idx >= 0 ? [pname(idx), said('BLEW THE TRUCK OPEN ON ' + street, '#3dff7a')] : [said('THE ARMORED TRUCK IS OPEN ON ' + street, '#3dff7a')],
-    drop: (idx, district) => [said('AIRDROP DOWN IN ' + district, '#3dff7a')],
-    streak: (idx, n) => [pname(idx), said(n + ' FARES IN A ROW', '#f2c014')],
-    left: idx => [pname(idx), said('LEFT THE CITY', '#9fb4dc')],
+    gun: (idx, key) => [pname(idx), said(() => T('n.gun', { w: T('pk.' + key) }), '#ffe14d'), { icon: key }],
+    stars: idx => [pname(idx), said(() => T('n.stars'), '#ffe14d')],
+    escape: (idx, bonus) => [pname(idx), said(() => T('n.escape', { n: bonus }), '#7fe0ff')],
+    busted: idx => [pname(idx), said(() => T('n.busted'), '#4d8bff')],
+    truck: (idx, st) => idx >= 0 ? [pname(idx), said(() => T('n.truckBy', { st: streetName(st) }), '#3dff7a')] : [said(() => T('n.truck', { st: streetName(st) }), '#3dff7a')],
+    drop: (idx, d) => [said(() => T('n.drop', { d: districtName(d) }), '#3dff7a')],
+    streak: (idx, n) => [pname(idx), said(() => T('n.streak', { n }), '#f2c014')],
+    left: idx => [pname(idx), said(() => T('n.left'), '#9fb4dc')],
   };
   function onEvent(ev) {
     const mx = V.subj.x, mz = V.subj.z, d2 = (x, z) => dist2(x, z, mx, mz), near = (x, z) => d2(x, z) < 350 * 350, vol = (x, z, range) => clamp(1 - Math.sqrt(d2(x, z)) / range, 0, 1);
@@ -284,31 +296,32 @@ export async function create({ mount, audio, send, hooks }) {
       case 'wasted': if (mine(ev[1])) sfx.wasted(); break;
       case 'respawn': if (mine(ev[1])) { camYaw = 0; camPitch = 0.22; } break;
       case 'wanted': if (mine(ev[1])) { wantedFlash = 3; sfx.wanted(); } break;
-      case 'float': if (ev[1] === -1 || mine(ev[1])) floatText(ev[2], ev[3]); break;
-      case 'pickup': if (mine(ev[1])) { if (ev[2] === 'cash') { sfx.cash(); floatText('+$' + ev[3], 0x3dff7a); } else if (ev[2] === 'ammo') { sfx.pickup(); floatText('AMMO', 0xffe14d); }
-        else if (ev[2] === 'bribe') { sfx.cleared(); floatText(ev[3] > 0 ? 'BRIBE ACCEPTED  -1 STAR' : 'BRIBE ACCEPTED  YOU LOST THE COPS', 0x4d8bff); }
-        else if (PICK_TEXT[ev[2]]) { sfx.cleared(); floatText(PICK_TEXT[ev[2]] + '  ' + ev[3] + ' ROUNDS', 0xffe14d); } else { sfx.pickup(); floatText('+HEALTH', 0xff4d4d); } } break;
+      case 'float': if (ev[1] === -1 || mine(ev[1])) { const [, , key, color, v] = ev; floatText(() => sayFloat(key, v), color); } break;
+      case 'pickup': if (mine(ev[1])) { const [, , kind, n] = ev; if (kind === 'cash') { sfx.cash(); floatText(() => T('p.cash', { n }), 0x3dff7a); } else if (kind === 'ammo') { sfx.pickup(); floatText(() => T('p.ammo'), 0xffe14d); }
+        else if (kind === 'bribe') { sfx.cleared(); floatText(() => T(n > 0 ? 'p.bribe' : 'p.bribe0'), 0x4d8bff); }
+        else if (WEAPONS.some(w => w.key === kind)) { sfx.cleared(); floatText(() => T('p.gun', { w: T('pk.' + kind), n }), 0xffe14d); } else { sfx.pickup(); floatText(() => T('p.health'), 0xff4d4d); } } break;
       case 'cleared': if (mine(ev[1])) { sfx.cleared(); wantedFlash = 0; } break;
       case 'click': if (mine(ev[1])) sfx.click(); break;
       case 'enter': if (mine(ev[1])) sfx.enter(); break;
       case 'reload': if (mine(ev[1])) sfx.reload(); break;
-      case 'passed': sfx.passed(); if (ev[1] >= 0) feedLine(pname(ev[1]), said('WHACKED THE SNITCH  +$5000', '#ffe14d')); break;
+      case 'passed': sfx.passed(); if (ev[1] >= 0) feedLine(pname(ev[1]), said(() => T('n.passed'), '#ffe14d')); break;
       case 'over': awards = Array.isArray(ev[1]) ? ev[1] : []; showOver(); break;
       case 'kill': { const [, killer, whom, ci] = ev, cause = CAUSES[ci] || '';
-        if (killer >= 0) feedLine(pname(killer), ICONS[cause] ? { icon: cause } : said(KILL_VERB[cause] || 'WASTED'), pname(whom));
-        else feedLine(pname(whom), said(DIED_TEXT[cause] || 'WASTED')); break; }
-      case 'news': { const line = NEWS_LINE[ev[1]]; if (line) feedLine(...line(ev[2], ev[3])); if (ev[1] === 'left') floatText(nameOf(ev[2]).toUpperCase() + ' LEFT THE CITY', 0x9fb4dc); break; }
-      case 'mark': { const [, who, why] = ev; if (mine(who)) { floatText(why === 'start' ? 'YOU ARE THE MOST WANTED. STAY ALIVE.' : 'YOU TOOK THE MARK. STAY ALIVE.', 0xffe14d); sfx.wanted(); }
-        else { floatText(nameOf(who) + ' IS THE MOST WANTED', 0xffe14d); sfx.cleared(); } feedLine(pname(who), said('IS THE MOST WANTED', '#ffe14d')); break; }
-      case 'wevent': { floatText(ev[4], 0x3dff7a); sfx.cleared(); feedLine(said(ev[4], '#3dff7a')); break; }
+        if (killer >= 0) feedLine(pname(killer), ICONS[cause] ? { icon: cause } : said(() => T(KILL_VERBS.has(cause) ? 'kv.' + cause : 'kv.wasted')), pname(whom));
+        else feedLine(pname(whom), said(() => T(DIED.has(cause) ? 'died.' + cause : 'died.wasted'))); break; }
+      case 'news': { const line = NEWS_LINE[ev[1]]; if (line) feedLine(...line(ev[2], ev[3])); if (ev[1] === 'left') { const who = ev[2]; floatText(() => T('f.leftCity', { name: nameOf(who) }), 0x9fb4dc); } break; }
+      case 'mark': { const [, who, why] = ev; if (mine(who)) { floatText(() => T(why === 'start' ? 'm.start' : 'm.took'), 0xffe14d); sfx.wanted(); }
+        else { floatText(() => T('m.other', { name: nameOf(who) }), 0xffe14d); sfx.cleared(); } feedLine(pname(who), said(() => T('n.mark'), '#ffe14d')); break; }
+      case 'wevent': { const [, kind, x, z] = ev, text = () => kind === 1 ? T('we.airdrop', { d: districtName(districtRef(x, z)) }) : T('we.truck', { st: streetName(streetRef(x, z)) }); // the place is named here, from where it is
+        floatText(text, 0x3dff7a); sfx.cleared(); feedLine(said(text, '#3dff7a')); break; }
       case 'job': if (mine(ev[1])) { const w = ev[2]; if (w === 'paid') sfx.cash(); else if (w === 'fail') sfx.wanted(); else if (w === 'pickup') sfx.enter(); else if (w === 'start' || w === 'fare') sfx.pickup(); } break;
       case 'wland': { const [, x, z] = ev; if (near(x, z)) { fx.burst.dust(x, 0.5, z); fx.burst.crash(x, 1, z, 10); } sfx.crash(vol(x, z, 200)); break; }
       case 'go': { goT = 1.2; sfx.passed(); break; }
       case 'cp': if (mine(ev[1])) { const [, , passed, lap] = ev, n = course ? course.length : 1, k = passed % n; sfx.pickup();
-        floatText(k === 0 ? (lap >= laps - 1 ? 'FINAL LAP' : 'LAP ' + (lap + 1) + ' OF ' + laps) : 'CHECKPOINT ' + k + ' OF ' + (n - 1), 0x2fd0ff); } break;
-      case 'finish': { const [, who, place] = ev; if (mine(who)) { finishT = 4; sfx.passed(); floatText('YOU FINISHED ' + ordinal(place), 0xffe14d); }
-        else { floatText(nameOf(who) + ' FINISHED ' + ordinal(place), 0xffe14d); if (place === 1) { floatText('THE RACE ENDS IN ' + RACE_END_T + ' SECONDS', 0xff6060); sfx.wanted(); } }
-        feedLine(pname(who), said('FINISHED ' + ordinal(place), '#ffe14d')); break; }
+        floatText(() => k === 0 ? (lap >= laps - 1 ? T('cp.final') : T('cp.lap', { n: lap + 1, laps })) : T('cp.cp', { k, n: n - 1 }), 0x2fd0ff); } break;
+      case 'finish': { const [, who, place] = ev; if (mine(who)) { finishT = 4; sfx.passed(); floatText(() => T('fin.you', { o: ord(place) }), 0xffe14d); }
+        else { floatText(() => T('fin.other', { name: nameOf(who), o: ord(place) }), 0xffe14d); if (place === 1) { floatText(() => T('fin.ends', { n: RACE_END_T }), 0xff6060); sfx.wanted(); } }
+        feedLine(pname(who), said(() => T('n.finish', { o: ord(place) }), '#ffe14d')); break; }
     }
   }
 
@@ -316,7 +329,7 @@ export async function create({ mount, audio, send, hooks }) {
   const act = (a, n) => { if (state !== 'play') return; if (isHost) { if (sim) sim.action(me, a, n); } else send({ t: 'a', to: hostId, a, n }); };
   /* whether I can shoot right now: on foot, or in a car on a passenger seat (the driver drives) */
   const canShoot = me => guns && !!me && !me.dead && (me.carId < 0 || me.seat > 0);
-  const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', ShiftLeft: 'sprint', ShiftRight: 'sprint', Space: 'space' }, {
+  const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', ShiftLeft: 'sprint', ShiftRight: 'sprint', Space: 'space', Tab: 'board' }, {
     onKey: e => {
       if (e.code === 'Escape') { if (state === 'play' && fallbackMouse) pause(); else if (state === 'paused') grab(); return; }
       if (e.code === 'KeyM') { audio.toggle(); return; }
@@ -336,11 +349,12 @@ export async function create({ mount, audio, send, hooks }) {
      FIRE aims while shooting. The stick goes to the host as an analog pair next to the key bits (motion.js) and the
      input carries `a` so the host widens the soft lock for a thumb. */
   const tc = createTouch();
-  const tb = touch ? { pad: $('[data-pad]'), look: $('[data-look]'), fire: $('[data-fire]'), ammo: $('[data-ammo]'), jump: $('[data-jump]'), use: $('[data-use]'), wname: $('[data-wname]'), wicon: $('[data-weapon] canvas').getContext('2d'), reload: $('[data-reload]'), menu: $('[data-menu]') } : null;
+  const tb = touch ? { pad: $('[data-pad]'), look: $('[data-look]'), fire: $('[data-fire]'), ammo: $('[data-ammo]'), jump: $('[data-jump]'), use: $('[data-use]'), wname: $('[data-wname]'), wicon: $('[data-weapon] canvas').getContext('2d'), reload: $('[data-reload]'), menu: $('[data-menu]'), board: $('[data-board]') } : null;
+  let boardOpen = false; // the touch SCORES button's scoreboard (TAB is held instead)
   let lookLevel = 1;
   { let saved = null; try { saved = localStorage.getItem('lan_gta_look'); } catch {} if (saved !== null && LOOK[+saved]) lookLevel = +saved; }
-  function cycleLook() { lookLevel = (lookLevel + 1) % LOOK.length; try { localStorage.setItem('lan_gta_look', String(lookLevel)); } catch {} floatText('LOOK: ' + LOOK[lookLevel].name, 0x9fb4dc); }
-  const lookLabel = () => 'LOOK: ' + LOOK[lookLevel].name;
+  const lookLabel = () => T('btn.look', { l: T('look.' + lookLevel) });
+  function cycleLook() { lookLevel = (lookLevel + 1) % LOOK.length; try { localStorage.setItem('lan_gta_look', String(lookLevel)); } catch {} floatText(lookLabel, 0x9fb4dc); }
   /* a look surface reports the whole drag since the finger landed; the camera takes the part it has not seen yet (touchLook) */
   const dragStart = st => { st.px = 0; st.py = 0; };
   const stickS = touch ? tc.pad(tb.pad, { range: 60, dead: 6, axes: 2, onDown: () => audio.init() }) : null;
@@ -352,6 +366,7 @@ export async function create({ mount, audio, send, hooks }) {
     tc.button($('[data-weapon]'), { onDown: () => { audio.init(); act('wnext', 1); } });
     tc.button(tb.reload, { onDown: () => { audio.init(); act('reload'); } });
     tb.menu.addEventListener('click', () => { audio.init(); if (state === 'play') pause(); else if (state === 'paused') grab(); });
+    tb.board.addEventListener('click', () => { boardOpen = !boardOpen; tb.board.classList.toggle('on', boardOpen); });
   }
   /* the stick as the analog pair the movement code takes (right, forward; -1..1), rounded the way it goes on the wire so
      the prediction matches the host. In a car a light forward push is already full gas, so a thumb steering hard keeps
@@ -433,41 +448,58 @@ export async function create({ mount, audio, send, hooks }) {
   function showOver() { if (state === 'over' || state === 'idle') return; state = 'over'; fireHeld = false; kb.reset(); tc.releaseAll(); root.classList.add('over'); if (document.pointerLockElement === root) document.exitPointerLock(); showOverlay('over'); }
 
   /* ---- overlays: click to play / paused / time's up */
+  let overlayKind = null, rematchOn = false, votes = [], votesEl = null; // the card on show (redrawn in the new language), my rematch vote as a guest, the guests' votes as the host
   function button(label, cls, fn) { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; ov.foot.appendChild(b); return b; }
+  const votesText = () => votes.length ? T(votes.length === 1 ? 'wantRematch.1' : 'wantRematch', { n: votes.length }) : '';
   function showOverlay(kind) {
+    overlayKind = kind; votesEl = null;
     ov.el.hidden = false; ov.foot.innerHTML = ''; ov.score.hidden = kind !== 'over'; ov.awards.hidden = kind !== 'over' || !awards.length; ov.controls.hidden = kind === 'over' || (kind === 'paused' && touch); // the touch pause card is short: HOW TO PLAY unfolds the list
-    ov.controls.innerHTML = (touch ? CONTROLS_TOUCH : CONTROLS).filter(([k]) => guns || !GUN_KEYS.has(k)).map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('');
-    const restart = !online || isHost, exitLabel = !online ? 'MENU' : 'BACK TO LOBBY', tap = touch ? 'TAP' : 'CLICK';
+    const gunRows = touch ? GUN_CTL_TOUCH : GUN_CTL;
+    ov.controls.innerHTML = T(touch ? 'controlsTouch' : 'controls').filter((_, i) => guns || !gunRows.has(i)).map(([k, v]) => `<kbd>${esc(k)}</kbd><span>${esc(v)}</span>`).join('');
+    const host = !online || isHost, exitLabel = T(!online ? 'btn.menu' : 'btn.lobby');
+    const leave = () => button(T('btn.leave'), '', () => hooks.onLeave?.()); // a guest's way out of the room
     if (kind === 'grab') {
-      ov.title.innerHTML = 'FABLE THEFT AUTO <b>5.1</b>'; ov.sub.textContent = `LOS PIXELES  ·  ${tap} TO PLAY`;
-      const f = document.createElement('div'); f.textContent = modeName() === 'mostWanted' ? 'MOST WANTED: CARRY THE MARK, HUNT THE MARK' : modeName() === 'deathmatch' ? `DEATHMATCH: FIRST TO ${killCap} KILLS` : modeName() === 'race' ? `STREET RACE: ${laps} LAP${laps === 1 ? '' : 'S'}, ${guns ? 'ANYTHING GOES' : 'NO GUNS'}` : 'MISSION: THE DOWNTOWN HIT'; f.style.color = '#ffe14d'; ov.foot.appendChild(f);
+      ov.title.innerHTML = `${esc(T('title'))} <b>5.1</b>`; ov.sub.textContent = `${T('city')}  ·  ${T(touch ? 'grab.tap' : 'grab.click')}`;
+      const f = document.createElement('div'), m = modeName(); f.textContent = m === 'mostWanted' ? T('card.mw') : m === 'deathmatch' ? T('card.dm', { n: killCap }) : m === 'race' ? T('card.race', { laps: lapsText(laps), guns: T(guns ? 'anyGoes' : 'noGuns') }) : T('card.hit'); f.style.color = '#ffe14d'; ov.foot.appendChild(f);
     } else if (kind === 'paused') {
-      ov.title.textContent = 'PAUSED'; ov.sub.textContent = (online ? 'THE CITY KEEPS RUNNING WITHOUT YOU  ·  ' : '') + `${tap} TO RESUME`;
-      button('RESUME', 'good', grab);
-      button(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); showOverlay('paused'); });
+      ov.title.textContent = T('paused'); ov.sub.textContent = (online ? T('paused.online') + '  ·  ' : '') + T(touch ? 'resume.tap' : 'resume.click');
+      button(T('btn.resume'), 'good', grab);
+      button(T(audio.muted ? 'btn.soundOff' : 'btn.soundOn'), '', () => { audio.toggle(); showOverlay('paused'); });
       button(qualityLabel(), '', () => { cycleQuality(); showOverlay('paused'); });
-      if (touch) { button(lookLabel(), '', () => { cycleLook(); showOverlay('paused'); }); button('HOW TO PLAY', '', () => { ov.controls.hidden = !ov.controls.hidden; }); }
-      button(showStats ? 'STATS: ON' : 'STATS: OFF', '', () => { showStats = !showStats; showOverlay('paused'); });
-      if (restart) { button(!online ? 'RESTART' : 'RESTART FOR EVERYONE', '', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
+      if (touch) { button(lookLabel(), '', () => { cycleLook(); showOverlay('paused'); }); button(T('btn.howto'), '', () => { ov.controls.hidden = !ov.controls.hidden; }); }
+      button(T(showStats ? 'btn.statsOn' : 'btn.statsOff'), '', () => { showStats = !showStats; showOverlay('paused'); });
+      if (host) { if (sim && sim.S.phase !== 'over') button(T('btn.endRound'), '', () => { if (sim) sim.endRound(); }); // results and awards now: the only way an unlimited round ends
+        button(T(!online ? 'btn.restart' : 'btn.restartAll'), '', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
+      else leave();
     } else {
       const mw = modeName() === 'mostWanted', race = modeName() === 'race', dm = modeName() === 'deathmatch', n = course ? course.length : 1;
       const capped = dm && V.blocks.some(b => b.kills >= killCap); // ended on the cap, not the clock
-      ov.title.textContent = race ? 'RACE OVER' : capped ? 'DEATHMATCH OVER' : "TIME'S UP"; ov.sub.textContent = race ? 'FINAL STANDINGS  ·  FIRST ACROSS THE LINE WINS' : dm ? 'FINAL STANDINGS  ·  MOST KILLS WINS' : 'FINAL STANDINGS  ·  MOST CASH WINS';
-      const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) }))
-        .sort((a, c) => race ? ((a.b.rank || 99) - (c.b.rank || 99)) : dm ? (c.b.kills - a.b.kills) || (c.b.cash - a.b.cash) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills));
-      const raceCell = b => b.place ? `<td class="n mark">FINISHED ${ordinal(b.place)}</td>` : `<td class="n">LAP ${Math.min(laps, b.lap + 1)}/${laps}  ·  CP ${b.next === 0 ? n - 1 : b.next - 1}/${n - 1}</td>`;
-      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${(session.players[r.i] || {}).bot ? '<span class="left">CPU</span>' : ''}${r.b.gone ? '<span class="left">LEFT</span>' : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${r.b.kills} kills</td>${mw ? `<td class="n mark">${fmtClock(r.b.markT)} marked</td>` : ''}</tr>`).join('');
-      ov.awards.innerHTML = awards.map(([key, idx, v, x]) => { const a = AWARDS[key]; return a ? `<tr class="${idx === myIdx ? 'me' : ''}"><td class="aw">${a[0]}</td><td><span class="sw" style="background:${hex(playerColor(idx))}"></span>${esc(nameOf(idx))}</td><td class="n mark">${esc(a[1](v, x, nameOf))}</td></tr>` : ''; }).join('');
-      if (restart) { button('PLAY AGAIN', 'primary', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.()); }
-      else ov.foot.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
+      ov.title.textContent = T(race ? 'over.race' : capped ? 'over.dm' : V.timeLeft === 0 ? 'over.time' : 'over.ended'); ov.sub.textContent = T(race ? 'sub.race' : dm ? 'sub.dm' : 'sub.cash'); // ended before the clock (or with none): the host called it
+      const rows = V.blocks.map((b, i) => ({ b, i, name: (session.players[i] || {}).name || '?', color: playerColor(i) })).sort(standing);
+      const raceCell = b => b.place ? `<td class="n mark">${esc(T('sc.finished', { o: ord(b.place) }))}</td>` : `<td class="n">${esc(T('sc.lapcp', { lap: Math.min(laps, b.lap + 1), laps, cp: b.next === 0 ? n - 1 : b.next - 1, n: n - 1 }))}</td>`;
+      ov.score.innerHTML = rows.map((r, k) => `<tr class="${r.i === myIdx ? 'me' : ''}"><td>${k + 1}</td><td><span class="sw" style="background:${hex(r.color)}"></span>${esc(r.name)}${(session.players[r.i] || {}).bot ? `<span class="left">${esc(T('sc.cpu'))}</span>` : ''}${r.b.gone ? `<span class="left">${esc(T('sc.left'))}</span>` : ''}</td>${race ? raceCell(r.b) : `<td class="n cash">$${r.b.cash}</td>`}<td class="n kills">${esc(T('sc.kills', { n: r.b.kills }))}</td>${mw ? `<td class="n mark">${esc(T('sc.marked', { t: fmtClock(r.b.markT) }))}</td>` : ''}</tr>`).join('');
+      ov.awards.innerHTML = awards.map(([key, idx, v, x]) => { const a = AWARDS[key]; return a ? `<tr class="${idx === myIdx ? 'me' : ''}"><td class="aw">${esc(T('aw.' + key))}</td><td><span class="sw" style="background:${hex(playerColor(idx))}"></span>${esc(nameOf(idx))}</td><td class="n mark">${esc(a(v, x, nameOf))}</td></tr>` : ''; }).join('');
+      if (host) { button(T('btn.again'), 'primary', () => hooks.onRestart?.()); button(exitLabel, '', () => hooks.onExit?.());
+        if (online) { votesEl = document.createElement('div'); votesEl.className = 'votes'; votesEl.textContent = votesText(); ov.foot.appendChild(votesEl); } }
+      else { const w = document.createElement('div'); w.className = 'wait'; w.textContent = T('waitHost'); ov.foot.appendChild(w);
+        const b = button(T(rematchOn ? 'btn.rematchOn' : 'btn.rematch'), rematchOn ? 'good' : '', () => { rematchOn = !rematchOn; hooks.onRematch?.(rematchOn); b.textContent = T(rematchOn ? 'btn.rematchOn' : 'btn.rematch'); b.classList.toggle('good', rematchOn); });
+        leave(); }
     }
+  }
+  /* the table's order: the race by standing, the deathmatch by kills, the rest by cash (the results card and the scoreboard) */
+  function standing(a, c) { const m = modeName(); return m === 'race' ? ((a.b.rank || 99) - (c.b.rank || 99)) : m === 'deathmatch' ? (c.b.kills - a.b.kills) || (c.b.cash - a.b.cash) : (c.b.cash - a.b.cash) || (c.b.kills - a.b.kills); }
+  /* the words on the DOM: the touch labels, and the card on show */
+  function relabel() {
+    for (const el of root.querySelectorAll('[data-l]')) el.textContent = T(el.dataset.l);
+    touchKey = ''; if (!ov.el.hidden && overlayKind) showOverlay(overlayKind);
   }
 
   /* ---- networking glue */
   function hostNetTick(dt) {
     netAcc += dt; if (netAcc < 1 / NET_HZ) return; netAcc = 0;
     sim.prepareNet();
-    for (const c of clients) if (!c.pl.gone) { const msg = sim.snapshotFor(c); msg.hf = Math.round(fps); send(msg); count(netStats.out, 's'); net.outMsgs++; net.outBytes += JSON.stringify(msg).length; }
+    const ts = Math.round(performance.now()); // my clock: each client maps it onto its own (remote.js), so a burst keeps its spacing
+    for (const c of clients) if (!c.pl.gone) { const msg = sim.snapshotFor(c); msg.hf = Math.round(fps); msg.ts = ts; send(msg); count(netStats.out, 's'); net.outMsgs++; net.outBytes += JSON.stringify(msg).length; }
     sim.endNet();
   }
   /* while playing, every frame carries an input (with its sequence number for the predictor); otherwise only changes and a keepalive */
@@ -521,11 +553,11 @@ export async function create({ mount, audio, send, hooks }) {
   /* the killcam (replay.js): the last seconds before a death by another player's hand, played back from behind the killer once the fall has been seen */
   const replay = createReplay(); let killcamT = -1;
   function noteDeath() {
-    const me = V.me; if (!me) { death = { killer: -1, line1: 'WASTED', line2: '', t: 0 }; return; }
+    const me = V.me; if (!me) { death = { killer: -1, line1: () => T('wasted'), line2: () => '', t: 0 }; return; }
     const k = me.killer, cause = CAUSES[me.cause] || '', P = k >= 0 ? V.players[k] : null;
-    const dist = P ? Math.round(Math.hypot(P.x - V.subj.x, P.z - V.subj.z)) : 0;
-    let line1 = 'WASTED', line2 = CAUSE_TEXT[cause] || '';
-    if (P) { line1 = (cause === 'runover' ? 'RUN OVER BY ' : cause === 'explosion' ? 'BLOWN UP BY ' : 'WASTED BY ') + P.name.toUpperCase(); line2 = (CAUSE_TEXT[cause] && cause !== 'runover' && cause !== 'explosion' ? CAUSE_TEXT[cause] + '  ·  ' : '') + dist + ' M'; }
+    const dist = P ? Math.round(Math.hypot(P.x - V.subj.x, P.z - V.subj.z)) : 0, named = cause && cause !== 'runover' && cause !== 'explosion' && T('cause.' + cause) !== 'cause.' + cause;
+    let line1 = () => T('wasted'), line2 = () => cause && T('cause.' + cause) !== 'cause.' + cause ? T('cause.' + cause) : ''; // the lines are functions: the language may change while the card is up
+    if (P) { const name = P.name; line1 = () => T(cause === 'runover' ? 'd.runBy' : cause === 'explosion' ? 'd.blownBy' : 'd.by', { name }); line2 = () => (named ? T('cause.' + cause) + '  ·  ' : '') + T('d.dist', { n: dist }); }
     death = { killer: P ? k : -1, line1, line2, t: 0 };
   }
   /* where the route on the minimap, the yellow square and the marker column point: the race's next checkpoint, else my job's
@@ -544,10 +576,16 @@ export async function create({ mount, audio, send, hooks }) {
   }
   function goalOf() {
     const me = V.me, j = me && me.job, jt = j && JOB_TEXT[j.kind];
-    if (course && me && !me.place) { const cp = nodeXZ(course[me.next]); return { x: cp.x, z: cp.z, color: 0x2fd0ff, label: me.next === 0 ? 'FINISH' : 'CP ' + me.next, marker: true }; }
-    if (j && jt && j.stage > 0) return { x: j.x, z: j.z, color: jt.color, label: j.stage === 1 ? jt.who : 'DROP OFF', marker: true };
+    if (course && me && !me.place) { const cp = nodeXZ(course[me.next]), next = me.next; return { x: cp.x, z: cp.z, color: 0x2fd0ff, label: () => next === 0 ? T('finish') : T('cpn', { n: next }), marker: true }; }
+    if (j && jt && j.stage > 0) return { x: j.x, z: j.z, color: jt.color, label: () => j.stage === 1 ? T(jt.who) : T('dropoff'), marker: true };
     const ms = MISSION_STATES[V.ms]; const tgt = ms === 'goto' || ms === 'intro' ? PLAZA : ms === 'hit' && V.vin ? V.vin : null;
-    return tgt ? { x: tgt.x, z: tgt.z, color: 0xffe14d, label: 'TARGET', marker: false } : null;
+    return tgt ? { x: tgt.x, z: tgt.z, color: 0xffe14d, label: () => T('target'), marker: false } : null;
+  }
+  /* spawn protection: a protected player (my own body included) blinks, so nobody wastes a magazine on them */
+  function blinkProtected() {
+    if (replay.active || V.phase !== 0 || Math.floor(t * 10) % 2) return;
+    V.blocks.forEach((b, i) => { if (!b || !b.god || b.dead || b.gone || b.carId >= 0) return; const e = isHost ? sim && sim.players[i] && sim.players[i].ped : remote && remote.get(b.pedId); if (e && e.view) e.view.hide(); });
+    W.dirtyDynamic();
   }
   function localFrame(dt) {
     if (lockPending > 0) { lockPending -= dt; if (lockPending <= 0 && !document.pointerLockElement && state === 'play') fallbackMouse = true; }
@@ -568,7 +606,7 @@ export async function create({ mount, audio, send, hooks }) {
     { const we = V.md.we, m = W.eventMarker; m.visible = !!we; if (we) { const fall = we.kind === 1 && !we.landed ? clamp((we.t - (AIRDROP_T - AIRDROP_FALL)) / AIRDROP_FALL, 0, 1) : 0; m.position.set(we.x, 20 + fall * 60, we.z); m.rotation.y += dt * 1.5; m.material.opacity = 0.3 + Math.sin(roundT * 5) * 0.15; } }
     W.sprayMarker.rotation.y -= dt; W.sprayMarker.material.opacity = (V.me && V.me.wanted > 0 ? 0.4 : 0.18) + Math.sin(roundT * 3) * 0.1;
     if (arena) fenceMat.opacity = V.me && V.me.outT > 0 ? 0.35 + Math.sin(roundT * 12) * 0.2 : 0.22;
-    const d = districtAt(V.subj.x, V.subj.z), s = streetAt(V.subj.x, V.subj.z);
+    const d = districtRef(V.subj.x, V.subj.z), s = streetRef(V.subj.x, V.subj.z); // numbers: the HUD names them in the current language
     if (d !== curDistrict) { curDistrict = d; curStreet = s; areaT = 5; } else if (s !== curStreet) { curStreet = s; areaT = Math.max(areaT, 3.5); }
     routeT -= dt;
     if (routeT <= 0) { const g = goalOf(); routeTarget = g; routeCp = -1;
@@ -578,8 +616,10 @@ export async function create({ mount, audio, send, hooks }) {
     { const g = routeTarget, m = goalMarker; m.visible = !!(g && g.marker); if (m.visible) { m.position.set(g.x, 20, g.z); m.material.color.setHex(g.color); m.rotation.y += dt * 1.2; m.material.opacity = 0.35 + Math.sin(roundT * 4) * 0.15; } }
     areaT -= dt; wantedFlash -= dt; dmgFlash = Math.max(0, dmgFlash - dt * 1.4); mouseIdle += dt; localFireT -= dt; localArm -= dt; goT -= dt; finishT -= dt;
     if (onGrid()) { const c = Math.ceil(V.md.race.t); if (c !== lastCount && c > 0 && c <= 3) sfx.click(); lastCount = c; } // the countdown beeps
-    if (autoQuality && state === 'play' && roundT > 4) { if (fps < 40) { lowFpsT += dt; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; floatText('LOW FRAME RATE: ' + QUALITY[quality].name + ' DETAIL', 0x9fb4dc); } } else lowFpsT = 0; }
-    for (let k = floats.length - 1; k >= 0; k--) { floats[k].t += dt; if (floats[k].t > 2.5) floats.splice(k, 1); }
+    if (autoQuality && state === 'play' && roundT > 4) { if (fps < 40) { lowFpsT += dt; if (lowFpsT > 2 && quality < QUALITY.length - 1) { setQuality(quality + 1); lowFpsT = 0; const q = quality; floatText(() => T('q.lowFps', { q: T('q.' + q) }), 0x9fb4dc); } } else lowFpsT = 0; }
+    for (let k = floats.length - 1; k >= 0; k--) { floats[k].t += dt; if (floats[k].t > FLOAT_T) floats.splice(k, 1); }
+    floats.forEach((f, i) => { f.slot += (i - f.slot) * Math.min(1, 10 * dt); }); // glide down into the place the expired one left
+    blinkProtected();
     for (let k = feed.length - 1; k >= 0; k--) { feed[k].t += dt; if (feed[k].t > FEED_T) feed.splice(k, 1); }
     if (V.phase === 1 && state !== 'over') showOver();
   }
@@ -635,18 +675,18 @@ export async function create({ mount, audio, send, hooks }) {
     hctx.restore();
   }
   function drawGuide(rx, y, s) {
-    const { turn, cp } = guide, r = s * 6, w = s * 86, label = routeTarget ? routeTarget.label : 'GOAL';
+    const { turn, cp } = guide, r = s * 6, w = s * 86, label = routeTarget ? routeTarget.label() : T('goal'), turnWord = k => T('turn.' + k);
     hctx.fillStyle = 'rgba(0,0,0,0.55)'; hctx.fillRect(rx - w, y, w, r * 2 + s * 4);
     if (cp && (!turn || turn.kind === 'ARRIVE' || cp.d <= turn.d)) { // the checkpoint is next: name it, and under it the way out of it
       const after = turn && turn.kind !== 'ARRIVE' ? turn : null;
       drawTurnArrow(rx - w + r + s * 3, y + r + s * 2, r, after ? after.kind : 'STRAIGHT');
-      ptext(hctx, `${label}  ${Math.round(cp.d)} M`, rx - s * 2, y + s * 3, s * 1.1, '#ffffff', 'right');
-      ptext(hctx, after ? `THEN ${after.kind}  ·  ${after.street.toUpperCase()}` : 'THEN STRAIGHT ON', rx - s * 2, y + s * 13, s * 0.75, after && after.kind === 'U-TURN' ? '#ff6060' : '#2fd0ff', 'right');
+      ptext(hctx, T('g.dist', { label, n: Math.round(cp.d) }), rx - s * 2, y + s * 3, s * 1.1, '#ffffff', 'right');
+      ptext(hctx, after ? T('g.then', { turn: turnWord(after.kind), st: streetName(after.ref) }) : T('g.thenStraight'), rx - s * 2, y + s * 13, s * 0.75, after && after.kind === 'U-TURN' ? '#ff6060' : '#2fd0ff', 'right');
       return; }
     drawTurnArrow(rx - w + r + s * 3, y + r + s * 2, r, turn.kind);
-    const word = turn.kind === 'ARRIVE' ? label : turn.kind;
-    ptext(hctx, `${word}  ${Math.round(turn.d)} M`, rx - s * 2, y + s * 3, s * 1.1, turn.kind === 'U-TURN' ? '#ff6060' : '#ffffff', 'right');
-    ptext(hctx, turn.kind === 'ARRIVE' ? 'STRAIGHT ON' : turn.street.toUpperCase(), rx - s * 2, y + s * 13, s * 0.75, '#2fd0ff', 'right');
+    const word = turn.kind === 'ARRIVE' ? label : turnWord(turn.kind);
+    ptext(hctx, T('g.dist', { label: word, n: Math.round(turn.d) }), rx - s * 2, y + s * 3, s * 1.1, turn.kind === 'U-TURN' ? '#ff6060' : '#ffffff', 'right');
+    ptext(hctx, turn.kind === 'ARRIVE' ? T('g.straight') : streetName(turn.ref), rx - s * 2, y + s * 13, s * 0.75, '#2fd0ff', 'right');
   }
   function bar(x, y, w, h, f, color) { hctx.fillStyle = 'rgba(0,0,0,0.7)'; hctx.fillRect(x - 2, y - 2, w + 4, h + 4); hctx.fillStyle = '#333'; hctx.fillRect(x, y, w, h); hctx.fillStyle = color; hctx.fillRect(x, y, w * clamp(f, 0, 1), h); }
   function drawNames(Wd, Hd, s) {
@@ -656,45 +696,45 @@ export async function create({ mount, audio, send, hooks }) {
       ptext(hctx, p.name, sx, sy - 7 * sc, sc, p.dead ? '#888888' : hex(p.color), 'center'); }
   }
   /* arrows at the edge of the screen (or a tag over a far target) for the other players, the mark and the world event */
-  function drawEdgeArrows(Wd, Hd, s, L, R, T, B) {
+  function drawEdgeArrows(Wd, Hd, s, L, R, TOP, B) {
     if (V.subj.dead) return;
     const mk = V.md.mark, we = V.md.we, cx = Wd / 2, cy = Hd / 2, sc = s * 0.8;
     const one = (x, y, z, color, label, always) => {
       const d = Math.hypot(x - V.subj.x, z - V.subj.z); if (d < 3) return;
       V3.set(x, y + 2.2, z).project(camera);
       const behind = V3.z > 1, on = !behind && V3.x > -1 && V3.x < 1 && V3.y > -1 && V3.y < 1;
-      const text = label + ' ' + Math.round(d) + 'M';
+      const text = T('distTag', { label, n: Math.round(d) });
       if (on && d < ARROW_FROM && !always) return; // its name is over its head already
       if (on) { const sx = (V3.x + 1) / 2 * Wd, sy = (1 - V3.y) / 2 * Hd; hctx.fillStyle = hex(color); hctx.beginPath(); hctx.moveTo(sx, sy + 6); hctx.lineTo(sx - 5, sy - 3); hctx.lineTo(sx + 5, sy - 3); hctx.closePath(); hctx.fill(); ptext(hctx, text, sx, sy - 12 * sc, sc, hex(color), 'center'); return; }
       let dx = (V3.x + 1) / 2 * Wd - cx, dy = (1 - V3.y) / 2 * Hd - cy; if (behind) { dx = -dx; dy = -dy; }
       const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
-      const k = Math.min((cx - (L + 44)) / Math.abs(dx || 1e-6), (cy - (T + s * 34)) / Math.abs(dy || 1e-6), (cx - (Wd - R + 44 + s * 52)) / Math.abs(dx || 1e-6), (cy - (Hd - B + 60)) / Math.abs(dy || 1e-6));
+      const k = Math.min((cx - (L + 44)) / Math.abs(dx || 1e-6), (cy - (TOP + s * 34)) / Math.abs(dy || 1e-6), (cx - (Wd - R + 44 + s * 52)) / Math.abs(dx || 1e-6), (cy - (Hd - B + 60)) / Math.abs(dy || 1e-6));
       const px = cx + dx * k, py = cy + dy * k, a = Math.atan2(dy, dx);
       hctx.save(); hctx.translate(px, py); hctx.rotate(a); hctx.fillStyle = hex(color); hctx.beginPath(); hctx.moveTo(10, 0); hctx.lineTo(-6, -7); hctx.lineTo(-6, 7); hctx.closePath(); hctx.fill(); hctx.restore();
       ptext(hctx, text, px - dx * 16, py - dy * 16 - 3 * sc, sc, hex(color), 'center');
     };
-    for (let i = 0; i < V.players.length; i++) { const p = V.players[i]; if (p.me || p.gone || p.dead) continue; const isMark = i === mk; one(p.x, p.y, p.z, isMark ? 0xffe14d : p.color, isMark ? 'MARK ' + p.name : p.name, isMark); }
-    if (we) one(we.x, 0, we.z, 0x3dff7a, EVENT_TEXT[we.kind] || 'EVENT', true);
-    if (routeTarget && routeTarget.marker) one(routeTarget.x, 0, routeTarget.z, routeTarget.color, routeTarget.label, true);
+    for (let i = 0; i < V.players.length; i++) { const p = V.players[i]; if (p.me || p.gone || p.dead) continue; const isMark = i === mk; one(p.x, p.y, p.z, isMark ? 0xffe14d : p.color, isMark ? T('markTag', { name: p.name }) : p.name, isMark); }
+    if (we) one(we.x, 0, we.z, 0x3dff7a, T(we.kind === 1 ? 'ev.airdrop' : we.kind === 0 ? 'ev.truck' : 'ev.event'), true);
+    if (routeTarget && routeTarget.marker) one(routeTarget.x, 0, routeTarget.z, routeTarget.color, routeTarget.label(), true);
   }
   function drawHUD() {
     const Wd = view.w, Hd = view.h; hctx.clearRect(0, 0, Wd, Hd); if (saStale) measureSafeArea();
     const s = Math.max(2, Math.round(Wd / 640)), me = V.me, short = Hd < 560; // short: a phone in landscape
-    const L = 16 + sa.l, R = Wd - 16 - sa.r, T = 14 + sa.t, B = Hd - 16 - sa.b; // the HUD's edges, inside the notch and the home indicator
-    if (!me) { ptext(hctx, 'WAITING FOR THE HOST…', Wd / 2, Hd / 2, s, '#ffffff', 'center'); return; }
+    const L = 16 + sa.l, R = Wd - 16 - sa.r, TOP = 14 + sa.t, B = Hd - 16 - sa.b; // the HUD's edges, inside the notch and the home indicator
+    if (!me) { ptext(hctx, T('waitHud'), Wd / 2, Hd / 2, s, '#ffffff', 'center'); return; }
     const dead = me.dead, inCar = me.carId >= 0, deadT = dead ? Math.max(0, wastedTimeOf(modeName()) - me.wastedT) : 0;
     if (dead && replay.active) { // the killcam: letterboxed, nothing else of the HUD (the names, arrows, briefing and feed all describe the live world, not the clip)
       const bar = Math.round(Hd * 0.09); hctx.fillStyle = '#000000'; hctx.fillRect(0, 0, Wd, bar); hctx.fillRect(0, Hd - bar, Wd, bar);
-      ptext(hctx, 'KILLCAM', Wd / 2, bar + s * 6, s * 1.6, '#ff6060', 'center'); ptext(hctx, 'THROUGH THE EYES OF ' + nameOf(replay.killer).toUpperCase(), Wd / 2, bar + s * 22, s, hex(playerColor(replay.killer)), 'center');
+      ptext(hctx, T('killcam'), Wd / 2, bar + s * 6, s * 1.6, '#ff6060', 'center'); ptext(hctx, T('killcam.eyes', { name: nameOf(replay.killer) }), Wd / 2, bar + s * 22, s, hex(playerColor(replay.killer)), 'center');
       hctx.fillStyle = '#ff6060'; hctx.fillRect(0, Hd - bar, Math.round(Wd * replay.progress), 3); return; }
     const lowHp = me.health < 30 && !dead ? 0.12 + 0.08 * Math.sin(t * 6) : 0;
     if (dmgFlash > 0 || lowHp) { const a = clamp(dmgFlash * 0.65 + lowHp, 0, 0.85); const g = hctx.createRadialGradient(Wd / 2, Hd / 2, Hd * 0.2, Wd / 2, Hd / 2, Hd * 0.8); g.addColorStop(0, `rgba(190,0,0,${a * 0.35})`); g.addColorStop(1, `rgba(190,0,0,${a})`); hctx.fillStyle = g; hctx.fillRect(0, 0, Wd, Hd); }
-    drawNames(Wd, Hd, s); drawEdgeArrows(Wd, Hd, s, L, R, T, B);
+    drawNames(Wd, Hd, s); drawEdgeArrows(Wd, Hd, s, L, R, TOP, B);
     if (canShoot(me) && state === 'play') { // the crosshair: red and a little wider while a shot would lock onto someone
       const g = aimLock ? 4 : 3, l = aimLock ? 7 : 6; hctx.fillStyle = aimLock ? '#ff4040' : '#ffffff';
       hctx.fillRect(Wd / 2 - 1, Hd / 2 - g - l, 2, l); hctx.fillRect(Wd / 2 - 1, Hd / 2 + g, 2, l); hctx.fillRect(Wd / 2 - g - l, Hd / 2 - 1, l, 2); hctx.fillRect(Wd / 2 + g, Hd / 2 - 1, l, 2); }
     // top-right: stars, clock, cash, health, weapon, kills, round timer
-    const rx = R; let y = T;
+    const rx = R; let y = TOP;
     if (modeName() !== 'deathmatch') { // no stars in the arena: the police stay out of a deathmatch
       for (let k = 0; k < 5; k++) { const on = k < me.wanted; const blink = on && wantedFlash > 0 && Math.floor(t * 8) % 2 === 0; ptext(hctx, '*', rx - (4 - k) * s * 8, y, s * 1.3, on ? (blink ? '#ffffff' : '#ffe14d') : 'rgba(255,255,255,0.18)', 'right'); }
       y += s * 12; }
@@ -706,89 +746,111 @@ export async function create({ mount, audio, send, hooks }) {
       const w = WEAPONS[me.curW]; const icon = ICONS[w.key];
       hctx.fillStyle = 'rgba(0,0,0,0.55)'; hctx.fillRect(rx - s * 52, y, s * 52, s * 12);
       drawIcon(hctx, icon, rx - s * 50, y + s * 2, s * 1, '#ffffff');
-      ptext(hctx, me.reloadT > 0 ? 'RELOAD' : me.ammo + '/' + me.reserve, rx - s * 2, y + s * 3, s, me.reloadT > 0 ? '#ffe14d' : '#ffffff', 'right'); y += s * 14;
-      ptext(hctx, w.name, rx, y, s * 0.8, '#bbbbbb', 'right'); y += s * 9;
+      ptext(hctx, me.reloadT > 0 ? T('reloading') : me.ammo + '/' + me.reserve, rx - s * 2, y + s * 3, s, me.reloadT > 0 ? '#ffe14d' : '#ffffff', 'right'); y += s * 14;
+      ptext(hctx, T('w.' + w.key), rx, y, s * 0.8, '#bbbbbb', 'right'); y += s * 9;
       for (let k = 0; k < WEAPONS.length; k++) { const owned = me.owned & (1 << k); ptext(hctx, String(k + 1), rx - (WEAPONS.length - 1 - k) * s * 8, y, s * 0.9, k === me.curW ? '#ffe14d' : owned ? '#ffffff' : 'rgba(255,255,255,0.2)', 'right'); } y += s * 9; } // the weapons I carry, by their key
-    ptext(hctx, 'KILLS ' + me.kills + (V.md.dm ? '/' + V.md.dm.cap : ''), rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
-    if (V.timeLeft >= 0) { ptext(hctx, 'ROUND ' + fmtClock(V.timeLeft), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right'); y += s * 10; }
+    ptext(hctx, T('kills', { n: me.kills + (V.md.dm ? '/' + V.md.dm.cap : '') }), rx, y, s * 1.1, '#ff6060', 'right'); y += s * 10;
+    if (V.timeLeft >= 0) { ptext(hctx, T('round', { t: fmtClock(V.timeLeft) }), rx, y, s * 1.1, V.timeLeft < 30 ? '#ff4d4d' : '#7fe0ff', 'right'); y += s * 10; }
     const race = course && V.md.race, racers = V.players.filter(p => !p.gone).length, cpN = course ? course.length - 1 : 0;
     if (race) { // my standing, big, and the lap under it
-      ptext(hctx, me.place ? ordinal(me.place) : ordinal(me.rank || racers), rx, y, s * 2.4, me.place || me.rank === 1 ? '#ffe14d' : '#ffffff', 'right'); y += s * 20;
-      ptext(hctx, me.place ? 'FINISHED' : `LAP ${Math.min(laps, me.lap + 1)}/${laps}  ·  CP ${me.next === 0 ? cpN : me.next - 1}/${cpN}`, rx, y, s * 0.9, '#2fd0ff', 'right'); y += s * 9;
-      if (race.state === 2) { ptext(hctx, 'RACE ENDS ' + fmtClock(Math.max(0, race.t)), rx, y, s * 0.9, '#ff6060', 'right'); y += s * 9; }
+      ptext(hctx, me.place ? ord(me.place) : ord(me.rank || racers), rx, y, s * 2.4, me.place || me.rank === 1 ? '#ffe14d' : '#ffffff', 'right'); y += s * 20;
+      ptext(hctx, me.place ? T('finished') : T('sc.lapcp', { lap: Math.min(laps, me.lap + 1), laps, cp: me.next === 0 ? cpN : me.next - 1, n: cpN }), rx, y, s * 0.9, '#2fd0ff', 'right'); y += s * 9;
+      if (race.state === 2) { ptext(hctx, T('raceEnds', { t: fmtClock(Math.max(0, race.t)) }), rx, y, s * 0.9, '#ff6060', 'right'); y += s * 9; }
       if (guide && !dead) { drawGuide(rx, y, s); y += s * 20; } }
     // top-left: mission briefing (on a phone the paragraph folds away once the intro is over, leaving the objective)
-    { const px = L; let py = T; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark, dm = V.md.dm;
+    { const px = L; let py = TOP; const tw = Math.min(Wd * 0.42, s * 150); const ms = MISSION_STATES[V.ms] || 'intro', mw = modeName() === 'mostWanted', mk = V.md.mark, dm = V.md.dm;
       hctx.fillStyle = 'rgba(0,0,0,0.5)';
-      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(race ? briefRace(laps, guns) : dm ? briefDm(dm.cap, guns) : mw ? BRIEF_MW : BRIEF, Math.floor(tw / (6 * s * 0.8)));
-      const job = me.job, jt = job && JOB_TEXT[job.kind];
-      const objective = race ? (race.state === 0 ? 'On the grid. Wait for the green.' : me.place ? `You finished ${ordinal(me.place).toLowerCase()}. ${race.finishers < racers ? 'The rest have ' + Math.ceil(Math.max(0, race.t)) + ' s.' : ''}`
-          : `${me.next === 0 ? 'Back across the line' : 'Checkpoint ' + me.next + ' of ' + cpN}, ${streetAt(routeTarget ? routeTarget.x : 0, routeTarget ? routeTarget.z : 0)}.  ${ordinal(me.rank || racers)} of ${racers}.`)
-        : jt ? (job.stage === 0 ? `A ${jt.who.toLowerCase()} is on the way.` : job.stage === 1 ? `Pick up the ${jt.who.toLowerCase()} on ${streetAt(job.x, job.z)}.` : `Take the ${jt.who.toLowerCase()} to ${job.kind === 2 ? 'the hospital' : streetAt(job.x, job.z)}.`) + (job.stage > 0 ? '  ' + fmtClock(job.t) : '') + (job.n ? `  ·  ${job.n} in a row` : '')
-        : dm ? `${me.kills} of ${dm.cap} kills.  ${dm.leader < 0 ? 'Nobody has scored yet.' : dm.leader === myIdx ? 'You lead.' : `${nameOf(dm.leader)} leads with ${dm.kills}.`}`
-        : !mw ? OBJECTIVES[ms] : mk < 0 ? 'The mark is drawn in a moment. Find a car.' : mk === myIdx ? `You are the mark. Stay alive: +$${MARK_CASH_PER_S} a second.` : `Hunt ${nameOf(mk)}. The kill pays $${MARK_BOUNTY} and the mark.`;
-      const objLines = wrapText('> ' + objective, Math.floor(tw / (6 * s * 0.9)));
-      hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * s * 7.5 + objLines.length * s * 8.5 + s * 10);
-      ptext(hctx, race ? 'STREET RACE' : jt ? jt.title : dm ? 'DEATHMATCH' : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', px, py, s * 1.2, '#ffe14d'); py += s * 12;
-      for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += s * 7.5; }
-      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : dm ? (dm.leader === myIdx ? '#ffe14d' : '#ff6060') : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += s * 8.5; }
+      const brief = short && roundT > INTRO_T + 6 ? [] : wrapText(race ? briefRace(laps, guns) : dm ? briefDm(dm.cap, guns) : mw ? T('brief.mw', { cash: MARK_CASH_PER_S, bounty: MARK_BOUNTY }) : T('brief.hit'), tw, s * 0.8);
+      const job = me.job, jt = job && JOB_TEXT[job.kind], place = (x, z) => streetName(streetRef(x, z));
+      const objective = race ? (race.state === 0 ? T('o.grid') : me.place ? T('o.finished', { o: ord(me.place) }) + (race.finishers < racers ? ' ' + T('o.rest', { n: Math.ceil(Math.max(0, race.t)) }) : '')
+          : T(me.next === 0 ? 'o.line' : 'o.cp', { k: me.next, n: cpN, st: place(routeTarget ? routeTarget.x : 0, routeTarget ? routeTarget.z : 0), o: ord(me.rank || racers), m: racers }))
+        : jt ? (job.stage === 0 ? T('o.jobWait', { who: T(jt.who) }) : job.stage === 1 ? T('o.jobPick', { who: T(jt.who), st: place(job.x, job.z) }) : job.kind === 2 ? T('o.jobHosp', { who: T(jt.who) }) : T('o.jobDrop', { who: T(jt.who), st: place(job.x, job.z) })) + (job.stage > 0 ? '  ' + fmtClock(job.t) : '') + (job.n ? '  ·  ' + T('o.inRow', { n: job.n }) : '')
+        : dm ? T('o.dm', { n: me.kills, cap: dm.cap, lead: dm.leader < 0 ? T('o.dmNone') : dm.leader === myIdx ? T('o.dmYou') : T('o.dmLead', { name: nameOf(dm.leader), n: dm.kills }) })
+        : !mw ? T('obj.' + ms) : mk < 0 ? T('o.mwDraw') : mk === myIdx ? T('o.mwYou', { n: MARK_CASH_PER_S }) : T('o.mwHunt', { name: nameOf(mk), n: MARK_BOUNTY });
+      const objLines = wrapText('> ' + objective, tw, s * 0.9);
+      const lh = isZh() ? s * 8.5 : s * 7.5, oh = isZh() ? s * 9.5 : s * 8.5; // hanzi stand a little taller than the capitals: a little more air between the lines
+      hctx.fillRect(px - 6, py - 6, tw + 12, s * 12 + brief.length * lh + objLines.length * oh + s * 10);
+      ptext(hctx, race ? T('h.race') : jt ? T(jt.title) : dm ? T('h.dm') : mw ? T('h.mw') : T('h.hit'), px, py, s * 1.2, '#ffe14d'); py += s * 12;
+      for (const l of brief) { ptext(hctx, l, px, py, s * 0.8, '#dddddd'); py += lh; }
+      py += s * 3; for (const l of objLines) { ptext(hctx, l, px, py, s * 0.9, race ? (me.place ? '#ffe14d' : '#2fd0ff') : jt ? (job.stage > 0 && job.t < 10 ? '#ff6060' : hex(jt.color)) : dm ? (dm.leader === myIdx ? '#ffe14d' : '#ff6060') : mw ? (mk === myIdx ? '#ffe14d' : '#ff6060') : ms === 'done' ? '#3dff7a' : '#7fe0ff'); py += oh; }
       drawFeed(px, py + s * 6, s, short || touch ? FEED_LINES_PHONE : FEED_LINES); }
     // the race: the countdown on the grid, GO!, and the finish flash
     if (race && race.state === 0) { const c = Math.ceil(race.t); hctx.fillStyle = 'rgba(0,0,0,0.35)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
-      ptext(hctx, c > 3 ? 'ON THE GRID' : String(c), Wd / 2, Hd * 0.36, c > 3 ? s * 2.5 : s * 6, c > 3 ? '#ffe14d' : c === 1 ? '#ff6060' : '#ffffff', 'center'); ptext(hctx, `${laps} LAP${laps === 1 ? '' : 'S'}  ·  ${cpN} CHECKPOINTS  ·  ${guns ? 'ANYTHING GOES' : 'NO GUNS'}`, Wd / 2, Hd * 0.36 + s * (c > 3 ? 26 : 50), s * 1.1, '#ffffff', 'center'); }
+      ptext(hctx, c > 3 ? T('onGrid') : String(c), Wd / 2, Hd * 0.36, c > 3 ? s * 2.5 : s * 6, c > 3 ? '#ffe14d' : c === 1 ? '#ff6060' : '#ffffff', 'center'); ptext(hctx, T('grid.sub', { laps: lapsText(laps), n: cpN, guns: T(guns ? 'anyGoes' : 'noGuns') }), Wd / 2, Hd * 0.36 + s * (c > 3 ? 26 : 50), s * 1.1, '#ffffff', 'center'); }
     if (arena && me.outT > 0 && !dead) { const left = OUT_WARN_T - me.outT; hctx.fillStyle = 'rgba(120,0,0,0.45)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.22);
-      ptext(hctx, left > 0 ? 'GET BACK IN THE ARENA' : 'YOU ARE TAKING DAMAGE', Wd / 2, Hd * 0.34, s * 2.2, Math.floor(t * 6) % 2 ? '#ffffff' : '#ff6060', 'center');
-      ptext(hctx, left > 0 ? String(Math.ceil(left)) : 'GET BACK', Wd / 2, Hd * 0.34 + s * 24, s * 4, '#ffffff', 'center'); }
-    else if (goT > 0) { hctx.globalAlpha = clamp(goT, 0, 1); ptext(hctx, 'GO!', Wd / 2, Hd * 0.34, s * 6, '#3dff7a', 'center'); hctx.globalAlpha = 1; }
-    if (finishT > 0 && me.place) { hctx.globalAlpha = clamp(finishT, 0, 1); hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3); ptext(hctx, ordinal(me.place), Wd / 2, Hd * 0.36, s * 5, '#ffe14d', 'center'); ptext(hctx, me.place === 1 ? 'FIRST ACROSS THE LINE' : 'ACROSS THE LINE', Wd / 2, Hd * 0.36 + s * 44, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
+      ptext(hctx, left > 0 ? T('backIn') : T('takingDmg'), Wd / 2, Hd * 0.34, s * 2.2, Math.floor(t * 6) % 2 ? '#ffffff' : '#ff6060', 'center');
+      ptext(hctx, left > 0 ? String(Math.ceil(left)) : T('getBack'), Wd / 2, Hd * 0.34 + s * 24, s * 4, '#ffffff', 'center'); }
+    else if (goT > 0) { hctx.globalAlpha = clamp(goT, 0, 1); ptext(hctx, T('go'), Wd / 2, Hd * 0.34, s * 6, '#3dff7a', 'center'); hctx.globalAlpha = 1; }
+    if (finishT > 0 && me.place) { hctx.globalAlpha = clamp(finishT, 0, 1); hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3); ptext(hctx, ord(me.place), Wd / 2, Hd * 0.36, s * 5, '#ffe14d', 'center'); ptext(hctx, T(me.place === 1 ? 'acrossFirst' : 'across'), Wd / 2, Hd * 0.36 + s * 44, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
     // the world event banner, under the wanted flash
-    if (V.md.we) { const e = V.md.we, left = fmtClock(Math.max(0, e.t)), txt = e.kind === 1 ? (e.landed ? 'AIRDROP DOWN  ·  ' + left : 'AIRDROP LANDS IN ' + Math.ceil(Math.max(0, e.t - (AIRDROP_T - AIRDROP_FALL)))) : (e.landed ? 'TRUCK OPEN  ·  ' + left : 'ARMORED TRUCK  ·  ' + left);
-      ptext(hctx, txt, Wd / 2, T + s * 2, s * 0.9, '#3dff7a', 'center'); }
+    if (V.md.we) { const e = V.md.we, left = fmtClock(Math.max(0, e.t)), txt = e.kind === 1 ? (e.landed ? T('we.dropDown', { t: left }) : T('we.dropIn', { n: Math.ceil(Math.max(0, e.t - (AIRDROP_T - AIRDROP_FALL))) })) : T(e.landed ? 'we.open' : 'we.truckT', { t: left });
+      ptext(hctx, txt, Wd / 2, TOP + s * 2, s * 0.9, '#3dff7a', 'center'); }
     // bottom-left: minimap + area name
     const msz = Math.min(short ? 140 : 230, Math.round(Wd * 0.2)); drawMinimap(L, B - msz, msz);
-    if (areaT > 0) { const a = clamp(areaT, 0, 1); hctx.globalAlpha = a; ptext(hctx, curDistrict, L + msz + 18, B - s * 20, s * 1.6, '#ffe14d'); ptext(hctx, curStreet, L + msz + 18, B - s * 8, s, '#ffffff'); hctx.globalAlpha = 1; }
-    const hint = (touch ? HINT_TOUCH : HINT)[me.hint] || '';
+    if (areaT > 0 && curDistrict !== '') { const a = clamp(areaT, 0, 1); hctx.globalAlpha = a; ptext(hctx, districtName(curDistrict), L + msz + 18, B - s * 20, s * 1.6, '#ffe14d'); ptext(hctx, streetName(curStreet), L + msz + 18, B - s * 8, s, '#ffffff'); hctx.globalAlpha = 1; }
+    const hint = !me.hint ? '' : !touch ? T('hint.' + me.hint) : me.hint === 4 ? T('hint.4') : me.hint === 5 ? T('hint.t5') : ''; // on a touch screen USE and JUMP already say what they do: only the two with no button stay
     if (hint && !dead && state === 'play') ptext(hctx, hint, Wd / 2, B - s * 12 + 4, s, '#ffffff', 'center');
     // centre messages
     if ((MISSION_STATES[V.ms] === 'intro' || modeName() === 'mostWanted' || modeName() === 'deathmatch') && !course && roundT < INTRO_T) { const a = roundT < 0.5 ? roundT * 2 : roundT > 4.5 ? (INTRO_T - roundT) : 1; hctx.globalAlpha = clamp(a, 0, 1); const mw = modeName() === 'mostWanted', dm = modeName() === 'deathmatch';
       hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(0, Hd * 0.32, Wd, Hd * 0.28);
-      ptext(hctx, dm ? 'DEATHMATCH' : mw ? 'MOST WANTED' : 'THE DOWNTOWN HIT', Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, dm ? `FIRST TO ${killCap} KILLS. NO STARS FOR IT.` : mw ? 'CARRY THE MARK. HUNT THE MARK.' : 'WHACK THE SNITCH', Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
-    if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, 'WANTED LEVEL ' + '*'.repeat(me.wanted), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
-    if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, 'WASTED', Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
-      if (death && deadT > 0.8) { ptext(hctx, death.line1, Wd / 2, Hd / 2 + sc * 4, s * 1.2, '#ffffff', 'center'); if (death.line2) ptext(hctx, death.line2, Wd / 2, Hd / 2 + sc * 4 + s * 12, s * 0.9, '#bbbbbb', 'center'); } }
+      ptext(hctx, T(dm ? 'h.dm' : mw ? 'h.mw' : 'h.hit'), Wd / 2, Hd * 0.38, s * 3, '#ffe14d', 'center'); ptext(hctx, dm ? T('intro.dm', { n: killCap }) : T(mw ? 'intro.mw' : 'intro.hit'), Wd / 2, Hd * 0.38 + s * 30, s * 1.2, '#ffffff', 'center'); hctx.globalAlpha = 1; }
+    if (me.god && !dead && V.phase === 0) ptext(hctx, T('protected'), Wd / 2, Hd / 2 + s * 14, s * 0.8, Math.floor(t * 4) % 2 ? '#7fe0ff' : '#ffffff', 'center');
+    if (wantedFlash > 0 && Math.floor(t * 5) % 2 === 0 && !dead) ptext(hctx, T('wantedLvl', { s: '*'.repeat(me.wanted) }), Wd / 2, Hd * 0.22, s * 2.2, '#ffe14d', 'center');
+    if (dead) { hctx.fillStyle = `rgba(0,0,0,${clamp(deadT * 0.3, 0, 0.55)})`; hctx.fillRect(0, 0, Wd, Hd); const sc = s * (4 + Math.min(1, deadT) * 2); ptext(hctx, T('wasted'), Wd / 2, Hd / 2 - sc * 4, sc, '#d01010', 'center');
+      if (death && deadT > 0.8) { ptext(hctx, death.line1(), Wd / 2, Hd / 2 + sc * 4, s * 1.2, '#ffffff', 'center'); const l2 = death.line2(); if (l2) ptext(hctx, l2, Wd / 2, Hd / 2 + sc * 4 + s * 12, s * 0.9, '#bbbbbb', 'center'); } }
     if (MISSION_STATES[V.ms] === 'passed') { hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(0, Hd * 0.3, Wd, Hd * 0.3);
-      ptext(hctx, 'MISSION PASSED', Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, 'RESPECT +', Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
-    floats.forEach((f, i) => { const a = clamp(2.5 - f.t, 0, 1); hctx.globalAlpha = a; ptext(hctx, f.text, Wd / 2, Hd * 0.62 - f.t * 30 - i * s * 10, s * 1.1, hex(f.color), 'center'); hctx.globalAlpha = 1; });
-    let line = 'FPS ' + Math.round(fps); if (online) line += isHost ? '  HOST' : `  LAG ${Math.round(pred ? pred.lag : 0)} MS  HOST ${net.hostFps} FPS`;
+      ptext(hctx, T('passed'), Wd / 2, Hd * 0.36, s * 3, '#ffe14d', 'center'); ptext(hctx, '+$5000', Wd / 2, Hd * 0.36 + s * 30, s * 2, '#3dff7a', 'center'); ptext(hctx, T('respect'), Wd / 2, Hd * 0.36 + s * 48, s, '#ffffff', 'center'); }
+    for (const f of floats) { hctx.globalAlpha = clamp(FLOAT_T - f.t, 0, 1); ptext(hctx, f.text(), Wd / 2, Hd * 0.62 - f.t * 30 - f.slot * s * 10, s * 1.1, hex(f.color), 'center'); hctx.globalAlpha = 1; }
+    let line = 'FPS ' + Math.round(fps); if (online) line += '  ' + (isHost ? T('net.host') : T('net.lag', { n: Math.round(pred ? pred.lag : 0), f: net.hostFps }));
     if (touch) ptext(hctx, line, Wd / 2 + 34, sa.t + 16, s * 0.7, 'rgba(255,255,255,0.45)', 'left', false); // beside the ☰; the corner is under the FIRE button
     else ptext(hctx, line, R, B - s * 7, s * 0.7, 'rgba(255,255,255,0.45)', 'right', false);
+    if ((held.board || boardOpen) && V.phase === 0) drawBoard(Wd, Hd, s);
     if (showStats) drawStats(Wd, Hd, s);
+  }
+  /* the scoreboard (TAB held, or SCORES on a touch screen): everyone's standing, from the blocks, in the results card's order */
+  function drawBoard(Wd, Hd, s) {
+    const m = modeName(), race = m === 'race', dm = m === 'deathmatch', mw = m === 'mostWanted', sc = s * 0.9, rowH = s * 12, n = course ? course.length - 1 : 0;
+    const rows = V.blocks.map((b, i) => ({ b, i, name: nameOf(i) })).sort(standing);
+    const cols = [['#', r => String(rows.indexOf(r) + 1)], [T('b.player'), r => r.name + (r.b.gone ? ' · ' + T('sc.left') : r.b.dead ? ' · ' + T('b.dead') : '')]];
+    if (race) cols.push([T('b.place'), r => r.b.place ? T('sc.finished', { o: ord(r.b.place) }) : T('sc.lapcp', { lap: Math.min(laps, r.b.lap + 1), laps, cp: r.b.next === 0 ? n : r.b.next - 1, n })]);
+    else cols.push([T('b.cash'), r => '$' + r.b.cash]);
+    cols.push([T('b.kills'), r => String(r.b.kills)], [T('b.deaths'), r => String(r.b.deaths)]);
+    if (!dm) cols.push([T('b.wanted'), r => '*'.repeat(r.b.wanted) || '-']);
+    if (mw) cols.push([T('b.mark'), r => fmtClock(r.b.markT)]);
+    const cells = rows.map(r => cols.map(c => c[1](r))), widths = cols.map((c, k) => Math.max(textW(c[0].toUpperCase(), sc), ...cells.map(row => textW(row[k].toUpperCase(), sc)))), gap = s * 8;
+    const w = widths.reduce((a, b) => a + b, 0) + gap * (cols.length - 1) + s * 12, h = rowH * (rows.length + 2) + s * 16, x = Math.round(Wd / 2 - w / 2), y = Math.round(Math.max(sa.t + s * 30, Hd * 0.2));
+    hctx.fillStyle = 'rgba(0,0,0,0.72)'; hctx.fillRect(x, y, w, h);
+    ptext(hctx, T('board'), Wd / 2, y + s * 5, s * 1.2, '#ffe14d', 'center');
+    const line = (vals, yy, color) => { let xx = x + s * 6; vals.forEach((v, k) => { ptext(hctx, v, xx, yy, sc, k === 0 ? '#9fb4dc' : color); xx += widths[k] + gap; }); };
+    line(cols.map(c => c[0]), y + s * 18, '#9fb4dc');
+    rows.forEach((r, k) => line(cells[k], y + s * 18 + rowH * (k + 1), r.i === myIdx ? '#ffe14d' : r.b.gone ? '#777777' : hex(playerColor(r.i))));
+    ptext(hctx, T(touch ? 'b.hintTouch' : 'b.hint'), Wd / 2, y + h - s * 9, s * 0.7, 'rgba(255,255,255,0.5)', 'center');
   }
   /* the feed: the newest `max` lines, each on its own dark strip, fading out over the last moment of its life */
   function drawFeed(x, y, s, max) {
     const sc = s * 0.85, is = s * 0.75, h = sc * 7, gap = s * 3, iconW = p => ICONS[p.icon][0].length * is;
     for (let i = 0; i < Math.min(max, feed.length); i++) { const f = feed[i], a = clamp((FEED_T - f.t) / FEED_FADE, 0, 1); if (a <= 0) continue;
-      hctx.globalAlpha = a; let w = -gap; for (const p of f.parts) w += (p.icon ? iconW(p) : textW(String(p.t), sc)) + gap;
+      hctx.globalAlpha = a; let w = -gap; for (const p of f.parts) w += (p.icon ? iconW(p) : textW(partText(p).toUpperCase(), sc)) + gap;
       hctx.fillStyle = 'rgba(0,0,0,0.5)'; hctx.fillRect(x - 6, y - 4, w + 12, h + 8);
-      let px = x; for (const p of f.parts) { if (p.icon) { drawIcon(hctx, ICONS[p.icon], px + is, y + is, is, 'rgba(0,0,0,0.85)'); drawIcon(hctx, ICONS[p.icon], px, y, is, '#ffffff'); px += iconW(p) + gap; } else px += ptext(hctx, p.t, px, y, sc, p.c) + gap; }
+      let px = x; for (const p of f.parts) { if (p.icon) { drawIcon(hctx, ICONS[p.icon], px + is, y + is, is, 'rgba(0,0,0,0.85)'); drawIcon(hctx, ICONS[p.icon], px, y, is, '#ffffff'); px += iconW(p) + gap; } else px += ptext(hctx, partText(p), px, y, sc, p.c) + gap; }
       y += h + s * 5; }
     hctx.globalAlpha = 1;
   }
   function drawStats(Wd, Hd, s) {
     const sc = Hd < 560 ? s * 0.55 : s * 0.8, lines = [ // a phone gets a smaller face so the lines fit its width
       `FRAME ${timing.frame.toFixed(1)} MS (${Math.round(fps)} FPS)   SIM ${timing.sim.toFixed(1)}   RENDER ${timing.render.toFixed(1)}   HUD ${timing.hud.toFixed(1)}`,
-      `DETAIL ${QUALITY[quality].name}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   VIEW ${view.w}X${view.h}   WINDOW ${innerWidth}X${innerHeight}`,
+      `DETAIL ${STR.en['q.' + quality]}${autoQuality ? ' (AUTO)' : ''}   PIXEL RATIO ${renderer.getPixelRatio().toFixed(2)}   VIEW ${view.w}X${view.h}   WINDOW ${innerWidth}X${innerHeight}`,
       `CANVAS ${glCanvas.width}X${glCanvas.height} (${glCanvas.clientWidth}X${glCanvas.clientHeight} CSS)   ASPECT ${camera.aspect.toFixed(3)}   BOX ${(glCanvas.clientWidth / Math.max(1, glCanvas.clientHeight)).toFixed(3)}`, // the two ratios differ when the picture is stretched
     ];
     if (touch) { // a control that stays HELD after the finger left is the bug these lines are for
       const ctlWord = c => (c.held ? 'HELD #' + c.pid : 'FREE') + (c.last ? ' (' + c.last.toUpperCase() + ')' : '');
       lines.push(`TOUCH   STICK ${ctlWord(stickS)}   LOOK ${ctlWord(lookS)}   FIRE ${ctlWord(fireS)}   JUMP ${ctlWord(jumpS)}`);
-      lines.push(`STICK   ${stickS.x.toFixed(2)} ${stickS.y.toFixed(2)} -> ${axes.x.toFixed(2)} / ${axes.z.toFixed(2)}${axes.sprint ? ' RUN' : ''}   LOOK ${LOOK[lookLevel].name}   SAFE AREA ${Math.round(sa.t)} ${Math.round(sa.r)} ${Math.round(sa.b)} ${Math.round(sa.l)}`);
+      lines.push(`STICK   ${stickS.x.toFixed(2)} ${stickS.y.toFixed(2)} -> ${axes.x.toFixed(2)} / ${axes.z.toFixed(2)}${axes.sprint ? ' RUN' : ''}   LOOK ${STR.en['look.' + lookLevel]}   SAFE AREA ${Math.round(sa.t)} ${Math.round(sa.r)} ${Math.round(sa.b)} ${Math.round(sa.l)}`);
     }
     if (!online) lines.push(`SOLO   ENTITIES ${sim.peds.length} PEDS  ${sim.cars.length} CARS  ${sim.pickups.length} PICKUPS`);
     else if (isHost) lines.push(`HOST   SNAPSHOTS OUT ${net.rateOut.toFixed(0)}/S  ${net.kbOut.toFixed(1)} KB/S TO ${clients.filter(c => !c.pl.gone).length} PLAYER(S)   ENTITIES ${sim.peds.length} PEDS  ${sim.cars.length} CARS`);
     else lines.push(`CLIENT   SNAPSHOTS IN ${net.rateIn.toFixed(0)}/S  ${net.kbIn.toFixed(1)} KB/S   INPUT OUT ${net.rateOut.toFixed(0)}/S   HOST ${net.hostFps} FPS`,
-      `INPUT LAG ${Math.round(pred ? pred.lag : 0)} MS   OTHERS SHOWN ${Math.round(INTERP * 1000)} MS BACK   CORRECTIONS ${pred ? pred.corrections : 0}   ENTITIES ${remote ? remote.ents.size : 0}`);
+      `INPUT LAG ${Math.round(pred ? pred.lag : 0)} MS   OTHERS SHOWN ${Math.round((remote ? remote.delay : 0) * 1000)} MS BACK   CORRECTIONS ${pred ? pred.corrections : 0}   ENTITIES ${remote ? remote.ents.size : 0}`);
     const w = Math.max(...lines.map(l => textW(l, sc))) + s * 8, x = Wd / 2 - w / 2, y = s * 26 + sa.t;
     hctx.fillStyle = 'rgba(0,0,0,0.6)'; hctx.fillRect(x, y - s * 3, w, lines.length * sc * 9 + s * 4);
     lines.forEach((l, i) => ptext(hctx, l, x + s * 4, y + i * sc * 9, sc, i === 0 ? '#ffe14d' : '#dddddd'));
@@ -800,14 +862,14 @@ export async function create({ mount, audio, send, hooks }) {
   function syncTouch() {
     if (!touch) return;
     const me = V.me, inCar = !!(me && me.carId >= 0), driving = inCar && me.seat === 0, hint = me ? me.hint : 0, w = WEAPONS[me ? me.curW : 0];
-    const useLabel = hint === 1 || hint === 6 ? 'EXIT' : hint === 2 ? 'JACK' : hint === 3 ? 'ENTER' : hint === 7 ? 'GET IN' : hint === 5 ? 'TURN IN' : 'USE';
+    const useLabel = hint === 1 || hint === 6 ? 't.exit' : hint === 2 ? 't.jack' : hint === 3 ? 't.enter' : hint === 7 ? 't.getin' : hint === 5 ? 't.turnin' : 't.use';
     const reloading = !!(me && me.reloadT > 0), canReload = !!(me && !reloading && me.ammo < w.mag && me.reserve > 0), ammo = !me ? '' : reloading ? '…' : String(me.ammo);
     const key = `${driving}|${useLabel}|${w.key}|${canReload}|${ammo}|${aimLock}`;
     if (key === touchKey) return; touchKey = key;
-    tb.use.textContent = useLabel; tb.use.classList.toggle('hot', useLabel !== 'USE');
-    tb.jump.textContent = driving ? 'HANDBRAKE' : 'JUMP'; tb.jump.classList.toggle('car', driving);
+    tb.use.textContent = T(useLabel); tb.use.classList.toggle('hot', useLabel !== 't.use');
+    tb.jump.textContent = T(driving ? 't.handbrake' : 't.jump'); tb.jump.classList.toggle('car', driving);
     tb.fire.classList.toggle('dim', driving); tb.fire.classList.toggle('lock', aimLock); tb.ammo.textContent = ammo;
-    tb.wname.textContent = w.name; tb.wicon.clearRect(0, 0, 48, 24); drawIcon(tb.wicon, ICONS[w.key], 0, 0, 3, '#ffffff');
+    tb.wname.textContent = T('w.' + w.key); tb.wicon.clearRect(0, 0, 48, 24); drawIcon(tb.wicon, ICONS[w.key], 0, 0, 3, '#ffffff');
     tb.reload.classList.toggle('hot', canReload);
   }
 
@@ -851,13 +913,14 @@ export async function create({ mount, audio, send, hooks }) {
       sim = createSim({ W, session: s, opts: s.opts || {}, onEvent }); me = sim.players[myIdx];
       clients = s.players.filter(p => p.id !== myId && !p.bot).map(p => ({ id: p.id, known: new Set(), pl: sim.playerOf(p.id) }));
       hostView();
-      if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText('MOST WANTED NEEDS TWO PLAYERS: SANDBOX INSTEAD', 0x9fb4dc);
-      if ((s.opts || {}).mode === 'deathmatch' && sim.mode !== 'deathmatch') floatText('A DEATHMATCH NEEDS TWO PLAYERS (OR CPU PLAYERS ON): SANDBOX INSTEAD', 0x9fb4dc);
+      if ((s.opts || {}).mode === 'mostWanted' && sim.mode !== 'mostWanted') floatText(() => T('fb.mw'), 0x9fb4dc);
+      if ((s.opts || {}).mode === 'deathmatch' && sim.mode !== 'deathmatch') floatText(() => T('fb.dm'), 0x9fb4dc);
     } else { remote = createRemote({ W }); pred = createPredictor({ W }); clientView(); }
     localFireT = 0; localArm = 0; lowFpsT = 0; net.at = performance.now(); net.inMsgs = net.inBytes = net.outMsgs = net.outBytes = 0;
     laps = lapsOf(s.opts || {}); killCap = killCapOf(s.opts || {}); guns = gunsOn(s.opts || {}); root.classList.toggle('noguns', !guns); // the HUD's copy of the lobby's knobs; the touch FIRE, WEAPON and RELOAD buttons go with the guns
     arena = modeOf(s.opts || {}, s.players.length) === 'deathmatch' ? arenaOf(s.seed) : null; placeFence(arena);
     course = (s.opts || {}).mode === 'race' ? raceCourse(s.seed) : null; legs = course ? planLap(course) : null; routeCp = -1; goT = 0; lastCount = -1; finishT = 0; // the course and the lap plan come from the seed on every machine
+    rematchOn = false; votes = []; boardOpen = false; if (tb) tb.board.classList.remove('on');
     root.classList.remove('over'); touchKey = ''; aimLock = false; wasDead = false; death = null; killcamT = -1; replay.reset(); W.eventMarker.visible = false; goalMarker.visible = false; routeTarget = null;
     state = 'grab'; showOverlay('grab'); kb.attach(); if (touch) tc.attach(); fit(); audio.init(); loop.start();
   }
@@ -866,8 +929,10 @@ export async function create({ mount, audio, send, hooks }) {
     stop(); unsubAudio(); if (eng) { try { eng.osc.stop(); eng.siren.stop(); eng.gain.disconnect(); eng.sirenGain.disconnect(); } catch {} eng = null; }
     removeEventListener('resize', onResize); ro?.disconnect(); removeEventListener('mouseup', onMouseUp); removeEventListener('mousemove', onMouseMove); removeEventListener('wheel', onWheel);
     document.removeEventListener('pointerlockchange', onLockChange); document.removeEventListener('pointerlockerror', onLockError);
-    disposeScene(scene); renderer.dispose(); root.remove(); mount.innerHTML = ''; unloadCss();
+    disposeScene(scene); renderer.dispose(); root.remove(); mount.innerHTML = ''; unloadCss(); unsubLang();
   }
+  /* the guests who want another round (the shell's tally): the host's results card counts them */
+  function rematchVotes(ids) { votes = (Array.isArray(ids) ? ids : []).filter(id => id !== myId); if (votesEl) votesEl.textContent = votesText(); }
   function playerLeft(id) { if (sim) sim.playerLeft(id); clients = clients.filter(c => c.id !== id); }
   const netStats = { in: {}, out: {} };
   const count = (tab, t) => { tab[t] = (tab[t] || 0) + 1; };
@@ -881,5 +946,6 @@ export async function create({ mount, audio, send, hooks }) {
   const debug = { get sim() { return sim; }, get remote() { return remote; }, get state() { return state; }, get session() { return session; }, V, W, get camYaw() { return camYaw; }, get camAspect() { return camera.aspect; }, view, get fps() { return fps; }, grab, pause, get clients() { return clients; }, netStats, net, timing, get pred() { return pred; }, get quality() { return quality; }, setQuality, get held() { return held; }, get fallbackMouse() { return fallbackMouse; },
     get aimLock() { return aimLock; }, sa, touch: { on: touch, stick: stickS, lookPad: lookS, fire: fireS, jump: jumpS, axes, readInput, get sensitivity() { return LOOK[lookLevel]; }, cycleLook } };
   debug.replay = replay; window.__gta = debug;
-  return { start, stop, destroy, onNetMessage, playerLeft, debug };
+  relabel(); const unsubLang = onLang(relabel); // the canvas HUD asks T() every frame; the DOM is redrawn here
+  return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };
 }

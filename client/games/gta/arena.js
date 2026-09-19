@@ -33,9 +33,12 @@ export function arenaSpawns(A) {
     cornerXZ(mid, midJ, 0), cornerXZ(mid, midJ, 2), cornerXZ(mid, midJ, 1), cornerXZ(mid, midJ, 3)];      // the middle block's corners
   return corners.map(([x, z]) => ({ x, z, face: Math.atan2(A.cx - x, A.cz - z) }));
 }
-/* the spawn point farthest from the nearest of `enemies` ([{ x, z }]); the first one when there is nobody to keep away from */
-export function farthestSpawn(spawns, enemies) {
-  let best = spawns[0], bd = -1;
-  for (const s of spawns) { let d = Infinity; for (const e of enemies) { const dx = e.x - s.x, dz = e.z - s.z; d = Math.min(d, dx * dx + dz * dz); } if (d > bd) { bd = d; best = s; } }
+/* the spawn point farthest from the nearest of `enemies` ([{ x, z }]); the first one when there is nobody to keep away from.
+   `claimed` (spawn points someone appeared on a moment ago, maybe this very tick and so not yet among the enemies) are left out
+   while any other is free */
+export function farthestSpawn(spawns, enemies, claimed = []) {
+  const free = spawns.filter(s => !claimed.includes(s)), list = free.length ? free : spawns;
+  let best = list[0], bd = -1;
+  for (const s of list) { let d = Infinity; for (const e of enemies) { const dx = e.x - s.x, dz = e.z - s.z; d = Math.min(d, dx * dx + dz * dz); } if (d > bd) { bd = d; best = s; } }
   return best;
 }

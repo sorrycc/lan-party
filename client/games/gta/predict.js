@@ -3,9 +3,15 @@
    (motion.js) on its own input every frame and shows that. Every input carries a sequence number; the host
    reports the last one it applied (`ack`) and its resulting position, the predictor compares that with what it
    had predicted for the same input and shifts its state by the difference. Small differences are hidden with a
-   visual offset that decays over a few frames; big ones (a respawn, a car crash the client could not see) snap. */
+   visual offset that decays over a few frames. A predicted car bumps into the other cars' copies (motion.js pushCarOffCars),
+   so it no longer drives through a parked one; what the host still decides differently (a crash seen from its side) is
+   corrected, gliding through the visual offset up to CAR_BLEND metres (taking the host's speed as well past CAR_GATE) and
+   snapping only beyond that (a respawn, a teleport). */
 import { angDiff, groundY } from './world.js';
-import { stepOnFoot, driveInput, stepCar, carOffs } from './motion.js';
+import { stepOnFoot, driveInput, stepCar, carOffs, pushCarOffCars } from './motion.js';
+
+/* a predicted car's error (metres) past which the host's speed is taken too, and past which the car snaps; a pedestrian's snap distance */
+export const CAR_GATE = 6, CAR_BLEND = 14, PED_SNAP = 4;
 
 export function createPredictor({ W }) {
   const ped = { cls: 'ped', x: 0, y: 0, z: 0, yaw: 0, vy: 0, moving: 0, jumpLatch: false, r: 0.42, stuck: 0, inCar: null };
@@ -32,7 +38,7 @@ export function createPredictor({ W }) {
     if (!synced) { if (!pe) return 0; snapPed(pe); synced = true; }
     if (me.carId !== carId) { carId = me.carId; if (carId >= 0) { const ce = remote.get(carId); if (!ce) { carId = -1; return 0; } attachCar(ce); } else { car = null; ped.inCar = null; if (pe) snapPed(pe); } }
     seq++;
-    if (car) { driveInput(car, bits, dt, sx, sz); stepCar(W, car, dt, null); ped.x = car.x; ped.z = car.z; ped.y = car.y; ped.yaw = car.yaw; ped.moving = 0; }
+    if (car) { driveInput(car, bits, dt, sx, sz); stepCar(W, car, dt, null); pushCarOffCars(car, otherCars(remote)); ped.x = car.x; ped.z = car.z; ped.y = car.y; ped.yaw = car.yaw; ped.moving = 0; }
     else stepOnFoot(W, ped, bits, camYaw, aiming, dt, otherCars(remote), sx, sz);
     hist.push({ q: seq, sentAt: now, x: ped.x, z: ped.z, yaw: ped.yaw, car: car ? { x: car.x, z: car.z, yaw: car.yaw, vF: car.vF } : null });
     if (hist.length > 240) hist.shift();
@@ -48,15 +54,17 @@ export function createPredictor({ W }) {
     if (car) {
       const a = (msg.v || []).find(v => v[0] === carId); if (!a || !h.car) { hist.splice(0, hi); return; }
       const ex = a[4] - h.car.x, ez = a[5] - h.car.z, eyaw = angDiff(a[6], h.car.yaw), evF = a[8] - h.car.vF;
-      if (ex * ex + ez * ez > 36 || Math.abs(eyaw) > 1.2) { car.x = a[4]; car.z = a[5]; car.yaw = a[6]; car.vF = a[8]; car.steer = a[7]; car.vx = Math.sin(car.yaw) * car.vF; car.vz = Math.cos(car.yaw) * car.vF; car.angVel = 0; vis.x = vis.z = vis.yaw = 0; hist.length = 0; corrections++; return; }
+      const e2 = ex * ex + ez * ez;
+      if (e2 > CAR_BLEND * CAR_BLEND || Math.abs(eyaw) > 1.2) { car.x = a[4]; car.z = a[5]; car.yaw = a[6]; car.vF = a[8]; car.steer = a[7]; car.vx = Math.sin(car.yaw) * car.vF; car.vz = Math.cos(car.yaw) * car.vF; car.angVel = 0; vis.x = vis.z = vis.yaw = 0; hist.length = 0; corrections++; return; }
       if (Math.abs(ex) + Math.abs(ez) + Math.abs(eyaw) + Math.abs(evF) < 1e-3) { hist.splice(0, hi); return; }
       car.x += ex; car.z += ez; car.yaw += eyaw; vis.x -= ex; vis.z -= ez; vis.yaw -= eyaw;
-      car.vx += Math.sin(car.yaw) * evF * 0.5; car.vz += Math.cos(car.yaw) * evF * 0.5;
+      if (e2 > CAR_GATE * CAR_GATE) { corrections++; car.vx = Math.sin(car.yaw) * a[8]; car.vz = Math.cos(car.yaw) * a[8]; car.vF = a[8]; car.angVel = 0; } // a big miss: something hit it on the host, take its speed too
+      else { car.vx += Math.sin(car.yaw) * evF * 0.5; car.vz += Math.cos(car.yaw) * evF * 0.5; }
       for (const e of hist) if (e.car) { e.car.x += ex; e.car.z += ez; e.car.yaw += eyaw; }
     } else {
       const a = (msg.p || []).find(p => p[0] === pedId); if (!a) { hist.splice(0, hi); return; }
       const ex = a[3] - h.x, ez = a[4] - h.z;
-      if (ex * ex + ez * ez > 16) { ped.x = a[3]; ped.z = a[4]; ped.y = a[7] !== undefined ? a[7] : groundY(ped.x, ped.z); ped.vy = 0; vis.x = vis.z = 0; hist.length = 0; corrections++; return; }
+      if (ex * ex + ez * ez > PED_SNAP * PED_SNAP) { ped.x = a[3]; ped.z = a[4]; ped.y = a[7] !== undefined ? a[7] : groundY(ped.x, ped.z); ped.vy = 0; vis.x = vis.z = 0; hist.length = 0; corrections++; return; }
       if (Math.abs(ex) + Math.abs(ez) < 1e-3) { hist.splice(0, hi); return; }
       ped.x += ex; ped.z += ez; vis.x -= ex; vis.z -= ez;
       for (const e of hist) { e.x += ex; e.z += ez; }

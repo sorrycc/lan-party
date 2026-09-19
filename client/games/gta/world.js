@@ -6,6 +6,8 @@
    `buildWorld({ THREE, scene })` does the heavy lifting once per game instance. */
 import { clamp, lerp, makeRng } from '../../core/math.js';
 import { FONT } from './font.js';
+import { makeT } from '../../core/i18n.js';
+import { STR } from './strings.js';
 
 export const PI = Math.PI, TAU = PI * 2;
 export const dist2 = (ax, az, bx, bz) => (ax - bx) * (ax - bx) + (az - bz) * (az - bz);
@@ -32,23 +34,35 @@ const DISTRICTS = [
   { name: 'PIXEL HEIGHTS', t: (i, j) => j >= 4 && j <= 8 && i >= 8 },
   { name: 'VOXEL BEACH', t: (i, j) => j >= 9 },
 ];
-export function districtAt(x, z) {
-  if (z > BEACH_Z0 && x > -HALF - 40 && x < HALF + 40) return z > BEACH_Z1 ? 'PACIFIC OF PIXELS' : 'VOXEL BEACH BOARDWALK';
-  if (!inCity(x, z)) return 'THE OUTSKIRTS';
+/* Places travel as numbers and are named on each screen in its own language (strings.js holds the Chinese and English).
+   A district is its index in DISTRICTS, then the sea, the boardwalk and the outskirts (6, 7, 8). A street is 0 (a dirt road),
+   1 (the boardwalk), 100 + k (avenue k), 200 + k (street k) or 1000 + 100 * avenue + street (a crossing). streetAt / districtAt
+   stay the English world data (the building styles, the tests); streetName / districtName are what the HUD says. */
+export function districtRef(x, z) {
+  if (z > BEACH_Z0 && x > -HALF - 40 && x < HALF + 40) return z > BEACH_Z1 ? 6 : 7;
+  if (!inCity(x, z)) return 8;
   const i = clamp(cellOf(x), 0, NB - 1), j = clamp(cellOf(z), 0, NB - 1);
-  for (const d of DISTRICTS) if (d.t(i, j)) return d.name;
-  return 'DOWNTOWN';
+  for (let k = 0; k < DISTRICTS.length; k++) if (DISTRICTS[k].t(i, j)) return k;
+  return 3;
 }
-export function streetAt(x, z) {
-  if (!inCity(x, z)) return z > BEACH_Z0 ? 'Boardwalk' : 'Dirt road';
+const DISTRICT_EN = [...DISTRICTS.map(d => d.name), 'PACIFIC OF PIXELS', 'VOXEL BEACH BOARDWALK', 'THE OUTSKIRTS'];
+export const districtAt = (x, z) => DISTRICT_EN[districtRef(x, z)];
+export function streetRef(x, z) {
+  if (!inCity(x, z)) return z > BEACH_Z0 ? 1 : 0;
   const kx = Math.round((x + HALF) / PITCH), kz = Math.round((z + HALF) / PITCH);
   const dx = Math.abs(x - X(kx)), dz = Math.abs(z - X(kz));
   const onA = dx < ROAD / 2 + SW, onS = dz < ROAD / 2 + SW;
-  if (onA && onS) return AVENUES[kx] + ' & ' + STREETS[kz];
-  if (onA) return AVENUES[kx];
-  if (onS) return STREETS[kz];
-  return dx < dz ? AVENUES[kx] : STREETS[kz];
+  if (onA && onS) return 1000 + kx * 100 + kz;
+  if (onA) return 100 + kx;
+  if (onS) return 200 + kz;
+  return dx < dz ? 100 + kx : 200 + kz;
 }
+const nameStreet = (ref, av, st, cross, board, dirt) => ref >= 1000 ? cross(av[Math.floor((ref - 1000) / 100)], st[(ref - 1000) % 100]) : ref >= 200 ? st[ref - 200] : ref >= 100 ? av[ref - 100] : ref === 1 ? board : dirt;
+export const streetAt = (x, z) => nameStreet(streetRef(x, z), AVENUES, STREETS, (a, b) => a + ' & ' + b, 'Boardwalk', 'Dirt road');
+const TW = makeT(STR);
+/* a street or a district (from streetRef / districtRef, or off the wire) in the current language */
+export const streetName = ref => nameStreet(ref | 0, TW('avenues'), TW('streets'), (a, b) => TW('street.cross', { a, b }), TW('street.boardwalk'), TW('street.dirt')) || '?';
+export const districtName = ref => TW('districts')[ref | 0] || '?';
 export const SPECIAL = { '6,6': 'plaza', '9,3': 'hospital', '8,5': 'police', '4,4': 'spray', '2,2': 'park', '10,9': 'park', '3,10': 'park', '1,7': 'park' };
 export const PLAZA = { x: X(6) + PITCH / 2, z: X(6) + PITCH / 2 };
 export const HOSPITAL = { x: X(9) + PITCH / 2, z: X(3) + PITCH - ROAD / 2 - SW / 2 - 0.5 };

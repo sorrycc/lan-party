@@ -96,6 +96,26 @@ export function stepCar(W, c, dt, crashes) {
   c.y = lerp(c.y, groundY(c.x, c.z), Math.min(1, 12 * dt));
   return offroad;
 }
+/* A client's predicted car against the other cars near it (their copies, moved by the host's snapshots): the same sphere-row
+   contact as the host's collideCars, but only mine gives way - by its own share of the push, the other's share being the host's
+   business - and only my velocity takes the bounce. Without it a predicted car drove through a parked one until the host's
+   correction yanked it back. `others` are anything with x, z, yaw, type (and vF). */
+export function pushCarOffCars(c, others) {
+  for (const B of others) { if (B === c || B.released || !B.type) continue; const ddx = B.x - c.x, ddz = B.z - c.z; if (ddx * ddx + ddz * ddz > 64) continue;
+    const bfx = Math.sin(B.yaw), bfz = Math.cos(B.yaw), boffs = B.offs || carOffs(B.type), br = B.r || B.type.w / 2 + 0.12, mb = B.mass || B.type.mass, ma = c.mass, tot = ma + mb, bvF = B.vF || 0;
+    for (const oa of c.offs) for (const ob of boffs) {
+      const ax = c.x + c.fx * oa, az = c.z + c.fz * oa, bx = B.x + bfx * ob, bz = B.z + bfz * ob;
+      let dx = bx - ax, dz = bz - az; const d2 = dx * dx + dz * dz, rs = c.r + br;
+      if (d2 >= rs * rs || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2); dx /= d; dz /= d; const pen = rs - d;
+      c.x -= dx * pen * (mb / tot); c.z -= dz * pen * (mb / tot);
+      const vn = (bfx * bvF - c.vx) * dx + (bfz * bvF - c.vz) * dz;
+      if (vn < 0) { const jimp = -(1 + 0.35) * vn / (1 / ma + 1 / mb), jx = dx * jimp, jz = dz * jimp;
+        c.vx -= jx / ma; c.vz -= jz / ma; c.angVel += (c.fz * oa * (-jx) - c.fx * oa * (-jz)) * 0.12 / ma; }
+    }
+  }
+  c.vF = c.vx * c.fx + c.vz * c.fz; c.speed = Math.abs(c.vF);
+}
 export function carCollideWorld(W, c, crashes) {
   const list = W.nearAabbs(c.x, c.z), r = c.r, offs = c.offs || [-c.off, c.off];
   for (const o of offs) {

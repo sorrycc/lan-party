@@ -12,7 +12,7 @@
    HUD before the checkpoint is reached; a driver who has left the route is planned back onto it from the intersection
    ahead of the bonnet, so the instruction is never a U-turn inside the city. */
 import { makeRng } from '../../core/math.js';
-import { X, NB, HALF, PITCH, streetAt } from './world.js';
+import { X, NB, HALF, PITCH, streetAt, streetRef } from './world.js';
 
 export const LAPS = 3, CHECKPOINTS = 6; // LAPS is the default; the lobby's RACE LAPS option overrides it (lapsOf in sim.js)
 export const START_NODE = [3, 8]; // the intersection the grid faces (Ender Ave, heading +z)
@@ -148,14 +148,14 @@ export const ordinal = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'TH' : n % 10 
    next instruction. `cpAt` is the index in `route` of the checkpoint, when the route runs through one.
    Returns { arrows, turn, cp }: arrows is [{ x, z, yaw, big }]; turn is null or { kind, d, street }, kind 'LEFT' |
    'RIGHT' | 'U-TURN' at the first intersection that is not straight through (a checkpoint included), d metres away,
-   onto `street`, or 'ARRIVE' when the end of the route is straight ahead; cp is null or { d } for the checkpoint ahead. */
+   onto `street` (English; `ref` is its streetRef, for the HUD's language), or 'ARRIVE' when the end of the route is straight ahead; cp is null or { d } for the checkpoint ahead. */
 export function raceGuide(route, mx, mz, hx, hz, legs = 4, step = 14, cpAt = -1) {
   const pts = route.map(([i, j]) => ({ x: X(i), z: X(j) }));
   const ahead = (x, z, slack) => (x - mx) * hx + (z - mz) * hz > slack;
   const arrows = []; let turn = null, cp = null;
   let k0 = 0; while (k0 < pts.length && !ahead(pts[k0].x, pts[k0].z, -3)) k0++;
   if (!pts.length) return { arrows, turn, cp };
-  if (k0 >= pts.length) { const p = pts[pts.length - 1]; return { arrows, turn: { kind: 'U-TURN', d: Math.hypot(p.x - mx, p.z - mz), street: streetAt(p.x, p.z) }, cp }; }
+  if (k0 >= pts.length) { const p = pts[pts.length - 1]; return { arrows, turn: { kind: 'U-TURN', d: Math.hypot(p.x - mx, p.z - mz), street: streetAt(p.x, p.z), ref: streetRef(p.x, p.z) }, cp }; }
   if (cpAt >= k0 && cpAt < pts.length) cp = { d: Math.hypot(pts[cpAt].x - mx, pts[cpAt].z - mz) };
   let prev = k0 > 0 ? pts[k0 - 1] : null;
   for (let k = k0, n = 0; k < pts.length && n < legs; k++, n++) {
@@ -171,10 +171,10 @@ export function raceGuide(route, mx, mz, hx, hz, legs = 4, step = 14, cpAt = -1)
     const p = pts[k];
     if (k > k0) { const q = pts[k - 1], l = Math.hypot(p.x - q.x, p.z - q.z) || 1; ix = (p.x - q.x) / l; iz = (p.z - q.z) / l; }
     const d = Math.hypot(p.x - mx, p.z - mz), nxt = pts[k + 1];
-    if (!nxt) { turn = { kind: 'ARRIVE', d, street: streetAt(p.x, p.z) }; break; }
+    if (!nxt) { turn = { kind: 'ARRIVE', d, street: streetAt(p.x, p.z), ref: streetRef(p.x, p.z) }; break; }
     const l = Math.hypot(nxt.x - p.x, nxt.z - p.z) || 1, ox = (nxt.x - p.x) / l, oz = (nxt.z - p.z) / l;
     const dot = ox * ix + oz * iz; if (dot > 0.5) continue; // straight through
-    turn = { kind: dot < -0.5 ? 'U-TURN' : ox * iz - oz * ix > 0 ? 'LEFT' : 'RIGHT', d, street: streetAt((p.x + nxt.x) / 2, (p.z + nxt.z) / 2) };
+    turn = { kind: dot < -0.5 ? 'U-TURN' : ox * iz - oz * ix > 0 ? 'LEFT' : 'RIGHT', d, street: streetAt((p.x + nxt.x) / 2, (p.z + nxt.z) / 2), ref: streetRef((p.x + nxt.x) / 2, (p.z + nxt.z) / 2) };
     break;
   }
   return { arrows, turn, cp };
