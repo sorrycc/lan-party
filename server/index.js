@@ -14,11 +14,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLIENT = path.join(ROOT, 'client');
 const THREE_PATH = path.join(ROOT, 'node_modules', 'three', 'build', 'three.module.js');
 const CANNON_PATH = path.join(ROOT, 'node_modules', 'cannon-es', 'dist', 'cannon-es.js');
+const THREE_ADDONS = path.join(ROOT, 'node_modules', 'three', 'examples', 'jsm'); // Sundown Showdown's bloom pass
 
 function lanAddresses() { const out = []; for (const list of Object.values(os.networkInterfaces())) for (const a of list) if (a.family === 'IPv4' && !a.internal) out.push(a.address); return out; }
 const addrHint = () => { const a = lanAddresses(); return a.length ? `http://${a[0]}:${PORT}` : `http://localhost:${PORT}`; };
 
-const server = http.createServer(createStaticHandler({ root: CLIENT, aliases: { '/lib/three.module.js': THREE_PATH, '/lib/cannon-es.js': CANNON_PATH } }));
+const server = http.createServer(createStaticHandler({ root: CLIENT, aliases: { '/lib/three.module.js': THREE_PATH, '/lib/cannon-es.js': CANNON_PATH }, mounts: { '/lib/three-addons/': THREE_ADDONS } }));
 const wss = new WebSocketServer({ server });
 createRooms({ addrHint }).attach(wss);
 

@@ -112,6 +112,7 @@ test('a two-axis stick shapes the distance by dead zone, curve and range and kee
   el.fire('pointermove', { pointerId: 7, clientX: 400, clientY: 400 }); assert.ok(Math.abs(Math.hypot(s.x, s.y) - 1) < 1e-9, 'a diagonal is clamped to the unit circle'); assert.ok(s.x > 0.7 && s.y > 0.7);
   el.fire('pointermove', { pointerId: 7, clientX: 40, clientY: 100 }); assert.ok(Math.abs(s.x + 5 / 9) < 1e-9); assert.equal(s.y, 0);
   el.fire('pointerup', { pointerId: 7 }); assert.equal(s.x, 0); assert.equal(s.y, 0); assert.deepEqual(log, ['down', 'up']);
+  assert.ok(s.ux < -0.7 && s.uy < -0.7, 'the release keeps where the stick pointed (the pointerup was at 0, 0: up and to the left), for an aim stick to fire along'); assert.equal(s.last, 'up');
   const one = setup('pad', { range: 100 });
   one.el.fire('pointerdown', { pointerId: 1, clientX: 0, clientY: 0 }); one.el.fire('pointermove', { pointerId: 1, clientX: 50, clientY: 300 });
   assert.equal(one.s.x, 0.5); assert.equal(one.s.y, 0, 'a one-axis pad ignores the vertical drag');

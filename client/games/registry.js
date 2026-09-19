@@ -70,6 +70,15 @@ export const GAMES = [
     load: () => import('./hog/index.js'),
   },
   {
+    id: 'showdown', title: 'Sundown Showdown', tagline: 'DESERT BRAWL · 4 BRAWLERS · POWER CUBES · POISON GAS · LAST ONE STANDING · UP TO 8',
+    minPlayers: 1, maxPlayers: 8,
+    options: [
+      { key: 'fillAI', type: 'bool', label: 'CPU BRAWLERS FILL THE SHOWDOWN TO 10', default: true },
+      { key: 'botSkill', type: 'select', label: 'CPU SKILL', default: 'normal', choices: [{ value: 'easy', label: 'Easy' }, { value: 'normal', label: 'Normal' }, { value: 'hard', label: 'Hard' }] },
+    ],
+    load: () => import('./showdown/index.js'),
+  },
+  {
     id: 'dice', title: 'Loaded Dice', tagline: '灌铅骰子 · 一个按钮的骰子对决 · 1 对 1,或单人闯关', // the game's own words are Chinese by default (its ☰ menu has English)
     minPlayers: 1, maxPlayers: 2,
     options: [

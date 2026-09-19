@@ -54,7 +54,8 @@ export function createTouch() {
   /* A steering pad, or with `axes: 2` a thumb stick: touch anywhere in `el` and drag. `state.x` runs -1..1 relative to
      where the finger landed and snaps back to 0 on release; `state.raw` is the raw drag in CSS pixels. A stick adds
      `state.y` (and `state.rawY`) on the same terms, with the pair clamped to the unit circle so a diagonal push is no
-     faster than a straight one.
+     faster than a straight one. `state.ux` / `state.uy` keep where the stick was when it was let go, so a release can
+     carry an aim (an aim stick fires where it pointed; `state.last` tells a real release from a cancelled touch).
      `dead` is the slack around the touch origin that does not steer at all, because a thumb never lands still;
      past it the drag is shaped by `curve` (above 1: fine near the centre, full lock still at `range` pixels), so
      small corrections are easy without putting full lock out of reach. `state.range`, `state.dead` and `state.curve`
@@ -62,7 +63,7 @@ export function createTouch() {
      The element gets the CSS variables --ox / --oy (touch origin, px) and --sx / --sy (the steering, -1..1, unitless)
      so a stylesheet can draw a ring and a knob. */
   function pad(el, { range = 80, dead = 0, curve = 1, axes = 1, onDown, onUp } = {}) {
-    const state = { held: false, x: 0, y: 0, raw: 0, rawY: 0, range, dead, curve, pid: null, last: '' }; let sx = 0, sy = 0;
+    const state = { held: false, x: 0, y: 0, ux: 0, uy: 0, raw: 0, rawY: 0, range, dead, curve, pid: null, last: '' }; let sx = 0, sy = 0;
     const shape = px => {
       const a = Math.abs(px) - state.dead; if (a <= 0) return 0;
       const t = Math.min(1, a / Math.max(1, state.range - state.dead));
@@ -81,7 +82,7 @@ export function createTouch() {
         set(0, 0); onDown?.(state, e);
       },
       move: e => set(e.clientX - sx, e.clientY - sy),
-      up: e => { state.held = false; set(0, 0); onUp?.(state, e); },
+      up: e => { state.held = false; state.ux = state.x; state.uy = state.y; set(0, 0); onUp?.(state, e); },
     });
     return state;
   }

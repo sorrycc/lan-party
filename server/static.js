@@ -1,5 +1,6 @@
 /* Static file handler: serves everything under `root` (path-traversal safe) plus a few aliased files
-   that live outside it, such as three.js and cannon-es from node_modules. */
+   that live outside it, such as three.js and cannon-es from node_modules. `mounts` maps a URL prefix to a
+   directory outside `root` the same way (three's addons), just as safe against path traversal. */
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -10,8 +11,9 @@ const MIME = {
   '.webmanifest': 'application/manifest+json',
 };
 
-export function createStaticHandler({ root, aliases = {} }) {
+export function createStaticHandler({ root, aliases = {}, mounts = {} }) {
   const rootAbs = path.resolve(root);
+  const within = (dir, rel) => { const abs = path.resolve(dir), file = path.resolve(abs, rel); return file.startsWith(abs + path.sep) ? file : null; };
   const reply = (res, code, body, type = 'text/plain; charset=utf-8') => { res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-cache' }); res.end(body); };
   return (req, res) => {
     let url;
@@ -19,6 +21,8 @@ export function createStaticHandler({ root, aliases = {} }) {
     if (url === '/') url = '/index.html';
     if (url === '/favicon.ico') { res.writeHead(204); return res.end(); }
     let file = aliases[url];
+    const mount = file ? null : Object.keys(mounts).find(prefix => url.startsWith(prefix));
+    if (mount) { file = within(mounts[mount], url.slice(mount.length)); if (!file) return reply(res, 404, 'not found'); }
     if (!file) {
       file = path.resolve(rootAbs, '.' + url);
       if (file !== rootAbs && !file.startsWith(rootAbs + path.sep)) return reply(res, 404, 'not found');
