@@ -1,5 +1,5 @@
 /* Sundown Showdown: CPU brawlers step out of a telegraphed bomb (as often as their skill says), out-of-combat healing is slow and
-   ramps up the same for everyone, and the pick card's speed and reload bars are spread over the four brawlers. */
+   ramps up the same for everyone, and the pick card's speed and reload bars are spread over the brawlers. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeMap, blocksMove } from '../client/games/showdown/map.js';
@@ -40,8 +40,8 @@ test('out of the fight a brawler heals slowly, ramping up, the same for a person
   }
 });
 
-test('the pick card shows speed and reload, spread over the four brawlers', () => {
+test('the pick card shows speed and reload, spread over the brawlers', () => {
   const bars = CLASSES.map(statBars); assert.ok(bars.every(v => v.length === 5 && v.every(x => x > 0 && x <= 1) && v[3] >= .25 && v[4] >= .25));
-  const brick = CLASSES.findIndex(c => c.id === 'brick'), boomer = CLASSES.findIndex(c => c.id === 'boomer');
-  assert.equal(bars[brick][3], 1, 'the fastest'); assert.equal(bars[boomer][3], .25, 'the slowest'); assert.equal(bars[brick][4], 1, 'the quickest reload');
+  const brick = CLASSES.findIndex(c => c.id === 'brick'), boomer = CLASSES.findIndex(c => c.id === 'boomer'), shade = CLASSES.findIndex(c => c.id === 'shade');
+  assert.equal(bars[shade][3], 1, 'the fastest'); assert.equal(bars[boomer][3], .25, 'the slowest'); assert.equal(bars[brick][4], 1, 'the quickest reload');
 });

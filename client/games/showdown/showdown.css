@@ -68,14 +68,18 @@
   padding: calc(2vh + var(--sa-t)) calc(2vw + var(--sa-r)) calc(2vh + var(--sa-b)) calc(2vw + var(--sa-l)); background: radial-gradient(ellipse at center, rgba(40, 20, 5, .35), rgba(15, 6, 2, .82)); }
 .showdown .pick .title { font-size: clamp(28px, 6vw, 72px); letter-spacing: 2px; color: var(--gold); transform: rotate(-2deg); line-height: .95; text-align: center; }
 .showdown .pick .title span { display: block; } .showdown .pick .title span + span { color: #ff6b35; display: block; font-size: .42em; letter-spacing: 6px; margin-top: .2em; }
-.showdown .cards { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; max-width: 1100px; }
-.showdown .pcard { width: 230px; background: linear-gradient(#3b4a8c, #232c5a); border: 4px solid #000; border-radius: 16px; padding: 10px 12px 12px; cursor: pointer; box-shadow: 0 6px 0 #000, inset 0 3px 0 rgba(255, 255, 255, .18); transition: transform .12s, box-shadow .12s, opacity .2s; touch-action: manipulation; }
-.showdown .pcard.sel { background: linear-gradient(#ffb627, #e0691c); transform: translateY(-8px) scale(1.04); box-shadow: 0 10px 0 #000, 0 0 30px #ffb627aa, inset 0 3px 0 rgba(255, 255, 255, .35); }
+.showdown .cards { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; max-width: 880px; } /* eleven small cards, six to a row; what the chosen one does is in .pinfo under them */
+.showdown .pcard { width: 132px; background: linear-gradient(#3b4a8c, #232c5a); border: 4px solid #000; border-radius: 14px; padding: 6px 8px 8px; text-align: center; cursor: pointer; box-shadow: 0 6px 0 #000, inset 0 3px 0 rgba(255, 255, 255, .18); transition: transform .12s, box-shadow .12s, opacity .2s; touch-action: manipulation; }
+.showdown .pcard.sel { background: linear-gradient(#ffb627, #e0691c); transform: translateY(-5px) scale(1.04); box-shadow: 0 10px 0 #000, 0 0 30px #ffb627aa, inset 0 3px 0 rgba(255, 255, 255, .35); }
 .showdown .pcard.off { opacity: .45; cursor: default; }
-.showdown .pcard canvas { width: 100%; height: 120px; display: block; border-radius: 10px; background: radial-gradient(circle at 50% 70%, rgba(255, 255, 255, .25), rgba(0, 0, 0, .25)); pointer-events: none; }
-.showdown .pcard h3 { font-size: 22px; margin: 6px 0 0; }
+.showdown .pcard canvas { width: 100%; height: 72px; object-fit: cover; display: block; border-radius: 10px; background: radial-gradient(circle at 50% 70%, rgba(255, 255, 255, .25), rgba(0, 0, 0, .25)); pointer-events: none; }
+.showdown .pcard h3 { font-size: 16px; margin: 4px 0 0; }
 .showdown .pcard .role { font: bold 11px Arial, var(--cjk), sans-serif; color: #ffe9a8; letter-spacing: 1px; text-transform: uppercase; }
-.showdown .pcard .atk { font: bold 11px/1.3 Arial, var(--cjk), sans-serif; opacity: .92; margin: 5px 0 7px; min-height: 56px; } .showdown .pcard .atk span { color: #ffe27a; }
+.showdown .pinfo { display: flex; gap: 20px; align-items: center; width: min(780px, 100%); box-sizing: border-box; background: rgba(26, 18, 8, .82); border: 4px solid #000; border-radius: 16px; padding: 10px 18px 12px; box-shadow: 0 6px 0 #000, inset 0 3px 0 rgba(255, 255, 255, .1); }
+.showdown .pinfo .ptext { flex: 1.6; min-width: 0; } .showdown .pinfo .pbars { flex: 1; min-width: 150px; }
+.showdown .pinfo h3 { margin: 0 0 4px; font-size: 24px; } .showdown .pinfo h3 small { font: bold 11px Arial, var(--cjk), sans-serif; color: #ffe9a8; letter-spacing: 1px; text-transform: uppercase; margin-left: 6px; text-shadow: none; -webkit-text-stroke: 0; }
+.showdown .pinfo p { margin: 4px 0 0; font: bold 12px/1.35 Arial, var(--cjk), sans-serif; opacity: .95; } .showdown .pinfo .psup { color: #ffe27a; } .showdown .pinfo .ppas { color: #a6ffd6; }
+.showdown .pinfo .ppas b { background: #12805a; color: #fff; border-radius: 5px; padding: 0 5px; margin-right: 3px; font-size: 10px; letter-spacing: 1px; }
 .showdown .stat { display: flex; align-items: center; gap: 6px; font: bold 10px Arial, var(--cjk), sans-serif; margin-top: 4px; text-transform: uppercase; }
 .showdown .stat b { width: 50px; } .showdown .stat i { flex: 1; height: 10px; background: #0008; border: 2px solid #000; border-radius: 6px; overflow: hidden; display: block; } .showdown .stat i u { display: block; height: 100%; border-radius: 3px; }
 .showdown .pick .btn { font-size: 30px; padding: 8px 60px; border-radius: 18px; }
@@ -140,7 +144,7 @@
 @media (orientation: portrait) and (max-width: 760px) { .showdown.touch .rotate { display: flex; } } /* phones only; a tablet held upright still fits */
 
 /* ---------------------------------------------------------------- narrow and short viewports */
-@media (max-width: 760px) { .showdown .cards { gap: 8px; } .showdown .pcard { width: calc(50% - 8px); padding: 7px 8px 9px; border-width: 3px; } .showdown .pcard canvas { height: 84px; } .showdown .pcard .atk { display: none; } .showdown .pcard h3 { font-size: 17px; } }
+@media (max-width: 760px) { .showdown .cards { gap: 6px; } .showdown .pcard { width: calc(25% - 6px); box-sizing: border-box; padding: 4px 5px 6px; border-width: 3px; } .showdown .pcard canvas { height: 54px; } .showdown .pcard h3 { font-size: 13px; } .showdown .pcard .role { font-size: 8px; letter-spacing: 0; } .showdown .pinfo { flex-direction: column; align-items: stretch; gap: 6px; padding: 8px 12px 10px; border-width: 3px; } .showdown .pinfo h3 { font-size: 19px; } }
 @media (max-height: 560px) { /* a phone in landscape */
   .showdown { --edge-r: max(10px + var(--sa-r), 28px); --edge-b: max(10px + var(--sa-b), 22px); }
   .showdown .alive { font-size: 13px; gap: 8px; padding: 3px 8px; border-width: 2px; top: calc(8px + var(--sa-t)); } .showdown .clock { font-size: 11px; padding: 3px 9px; border-width: 2px; top: calc(8px + var(--sa-t)); }
@@ -151,8 +155,10 @@
   .showdown .stick { width: 104px; height: 104px; } .showdown .stick .knob { width: 48px; height: 48px; margin: -24px 0 0 -24px; transform: translate(calc(var(--sx) * 28px), calc(var(--sy) * 28px)); }
   .showdown .fire { bottom: calc(var(--edge-b) + 30px); } .showdown .sup { width: 80px; height: 80px; right: calc(var(--edge-r) + 116px); } .showdown .sup .knob { width: 38px; height: 38px; margin: -19px 0 0 -19px; transform: translate(calc(var(--sx) * 21px), calc(var(--sy) * 21px)); }
   .showdown .pick { gap: 6px; } .showdown .pick .title { font-size: 24px; } .showdown .pick .title span + span { font-size: .5em; letter-spacing: 4px; }
-  .showdown .cards { flex-wrap: nowrap; gap: 8px; } .showdown .pcard { width: 23%; max-width: 190px; padding: 5px 7px 7px; border-width: 3px; border-radius: 12px; } .showdown .pcard.sel { transform: translateY(-3px) scale(1.02); }
-  .showdown .pcard canvas { height: 64px; } .showdown .pcard h3 { font-size: 15px; margin-top: 3px; } .showdown .pcard .role { font-size: 9px; } .showdown .pcard .atk { display: none; } .showdown .stat { margin-top: 2px; font-size: 8px; } .showdown .stat b { width: 40px; } .showdown .stat i { height: 7px; }
+  .showdown .cards { flex-wrap: nowrap; justify-content: safe center; gap: 6px; width: 100%; max-width: none; overflow-x: auto; overflow-y: hidden; padding: 5px 4px 6px; box-sizing: border-box; touch-action: pan-x; scrollbar-width: none; flex: none; } /* one row that slides sideways */
+  .showdown .pcard { flex: 0 0 84px; width: 84px; box-sizing: border-box; padding: 3px 4px 5px; border-width: 3px; border-radius: 10px; box-shadow: 0 4px 0 #000; } .showdown .pcard.sel { transform: translateY(-3px) scale(1.02); }
+  .showdown .pcard canvas { height: 40px; border-radius: 7px; } .showdown .pcard h3 { font-size: 12px; margin-top: 2px; } .showdown .pcard .role { display: none; } .showdown .stat { margin-top: 2px; font-size: 8px; } .showdown .stat b { width: 40px; } .showdown .stat i { height: 6px; border-width: 1px; }
+  .showdown .pinfo { flex-direction: row; align-items: center; gap: 12px; width: min(640px, 100%); padding: 4px 12px 6px; border-width: 3px; border-radius: 12px; box-shadow: 0 4px 0 #000; flex: none; } .showdown .pinfo h3 { font-size: 15px; margin: 0; } .showdown .pinfo h3 small { font-size: 9px; } .showdown .pinfo p { font-size: 10px; line-height: 1.25; margin-top: 2px; } .showdown .pinfo .ppas b { font-size: 8px; } .showdown .pinfo .pbars { min-width: 120px; }
   .showdown .pick .btn { font-size: 18px; padding: 5px 40px; border-width: 3px; border-radius: 12px; box-shadow: 0 4px 0 #000; } .showdown .pstat { font-size: 10px; min-height: 12px; }
   .showdown .end .in { gap: 6px; } .showdown .endT { font-size: 34px; } .showdown .endR { font-size: 14px; } .showdown .end table { font-size: 11px; border-width: 2px; } .showdown .end th, .showdown .end td { padding: 1px 9px; }
   .showdown .end .btn { font-size: 13px; padding: 6px 16px; border-width: 3px; box-shadow: 0 4px 0 #000; }
@@ -167,4 +173,4 @@
 html.zh .showdown .pick .title, html.zh .showdown .overlay .mcard h1, html.zh .showdown .btn, html.zh .showdown .clock { letter-spacing: 1px; }
 html.zh .showdown .pick .title span + span { letter-spacing: 2px; } html.zh .showdown .pad .lbl, html.zh .showdown .rotate, html.zh .showdown .pstat { letter-spacing: 1px; }
 html.zh .showdown .pcard .role, html.zh .showdown .stat, html.zh .showdown .end th, html.zh .showdown .end .foot, html.zh .showdown .rotate small, html.zh .showdown .stick b { letter-spacing: 0; }
-html.zh .showdown .stat b { width: 34px; } html.zh .showdown .pick .title { line-height: 1.15; }
+html.zh .showdown .pinfo h3 small, html.zh .showdown .pinfo .ppas b { letter-spacing: 0; } html.zh .showdown .stat b { width: 34px; } html.zh .showdown .pick .title { line-height: 1.15; }

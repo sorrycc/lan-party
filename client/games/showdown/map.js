@@ -96,7 +96,13 @@ export function makeMap(seed) {
     }
     return hit;
   }
+  /* a shot that ricochets: `q` (x, z, vx, vz) has just stepped from (px, pz) into a tile that stops shots. Put it back and turn it off
+     the face it met (both, in a corner). The host and every client run this same code, so the shot flies the same way everywhere. */
+  function bounce(q, px, pz) {
+    const i0 = tx(px), j0 = tx(pz), i1 = tx(q.x), j1 = tx(q.z); let fx = i1 !== i0 && blocksShot(tileIJ(i1, j0)), fz = j1 !== j0 && blocksShot(tileIJ(i0, j1));
+    if (!fx && !fz) fx = fz = true; if (fx) q.vx = -q.vx; if (fz) q.vz = -q.vz; q.x = px; q.z = pz;
+  }
   function moveBy(b, dx, dz, smash) { const steps = Math.max(1, Math.ceil(Math.hypot(dx, dz) / .4)); let hit = false; for (let s = 0; s < steps; s++) { b.x += dx / steps; b.z += dz / steps; if (collide(b, smash)) hit = true; } return hit; }
 
-  return { seed: seed >>> 0, tiles, spawns, boxes, tileIJ, tileAt, losShot, clearWalk, rayWall, collide, moveBy };
+  return { seed: seed >>> 0, tiles, spawns, boxes, tileIJ, tileAt, losShot, clearWalk, rayWall, collide, moveBy, bounce };
 }

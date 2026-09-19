@@ -81,7 +81,7 @@ export const GAMES = [
     load: () => import('./hog/index.js'),
   },
   {
-    id: 'showdown', title: L('日落大乱斗', 'Sundown Showdown'), tagline: L('沙漠乱斗 · 4 位英雄 · 能量块 · 毒圈 · 活到最后 · 最多 8 人', 'DESERT BRAWL · 4 BRAWLERS · POWER CUBES · POISON GAS · LAST ONE STANDING · UP TO 8'),
+    id: 'showdown', title: L('日落大乱斗', 'Sundown Showdown'), tagline: L('沙漠乱斗 · 11 位英雄 · 能量块 · 毒圈 · 活到最后 · 最多 8 人', 'DESERT BRAWL · 11 BRAWLERS · POWER CUBES · POISON GAS · LAST ONE STANDING · UP TO 8'),
     minPlayers: 1, maxPlayers: 8,
     options: [
       { key: 'fillAI', type: 'bool', label: L('电脑补满到 10 人', 'CPU BRAWLERS FILL THE SHOWDOWN TO 10'), default: true },
