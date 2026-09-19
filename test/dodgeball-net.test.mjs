@@ -61,3 +61,22 @@ test('a host from an older build, whose snapshots carry no stamp, is still follo
   pal.applySnapshot(msg);
   assert.equal(pal.lastSeq, 1);
 });
+
+/* The result card shows every player's hits and outs as the host counted them. The tally rides in `st` (two numbers a player)
+   only when it changed, and once a second besides, so it reaches every screen without costing every snapshot. */
+test('the match tally reaches the guests, and only rides when it changed', () => {
+  const a = host(5), pal = client(5);
+  relay(a, pal, 2);
+  const [blue, red] = [a.players.find(p => p.team === 'blue' && p.pid === 1), a.players.find(p => p.team === 'red' && p.pid === 2)];
+  a.phase = 'play';
+  const ball = a.balls[0]; ball.state = 'live'; ball.team = 'blue'; ball.thrower = blue; ball.vx = 900; ball.vy = 0;
+  a.onHit(ball, red, -1, 0);
+  const msg = wire(a.packSnapshot());
+  assert.equal(msg.st.length, a.players.length * 2);
+  pal.applySnapshot(msg);
+  const pb = pal.players[blue.pi], pr = pal.players[red.pi];
+  assert.deepEqual([pb.hits, pb.outs, pr.hits, pr.outs], [1, 0, 0, 1]);
+  assert.equal(wire(a.packSnapshot()).st, undefined, 'unchanged: not sent again');
+  const hit = msg.ev.find(e => e[0] === 'hit'); assert.ok(hit.slice(1).every(v => typeof v === 'number'), 'the hit event is numbers');
+  assert.equal(msg.p[red.pi].length, 15, 'a player row: pose, state, and the last input the host has from them');
+});

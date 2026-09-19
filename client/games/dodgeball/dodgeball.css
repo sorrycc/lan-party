@@ -9,7 +9,7 @@
   /* the thumb buttons stay clear of Safari's edge-swipe zones even where the safe-area insets are zero (an iPad in a browser tab) */
   --edge-r: max(22px + var(--sa-r), 40px); --edge-b: max(22px + var(--sa-b), 40px);
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--bg); color: var(--ink);
-  font-family: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  font-family: "Avenir Next", "Segoe UI", system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .db.touch { touch-action: none; }
 /* the court keeps its 1040x640 aspect: cap the width by the viewport height as well as its width. The dynamic viewport height,
    where the browser has it, is what Safari's toolbar leaves visible. */
@@ -52,6 +52,16 @@
 .db .result h2 { margin: 4px 0 12px; font-size: 22px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
 .db .result .foot { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); letter-spacing: .08em; }
 .db .result .foot .btn { touch-action: manipulation; }
+.db .result .mvp { font-size: 14px; font-weight: 800; letter-spacing: .08em; color: var(--yellow); margin: -4px 0 8px; }
+.db .result .mvp:empty, .db .result .votes:empty { display: none; }
+.db .result .tally { display: flex; gap: 18px; justify-content: center; margin-bottom: 12px; }
+.db .result table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.db .result th { font-size: 10px; font-weight: 800; letter-spacing: .1em; color: var(--muted); padding: 0 6px 3px; text-align: right; }
+.db .result th:first-child { text-align: left; }
+.db .result table.blue th:first-child { color: var(--blue); } .db .result table.red th:first-child { color: var(--red); }
+.db .result td { padding: 1px 6px; text-align: right; } .db .result td:first-child { text-align: left; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db .result tr.me td { color: #fff; font-weight: 800; }
+.db .result .votes { font-size: 13px; color: var(--green); margin-bottom: 8px; font-weight: 700; }
 @keyframes db-pop { 0% { transform: translateX(-50%) scale(.85); opacity: 0; } 100% { transform: translateX(-50%) scale(1); opacity: 1; } }
 
 .db .status { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 44px; padding: 0 14px; white-space: nowrap; overflow: hidden;
@@ -142,7 +152,7 @@
   .db .charge { width: 60px; height: 5px; }
   .db footer { display: none; }
   .db canvas { border-radius: 10px; }
-  .db .result { min-width: 240px; padding: 10px 16px 12px; bottom: 16%; } .db .result h1 { font-size: 20px; } .db .result h2 { font-size: 15px; margin: 2px 0 8px; } .db .result .foot .btn.small { font-size: 12px; padding: 6px 10px; }
+  .db .result { min-width: 240px; padding: 10px 16px 12px; bottom: 6%; } .db .result .tally { margin-bottom: 6px; } .db .result table { font-size: 11px; } .db .result .mvp { font-size: 12px; margin: -2px 0 4px; } .db .result h1 { font-size: 20px; } .db .result h2 { font-size: 15px; margin: 2px 0 8px; } .db .result .foot .btn.small { font-size: 12px; padding: 6px 10px; }
   .db .pad { width: 40%; } .db .pad .ring { width: 108px; height: 108px; margin: -54px 0 0 -54px; } .db .pad .knob { width: 46px; height: 46px; margin: -23px 0 0 -23px; transform: translate(calc(var(--sx) * 30px), calc(var(--sy) * 30px)); } .db .pad .lbl { display: none; }
   .db .tbtn { width: 70px; height: 70px; font-size: 12px; border-width: 2px; }
   .db .throw { width: 84px; height: 84px; } .db .throw small { font-size: 20px; transform: rotate(var(--aim, 0deg)) translateX(28px); }
@@ -150,3 +160,8 @@
   .db .overlay .card { padding: 12px 16px 14px; border-radius: 16px; min-width: 200px; } .db .overlay .card h1 { font-size: 18px; margin-bottom: 8px; } .db .overlay .card .btn { font-size: 13px; padding: 8px 14px; }
   .db .rotate .phone { font-size: 48px; }
 }
+
+/* Chinese: the tracked-out capitals of the English HUD look scattered on Han characters, so the spacing comes down */
+html.zh .db .team .name { letter-spacing: .04em; } html.zh .db .mid .sub { letter-spacing: .04em; } html.zh .db .status { letter-spacing: .04em; }
+html.zh .db .result h1 { letter-spacing: .04em; } html.zh .db .overlay .card h1 { letter-spacing: 1px; font-style: normal; } html.zh .db .rotate, html.zh .db .rotate small { letter-spacing: 1px; }
+html.zh .db .pad .lbl { letter-spacing: 1px; } html.zh .db .tbtn, html.zh .db .throw b { letter-spacing: 0; } html.zh .db .result .mvp, html.zh .db .result th { letter-spacing: .02em; }

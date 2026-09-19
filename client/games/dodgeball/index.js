@@ -6,10 +6,17 @@
 
    Netcode: host-authoritative. The host simulates every body, every ball and the round clock. The other
    players send their input to the host (`in` / `th`, addressed with `to`) and render the host's 30 Hz `s`
-   snapshots interpolated a little in the past. Effects (hits, throws, bounces, banners) ride inside the
+   snapshots interpolated a little in the past - except their own body, which they predict with the host's own movement code
+   (movePlayer) and reconcile against each snapshot (Game.predict / reconcile), so a step never waits a round trip. Effects (hits, throws, bounces, banners) ride inside the
    snapshot as events, so every screen sees and hears the same match. The roster is derived from the session
    identically on every machine, which is what lets snapshots refer to players by index. Every snapshot carries the round's
    seed as a match id, so the tail of a finished match cannot be mistaken for the start of the next one after PLAY AGAIN.
+   Events are codes and numbers, never sentences: each screen puts them into words (strings.js) in its own language.
+
+   A round is won by knocking the other side out. At CFG.suddenAt it goes to sudden death (every ball back on the centre line,
+   none drain any more); a round still level at the time cap, or ended by the last two going down together, goes to the side
+   with more players left, then more hits that round, and only then to a coin flip, which the banner says. The host keeps every
+   player's hits and outs for the result card and the MVP. The lobby's `botSkill` sets how well the CPUs aim and react.
 
    Touch screens (core/touch.js): the left part of the screen is a thumb stick, SPRINT and THROW sit under the right thumb
    (THROW fires when the finger lifts, so dragging it first aims the throw instead of taking the nearest enemy), ☰ opens a
@@ -19,7 +26,7 @@
 
    Physics note: hand-rolled circle physics with fixed 240 Hz substeps, swept circle-vs-circle hit tests for
    thrown balls, exact reflection off the axis-aligned walls and a hard clamp so no ball ends a step outside. */
-import { clamp, lerp, wrapAngle } from '../../core/math.js';
+import { clamp, lerp, wrapAngle, makeRng } from '../../core/math.js';
 import { hex, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
 import { createTouch, isCoarse } from '../../core/touch.js';
@@ -27,6 +34,14 @@ import { createLoop } from '../../core/loop.js';
 import { createTicker } from '../../core/ticker.js';
 import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
 import { AVATARS } from '../../core/avatars.js';
+import { makeT, onLang, nextLang } from '../../core/i18n.js';
+import { STR } from './strings.js';
+
+const T = makeT(STR);
+/* a word drawn later (a banner, a float): a key and its vars, turned into text when it is drawn so a language switch reaches it */
+const W = (key, vars) => ({ key, vars });
+const words = v => typeof v === 'string' ? v : T(v.key, v.vars && Object.fromEntries(Object.entries(v.vars).map(([k, x]) => [k, typeof x === 'object' && x ? words(x) : x])));
+const teamName = team => T('team.' + team);
 
 /* ============================================================ config */
 const CFG = {
@@ -40,14 +55,14 @@ const CFG = {
   armTime: 0.55,
   physHz: 240,
   drain: { start: 12, every: 9, keep: 2 },
-  lineCountdownAt: 41, lineDownAt: 45, timeCap: 120,
+  lineCountdownAt: 41, lineDownAt: 45, suddenAt: 90, timeCap: 120,
   winScore: 2,
   intro: 1.6, banner: 2.6,
   netHz: 30, interp: 0.08,
 };
 const TEAMS = ['blue', 'red'];
-const TEAM = { blue: { name: 'BLUE', code: 0, color: '#3d8bff', deep: '#1f4fa3', glow: 'rgba(61,139,255,', dir: 1 },
-               red:  { name: 'RED',  code: 1, color: '#ff4d5a', deep: '#a8202c', glow: 'rgba(255,77,90,', dir: -1 } };
+const TEAM = { blue: { code: 0, color: '#3d8bff', deep: '#1f4fa3', glow: 'rgba(61,139,255,', dir: 1 },
+               red:  { code: 1, color: '#ff4d5a', deep: '#a8202c', glow: 'rgba(255,77,90,', dir: -1 } };
 const AI_NAMES = { blue: ['AXEL', 'NOOR', 'KIRA'], red: ['RUBY', 'CASH', 'ORION'] };
 const PHASES = ['intro', 'play', 'roundEnd'];
 const PSTATES = ['GRAB', 'ARMING', 'READY'];
@@ -62,7 +77,12 @@ const easeOutBack = t => { const c = 1.70158; return 1 + (c + 1) * Math.pow(t - 
 function gauss() { let u = 0, v = 0; while (u === 0) u = Math.random(); while (v === 0) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 const fmtClock = t => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
 const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
-const FONT = '"Avenir Next", "Segoe UI", system-ui, sans-serif';
+const CJK = '"PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei"';
+const FONT = `"Avenir Next", "Segoe UI", system-ui, ${CJK}, sans-serif`, UI_FONT = `system-ui, ${CJK}, sans-serif`;
+/* CPU skill (the lobby's `botSkill`): how well a CPU aims and how fast it sees a ball coming. `normal` is the game as it always was */
+const SKILLS = { easy: { acc: [0.42, 0.66], react: [0.2, 0.36] }, normal: { acc: [0.62, 0.86], react: [0.10, 0.24] }, hard: { acc: [0.82, 0.96], react: [0.05, 0.12] } };
+/* a phone buzz, where there is one to buzz */
+const buzz = ms => { try { globalThis.navigator?.vibrate?.(ms); } catch {} };
 
 /* ============================================================ sound - a small synth on the shell's shared AudioContext */
 function createSfx(audio) {
@@ -116,7 +136,7 @@ class Ball {
 
 class Player {
   /* slot: { team, idx, pid, name, avatar } - pid null means a CPU body */
-  constructor(slot) {
+  constructor(slot, skill = 'normal') {
     this.team = slot.team; this.idx = slot.idx; this.pid = slot.pid; this.isHuman = slot.pid !== null; this.name = slot.name; this.avatar = slot.avatar;
     this.pi = 0; this.x = 0; this.y = 0; this.vx = 0; this.vy = 0; this.r = CFG.player.r;
     this.alive = true; this.stamina = 1; this.sprinting = false; this.regenT = 0;
@@ -126,10 +146,12 @@ class Player {
     this.want = { x: 0, y: 0, sprint: false };   // latest wish of the human driving this body (local keys or the network)
     this.knocked = null; this.bob = 0; this.moving = 0; this.dustT = 0; this.benchSlot = -1; this.stillT = 0;
     this.buf = []; // remote snapshots (clients only)
-    this.brain = this.isHuman ? null : Player.newBrain();
+    this.hits = 0; this.outs = 0; this.ack = 0; // the match's tally (the result card) and the last input the host has from this human
+    this.brain = this.isHuman ? null : Player.newBrain(skill);
   }
-  static newBrain() {
-    return { reaction: rand(0.10, 0.24), accuracy: rand(0.62, 0.86), aggression: rand(0.4, 1),
+  static newBrain(skill = 'normal') {
+    const k = SKILLS[skill] || SKILLS.normal;
+    return { reaction: rand(...k.react), accuracy: rand(...k.acc), aggression: rand(0.4, 1),
       throwDelay: rand(0.25, 0.9), thinkT: rand(0.1), target: null, ballTarget: null,
       dodgeUntil: -1, dodgeX: 0, dodgeY: 0, threatSeenAt: -1, threatBall: null,
       wanderA: rand(Math.PI * 2), wanderT: 0, goalX: 0, goalY: 0, sprintWish: false, rush: true,
@@ -172,8 +194,41 @@ function sweepHit(px, py, qx, qy, cx, cy, R) {
   return (t >= 0 && t <= 1) ? t : -1;
 }
 
+/* One body's own movement for `dt` from its stick `inp` ({ x, y, sprint }): stamina, acceleration toward the wanted velocity,
+   integration and the court (its own half while the line is up). The host runs it for every body inside physicsStep, and a client
+   runs the very same code for its own body to predict it (Game.predict), so what the host later reports is where it already is. */
+export function movePlayer(p, inp, dt, lineDown) {
+  const C = CFG.court, P = CFG.player;
+  let ix = inp.x, iy = inp.y; const il = hyp(ix, iy);
+  if (il > 1) { ix /= il; iy /= il; }
+  const wantSprint = inp.sprint && il > 0.05;
+  if (wantSprint && (p.sprinting ? p.stamina > 0 : p.stamina > P.sprintMin)) {
+    p.sprinting = true; p.stamina = Math.max(0, p.stamina - P.staminaDrain * dt); p.regenT = P.regenDelay;
+    if (p.stamina <= 0) p.sprinting = false;
+  } else {
+    p.sprinting = false; p.regenT -= dt;
+    if (p.regenT <= 0) p.stamina = Math.min(1, p.stamina + P.staminaRegen * dt);
+  }
+  const max = P.speed * (p.sprinting ? P.sprintMul : 1);
+  const tx = ix * max, ty = iy * max;
+  const ax = tx - p.vx, ay = ty - p.vy, al = hyp(ax, ay), step = P.accel * dt;
+  if (al <= step) { p.vx = tx; p.vy = ty; } else { p.vx += ax / al * step; p.vy += ay / al * step; }
+  if (il < 0.05) { const f = Math.max(0, 1 - P.damp * dt); p.vx *= f; p.vy *= f; }
+  p.x += p.vx * dt; p.y += p.vy * dt;
+  const spd = hyp(p.vx, p.vy); p.moving = spd / P.speed; p.stillT = spd < 30 ? p.stillT + dt : 0;
+  if (spd > 20) { p.face = Math.atan2(p.vy, p.vx); p.bob += dt * (p.sprinting ? 22 : 15); }
+  // confine: own half while the line is up, whole court after
+  const cx = (C.left + C.right) / 2, gap = p.r + 3;
+  let minX = C.left + p.r, maxX = C.right - p.r;
+  if (!lineDown) { if (p.team === 'blue') maxX = cx - gap; else minX = cx + gap; }
+  if (p.x < minX) { p.x = minX; if (p.vx < 0) p.vx = 0; }
+  if (p.x > maxX) { p.x = maxX; if (p.vx > 0) p.vx = 0; }
+  if (p.y < C.top + p.r) { p.y = C.top + p.r; if (p.vy < 0) p.vy = 0; }
+  if (p.y > C.bottom - p.r) { p.y = C.bottom - p.r; if (p.vy > 0) p.vy = 0; }
+}
+
 function physicsStep(g, dt) {
-  const C = CFG.court, B = CFG.ball, P = CFG.player;
+  const C = CFG.court, B = CFG.ball;
   const players = g.players, balls = g.balls;
 
   // ---- players: velocity toward desired, integrate, confine
@@ -185,32 +240,7 @@ function physicsStep(g, dt) {
       p.x = clamp(p.x, C.left + p.r, C.right - p.r); p.y = clamp(p.y, C.top + p.r, C.bottom - p.r);
       continue;
     }
-    let ix = p.input.x, iy = p.input.y; const il = hyp(ix, iy);
-    if (il > 1) { ix /= il; iy /= il; }
-    const wantSprint = p.input.sprint && il > 0.05;
-    if (wantSprint && (p.sprinting ? p.stamina > 0 : p.stamina > P.sprintMin)) {
-      p.sprinting = true; p.stamina = Math.max(0, p.stamina - P.staminaDrain * dt); p.regenT = P.regenDelay;
-      if (p.stamina <= 0) p.sprinting = false;
-    } else {
-      p.sprinting = false; p.regenT -= dt;
-      if (p.regenT <= 0) p.stamina = Math.min(1, p.stamina + P.staminaRegen * dt);
-    }
-    const max = P.speed * (p.sprinting ? P.sprintMul : 1);
-    const tx = ix * max, ty = iy * max;
-    const ax = tx - p.vx, ay = ty - p.vy, al = hyp(ax, ay), step = P.accel * dt;
-    if (al <= step) { p.vx = tx; p.vy = ty; } else { p.vx += ax / al * step; p.vy += ay / al * step; }
-    if (il < 0.05) { const f = Math.max(0, 1 - P.damp * dt); p.vx *= f; p.vy *= f; }
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    const spd = hyp(p.vx, p.vy); p.moving = spd / P.speed; p.stillT = spd < 30 ? p.stillT + dt : 0;
-    if (spd > 20) { p.face = Math.atan2(p.vy, p.vx); p.bob += dt * (p.sprinting ? 22 : 15); }
-    // confine: own half while the line is up, whole court after
-    const cx = (C.left + C.right) / 2, gap = p.r + 3;
-    let minX = C.left + p.r, maxX = C.right - p.r;
-    if (!g.lineDown) { if (p.team === 'blue') maxX = cx - gap; else minX = cx + gap; }
-    if (p.x < minX) { p.x = minX; if (p.vx < 0) p.vx = 0; }
-    if (p.x > maxX) { p.x = maxX; if (p.vx > 0) p.vx = 0; }
-    if (p.y < C.top + p.r) { p.y = C.top + p.r; if (p.vy < 0) p.vy = 0; }
-    if (p.y > C.bottom - p.r) { p.y = C.bottom - p.r; if (p.vy > 0) p.vy = 0; }
+    movePlayer(p, p.input, dt, g.lineDown);
   }
   // player-player separation (soft)
   for (let i = 0; i < players.length; i++) for (let j = i + 1; j < players.length; j++) {
@@ -429,11 +459,12 @@ function aiAim(p, e) {
    The host runs update(); everyone else runs applySnapshot() + updateClient(). Anything visible or audible
    goes through emit() -> applyEvent(), so both paths produce the same effects. */
 export class Game {
-  constructor(roster, { opts, sfx, isHost, online, myId, matchId }) {
-    this.sfx = sfx; this.isHost = isHost; this.online = online; this.myId = myId;
+  constructor(roster, { opts, sfx, isHost, online, myId, matchId, buzz: haptic }) {
+    this.sfx = sfx; this.isHost = isHost; this.online = online; this.myId = myId; this.buzz = haptic || (() => {});
     this.matchId = matchId >>> 0; // the round's shared id (the shell's seed): stamped on every snapshot so a straggler from the previous match is ignored
     this.winScore = Number(opts && opts.winScore) || CFG.winScore;
-    this.players = roster.map((slot, i) => { const p = new Player(slot); p.pi = i; return p; });
+    this.skill = SKILLS[opts?.botSkill] ? opts.botSkill : 'normal';
+    this.players = roster.map((slot, i) => { const p = new Player(slot, this.skill); p.pi = i; return p; });
     this.me = this.players.find(p => p.pid === myId) || null;
     this.count = { blue: this.players.filter(p => p.team === 'blue').length, red: this.players.filter(p => p.team === 'red').length };
     this.balls = []; this.ballById = new Map(); this.particles = []; this.floats = []; this.time = 0;
@@ -443,6 +474,10 @@ export class Game {
     this.score = { blue: 0, red: 0 }; this.round = 0; this.matchWinner = null; this.roundWinner = null;
     this.phase = 'intro'; this.phaseT = 0; this.lineDown = false; this.lineCount = null;
     this.aim = null; // a touch player's drag on THROW (unit vector), drawn as an arrow from their body
+    this.statsDirty = true; this.sudden = false; this.roundHits = { blue: 0, red: 0 };
+    /* a client's own body, predicted (see predict()): `body` is where the host will have it, `ox/oy` the correction still being
+       blended out, `hist` the stick over the last half second, `sentAt` when each numbered input went out, `lag` the round trip */
+    this.pred = { body: null, ox: 0, oy: 0, hist: [], sentAt: new Map(), seq: 0, lag: 0.1, on: false };
     if (this.isHost) this.startRound(); else { this.round = 1; this.resetRound(); }
   }
 
@@ -451,7 +486,7 @@ export class Game {
   resetRound() {
     const C = CFG.court, cx = (C.left + C.right) / 2;
     this.time = 0; this.phase = 'intro'; this.phaseT = 0; this.lineDown = false; this.lineCount = null;
-    this.drainNextAt = CFG.drain.start; this.roundWinner = null; this.bench = { blue: [], red: [] }; this.lastCountdownN = null;
+    this.drainNextAt = CFG.drain.start; this.roundWinner = null; this.sudden = false; this.roundHits = { blue: 0, red: 0 }; this.bench = { blue: [], red: [] }; this.lastCountdownN = null;
     this.balls = []; this.ballById.clear();
     for (let i = 0; i < CFG.ball.count; i++) {
       const y = C.top + (C.bottom - C.top) * (i + 1) / (CFG.ball.count + 1);
@@ -470,7 +505,7 @@ export class Game {
   ballsInPlay() { let n = 0; for (const b of this.balls) if (b.state !== 'drain') n++; return n; }
   playerOf(pid) { return this.players.find(p => p.pid === pid) || null; }
   /* a human dropped out: their body plays on as a CPU */
-  toAI(p) { if (!p.isHuman) return; p.isHuman = false; p.pid = null; p.avatar = -1; p.name = AI_NAMES[p.team][p.idx] || p.name; p.brain = Player.newBrain(); Object.assign(p.brain, { goalX: p.x, goalY: p.y, rush: false }); p.throwQueued = false; p.throwDir = null; if (p === this.me) this.me = null; }
+  toAI(p) { if (!p.isHuman) return; p.isHuman = false; p.pid = null; p.avatar = -1; p.name = AI_NAMES[p.team][p.idx] || p.name; p.brain = Player.newBrain(this.skill); Object.assign(p.brain, { goalX: p.x, goalY: p.y, rush: false }); p.throwQueued = false; p.throwDir = null; if (p === this.me) this.me = null; }
 
   /* ---------- visual helpers */
   showBanner(text, color, dur, opts = {}) { this.banner = { text, color, t: 0, dur, sub: opts.sub || null, size: opts.size || 64 }; }
@@ -491,42 +526,50 @@ export class Game {
     switch (ev[0]) {
       case 'rstart': { const [, round, sb, sr] = ev; this.round = round; this.score.blue = sb; this.score.red = sr; this.bench = { blue: [], red: [] }; this.subBanner = null;
         for (const b of this.balls) b.trail = [];
-        this.showBanner(`ROUND ${round}`, '#ffffff', CFG.intro, { sub: round === 1 ? `first to ${this.winScore} · balls on the line · GO on the whistle` : `${sb}–${sr} · balls back on the line` }); break; }
-      case 'go': this.showBanner('GO!', '#47e07a', 0.7, { size: 80 }); sfx.whistle(); break;
-      case 'pick': { const p = this.players[ev[1]]; if (!p) break; this.ring(p.x, p.y, TEAM[p.team].color, 26, 0.35); if (p === this.me || Math.random() < 0.5) sfx.pickup(); break; }
+        this.showBanner(W('round', { n: round }), '#ffffff', CFG.intro, { sub: round === 1 ? W('roundSub1', { n: this.winScore }) : W('roundSubN', { a: sb, b: sr }) }); break; }
+      case 'go': this.showBanner(W('go'), '#47e07a', 0.7, { size: 80 }); sfx.whistle(); break;
+      case 'pick': { const p = this.players[ev[1]]; if (!p) break; this.ring(p.x, p.y, TEAM[p.team].color, 26, 0.35); if (p === this.me || Math.random() < 0.5) sfx.pickup(); if (p === this.me) this.buzz(12); break; }
       case 'ready': { const p = this.players[ev[1]]; if (p && p === this.me) { sfx.ready(); this.ring(p.x, p.y, '#47e07a', 30, 0.4); } break; }
-      case 'throw': { const [, x, y, tc] = ev; this.burst(x, y, 6, TEAM[TEAMS[tc]].color, 120, 0.3, 2); sfx.throw(); break; }
+      case 'throw': { const [, x, y, tc, ti] = ev; this.burst(x, y, 6, TEAM[TEAMS[tc]].color, 120, 0.3, 2); sfx.throw(); if (this.me && ti === this.me.pi) this.buzz(8); break; }
       case 'hit': {
         const [, pi, tc, x, y, ti] = ev; const p = this.players[pi]; if (!p) break; const team = TEAMS[tc], tcol = TEAM[team].color, thrower = this.players[ti] || null;
         this.burst(x, y, 26, tcol, 320, 0.7, 3, 'spark'); this.burst(x, y, 14, '#ffffff', 180, 0.5, 2.5);
         this.ring(x, y, tcol, 70, 0.5); this.ring(x, y, '#ffffff', 40, 0.35);
-        this.addFloat(x, y - 30, 'OUT!', '#ffffff', 26, 1.3);
+        this.addFloat(x, y - 30, W('out'), '#ffffff', 26, 1.3);
         this.shake = Math.min(1, this.shake + 0.7); this.flash = 0.35; this.countBump = 0.3;
         this.excite[team] = 1.4; this.excite[p.team] = 0.5;
         sfx.hit();
-        if (p === this.me) this.addFloat(x, y + 30, `${thrower ? thrower.name : TEAM[team].name} got you`, tcol, 14, 1.6);
-        else if (thrower && thrower === this.me) this.addFloat(x, y + 30, 'nice shot!', '#47e07a', 14, 1.4);
+        if (p === this.me) { this.addFloat(x, y + 30, W('gotYou', { name: thrower ? thrower.name : W('team.' + team) }), tcol, 14, 1.6); this.buzz([60, 40, 90]); }
+        else if (thrower && thrower === this.me) { this.addFloat(x, y + 30, W('niceShot'), '#47e07a', 14, 1.4); this.buzz([25, 30, 25]); }
         break;
       }
       case 'bounce': { const [, x, y, impact] = ev;
         this.burst(x, y, Math.min(8, 2 + impact / 150), 'rgba(255,255,255,0.7)', 60 + impact * 0.15, 0.3, 1.8);
         if (this.time - this.lastBounceSfx > 0.05) { this.lastBounceSfx = this.time; sfx.bounce(impact); } break; }
-      case 'drain': { const [, x, y] = ev; this.addFloat(x, y - 18, 'OUT OF PLAY', '#ffd23f', 12, 1.4); sfx.drain(); break; }
-      case 'tick': { const n = ev[1]; this.lineCount = n; sfx.tick(n); this.subBanner = { text: `Center line drops in ${n}…`, t: 0 }; break; }
+      case 'drain': { const [, x, y] = ev; this.addFloat(x, y - 18, W('outOfPlay'), '#ffd23f', 12, 1.4); sfx.drain(); break; }
+      case 'tick': { const n = ev[1]; this.lineCount = n; sfx.tick(n); this.subBanner = { text: W('lineIn', { n }), t: 0 }; break; }
       case 'line': {
         const C = CFG.court, cx = (C.left + C.right) / 2; this.lineDown = true; this.lineCount = null;
         for (let y = C.top + 6; y < C.bottom - 6; y += 22) this.particles.push({ x: cx, y: y + 7, vx: rand(-90, 90), vy: rand(-40, 40), life: rand(0.8, 1.5), max: 1.5, size: 14, color: '#ffffff', type: 'dash', rot: Math.PI / 2, rotV: rand(-6, 6), grav: 60 });
         this.burst(cx, (C.top + C.bottom) / 2, 40, '#ffffff', 260, 0.9, 2, 'spark');
-        this.showBanner('THE LINE IS DOWN', '#ff4d5a', 2.2, { sub: 'either team can cross now' });
+        this.showBanner(W('lineDown'), '#ff4d5a', 2.2, { sub: W('lineDownSub') });
         this.subBanner = null; this.shake = Math.min(1, this.shake + 0.5); this.excite.blue = this.excite.red = 1.2;
         sfx.lineDown(); break;
       }
-      case 'time': this.showBanner('TIME!', '#ffd23f', 1); break;
+      case 'time': this.showBanner(W('time'), '#ffd23f', 1); break;
+      /* sudden death: every ball back on the centre line (the host has put them there), both stands on their feet, the court runs red */
+      case 'sudden': {
+        const C = CFG.court, cx = (C.left + C.right) / 2; this.sudden = true; this.excite.blue = this.excite.red = 2; this.shake = Math.min(1, this.shake + 0.4);
+        this.showBanner(W('sudden'), '#ff4d5a', 2.4, { sub: W('suddenSub', { t: fmtClock(CFG.timeCap) }) });
+        this.burst(cx, (C.top + C.bottom) / 2, 30, '#ff4d5a', 240, 0.8, 2.5, 'spark'); sfx.lineDown(); sfx.whistle(); this.buzz(40); break;
+      }
       case 'round': {
-        const [, wc, over, sb, sr] = ev; const winner = TEAMS[wc], T = TEAM[winner], col = T.color;
+        /* `why` says how a level round was settled: 0 by knockout, 1 more players left, 2 more hits this round, 3 a coin flip */
+        const [, wc, over, sb, sr, why = 0] = ev; const winner = TEAMS[wc], col = TEAM[winner].color, name = W('team.' + winner);
+        const sub = why ? W('scoreWhy', { a: sb, b: sr, why: W(['', 'why.left', 'why.hits', 'why.coin'][why] || 'why.coin') }) : null;
         this.score.blue = sb; this.score.red = sr; this.roundWinner = winner; this.excite[winner] = 2; this.subBanner = null;
-        if (over) { this.matchWinner = winner; this.showBanner(`${T.name} WINS THE MATCH`, col, 1e9, { sub: `${sb} – ${sr}`, size: 58 }); }
-        else this.showBanner(`${T.name} takes the round!`, col, CFG.banner, { sub: `${sb} – ${sr}  ·  first to ${this.winScore}` });
+        if (over) { this.matchWinner = winner; this.showBanner(W('matchWin', { team: name }), col, 1e9, { sub: sub || W('score', { a: sb, b: sr }), size: 58 }); }
+        else this.showBanner(W('roundWin', { team: name }), col, CFG.banner, { sub: sub || W('scoreTo', { a: sb, b: sr, n: this.winScore }) });
         sfx.win();
         for (const p of this.players) if (p.alive && p.team === winner) this.burst(p.x, p.y, 16, col, 200, 0.9, 3, 'spark');
         break;
@@ -553,7 +596,7 @@ export class Game {
     p.ball = null; p.state = 'GRAB'; p.armT = 0; p.readyT = 0; p.throwQueued = false; p.throwDir = null; p.face = Math.atan2(dy, dx);
     p.vx += -dx * 40; p.vy += -dy * 40;
     this.stats.throws++;
-    this.emit('throw', r1(ball.x), r1(ball.y), TEAM[p.team].code);
+    this.emit('throw', r1(ball.x), r1(ball.y), TEAM[p.team].code, p.pi);
   }
   nearestEnemy(p) { let best = null, bd = 1e9; for (const e of this.players) if (e.team !== p.team && e.active) { const d = hyp(e.x - p.x, e.y - p.y); if (d < bd) { bd = d; best = e; } } return best ? { e: best, d: bd } : null; }
   /* a human pressed throw: fires at once when armed, otherwise as soon as the arm is ready. `dir` is a unit vector to throw
@@ -574,17 +617,36 @@ export class Game {
     ball.vx = (ball.vx - 1.35 * vn * nx) * 0.35 + p.vx * 0.4; ball.vy = (ball.vy - 1.35 * vn * ny) * 0.35 + p.vy * 0.4;
     ball.x = p.x + nx * (p.r + ball.r + 1); ball.y = p.y + ny * (p.r + ball.r + 1);
     this.ballDies(ball, 'hit');
-    this.stats.hits++;
+    this.stats.hits++; p.outs++; if (thrower) thrower.hits++; this.roundHits[team]++; this.statsDirty = true;
     this.emit('hit', p.pi, TEAM[team].code, r1(p.x), r1(p.y), thrower ? thrower.pi : -1);
   }
   ballDies(ball) { if (ball.state !== 'live') return; ball.state = 'idle'; ball.team = null; ball.thrower = null; }
   onBounce(ball, impact) { if (impact < 100) return; this.emit('bounce', r1(ball.x), r1(ball.y), Math.round(impact)); }
   drainBall(ball) { ball.state = 'drain'; ball.drainT = 0; ball.claimedBy = null; this.emit('drain', r1(ball.x), r1(ball.y)); }
   dropLine() { this.emit('line'); }
-  endRound(winner) {
+  endRound(winner, why = 0) {
     this.phase = 'roundEnd'; this.phaseT = 0; this.score[winner]++;
     const over = this.score[winner] >= this.winScore;
-    this.emit('round', TEAM[winner].code, over ? 1 : 0, this.score.blue, this.score.red);
+    this.emit('round', TEAM[winner].code, over ? 1 : 0, this.score.blue, this.score.red, why);
+  }
+  /* a round nobody won outright (the clock ran out, or the last two went down on the same step): more players left takes it, then
+     more hits this round, and only a dead level round goes to a coin flip, which the banner then owns up to */
+  settle(ab, ar) {
+    if (ab !== ar) return this.endRound(ab > ar ? 'blue' : 'red', 1);
+    const hb = this.roundHits.blue, hr = this.roundHits.red;
+    if (hb !== hr) return this.endRound(hb > hr ? 'blue' : 'red', 2);
+    this.endRound(pick(TEAMS), 3);
+  }
+  /* sudden death: whatever lies loose or has drained away comes back as a full set of balls along the centre line (a ball in a
+     hand or in flight stays where it is), and no more balls drain, so the last few players cannot circle each other to the clock */
+  suddenDeath() {
+    const C = CFG.court, cx = (C.left + C.right) / 2, keep = this.balls.filter(b => b.state === 'held' || b.state === 'live');
+    for (const b of this.balls) if (!keep.includes(b)) this.ballById.delete(b.id);
+    this.balls = keep; const n = CFG.ball.count - keep.length;
+    for (let i = 0; i < n; i++) {
+      const b = new Ball(this.round * 100 + 50 + i, cx, C.top + (C.bottom - C.top) * (i + 1) / (n + 1)); b.spawnT = i * 0.05; this.balls.push(b); this.ballById.set(b.id, b);
+    }
+    this.sudden = true; this.emit('sudden');
   }
 
   /* ---------- host simulation */
@@ -617,8 +679,9 @@ export class Game {
     for (const p of this.players) if (p.knocked && p.knocked.t > 0.85) { p.knocked = null; p.benchSlot = this.bench[p.team].length; this.bench[p.team].push(p); }
 
     if (playing) {
-      // balls slowly leave play
-      if (this.time >= this.drainNextAt) {
+      // balls slowly leave play (until sudden death brings them all back)
+      if (!this.sudden && this.time >= CFG.suddenAt) this.suddenDeath();
+      if (!this.sudden && this.time >= this.drainNextAt) {
         if (this.ballsInPlay() > CFG.drain.keep) {
           let pickB = null, bi = -1; for (const b of this.balls) if (b.state === 'idle' && b.idleT > bi) { bi = b.idleT; pickB = b; }
           if (pickB) { this.drainBall(pickB); this.drainNextAt = this.time + CFG.drain.every; } else this.drainNextAt = this.time + 2;
@@ -631,14 +694,23 @@ export class Game {
       }
       // round resolution
       const ab = this.aliveCount('blue'), ar = this.aliveCount('red');
-      if (ab === 0 || ar === 0) this.endRound(ab === ar ? pick(TEAMS) : (ab > 0 ? 'blue' : 'red'));
-      else if (this.time >= CFG.timeCap) { this.emit('time'); this.endRound(ab === ar ? pick(TEAMS) : (ab > ar ? 'blue' : 'red')); }
+      if (ab === 0 || ar === 0) { if (ab === ar) this.settle(ab, ar); else this.endRound(ab > 0 ? 'blue' : 'red'); }
+      else if (this.time >= CFG.timeCap) { this.emit('time'); this.settle(ab, ar); }
     }
 
     for (const b of this.balls) if (b.state === 'drain') { b.drainT += dt; b.scale = Math.max(0, 1 - b.drainT / 0.7); }
     const gone = this.balls.filter(b => b.state === 'drain' && b.drainT > 0.75); for (const b of gone) this.ballById.delete(b.id);
     if (gone.length) this.balls = this.balls.filter(b => !gone.includes(b));
+    this.dust(dt);
     this.updateFx(dt);
+  }
+  /* a sprinting body kicks up dust every 60 ms of real time, whatever the frame rate (host and clients alike: it is only a picture) */
+  dust(dt) {
+    for (const p of this.players) {
+      if (!p.active || !p.sprinting || p.moving <= 0.5) continue;
+      p.dustT -= dt; if (p.dustT > 0) continue; p.dustT = 0.06;
+      this.particles.push({ x: p.x - Math.cos(p.face) * 10 + rand(-4, 4), y: p.y + 8 + rand(-3, 3), vx: -Math.cos(p.face) * 30 + rand(-20, 20), vy: rand(-25, -5), life: 0.45, max: 0.45, size: 4, color: 'rgba(230,210,180,0.5)', type: 'dot' });
+    }
   }
   followHolders(dt) {
     for (const b of this.balls) if (b.state === 'held' && b.holder) { const p = b.holder; const a = p.face + 0.75 * (p.team === 'blue' ? -1 : 1); b.x = p.x + Math.cos(a) * (p.r + 4); b.y = p.y + Math.sin(a) * (p.r + 4); b.roll += dt * 2; }
@@ -656,27 +728,33 @@ export class Game {
     this.excite.blue = Math.max(0, this.excite.blue - dt * 0.6); this.excite.red = Math.max(0, this.excite.red - dt * 0.6);
   }
 
-  /* ---------- networking: host packs, clients apply + interpolate */
+  /* ---------- networking: host packs, clients apply + interpolate (and predict their own body)
+     Each player's row ends with the number of the last input the host has from that human (0 for a CPU), which is what a client
+     measures its round trip by. The match tally (`st`: hits and outs, two numbers a player) rides only when it changed and once a
+     second besides, so the result card on every screen shows the host's count without it costing every snapshot. */
   packSnapshot() {
     const msg = {
       t: 's', mid: this.matchId, q: ++this.seq, ph: PHASES.indexOf(this.phase), pt: r2(this.phaseT), tm: r2(this.time), rd: this.round, sb: this.score.blue, sr: this.score.red,
       ld: this.lineDown ? 1 : 0, lc: this.lineCount === null ? -1 : this.lineCount, rw: this.roundWinner ? TEAM[this.roundWinner].code : -1, mw: this.matchWinner ? TEAM[this.matchWinner].code : -1,
       p: this.players.map(p => [r1(p.x), r1(p.y), r1(p.vx), r1(p.vy), r2(p.face), p.alive ? 1 : 0, p.knocked ? r2(p.knocked.t) : -1, p.knocked ? r2(p.knocked.spin) : 0,
-        PSTATES.indexOf(p.state), r2(p.armT), r2(p.stamina), p.sprinting ? 1 : 0, p.ball ? p.ball.id : -1, p.isHuman ? 1 : 0]),
+        PSTATES.indexOf(p.state), r2(p.armT), r2(p.stamina), p.sprinting ? 1 : 0, p.ball ? p.ball.id : -1, p.isHuman ? 1 : 0, p.isHuman ? p.ack : 0]),
       b: this.balls.map(b => [b.id, r1(b.x), r1(b.y), r1(b.vx), r1(b.vy), BSTATES.indexOf(b.state), b.team ? TEAM[b.team].code : -1, b.holder ? b.holder.pi : -1, r2(b.scale)]),
       ev: this.events,
     };
+    if (this.sudden) msg.sd = 1;
+    if (this.statsDirty || this.seq % CFG.netHz === 0) { msg.st = this.players.flatMap(p => [p.hits, p.outs]); this.statsDirty = false; }
     this.events = [];
     return msg;
   }
-  applySnapshot(m) {
+  applySnapshot(m, now = nowSec()) {
     /* PLAY AGAIN restarts the numbering at 1 on the host while the last snapshots of the old match are still in flight. One of
        those arriving after the restart would put the old result screen back up and, being far ahead, make the sequence guard
        below drop the whole new match - for as long as the last one took. So a snapshot from another match goes first, and an
        unstamped one (an older build) is followed rather than frozen out. */
     if (m.mid !== undefined && (m.mid >>> 0) !== this.matchId) return;
     if (typeof m.q !== 'number' || m.q <= this.lastSeq) return; this.lastSeq = m.q;
-    const now = nowSec();
+    this.sudden = !!m.sd;
+    if (Array.isArray(m.st)) this.players.forEach((p, i) => { p.hits = m.st[2 * i] | 0; p.outs = m.st[2 * i + 1] | 0; });
     this.phase = PHASES[m.ph] || 'intro'; this.phaseT = m.pt; this.time = m.tm; this.round = m.rd; this.score.blue = m.sb; this.score.red = m.sr;
     this.lineDown = !!m.ld; this.lineCount = m.lc >= 0 ? m.lc : null; this.roundWinner = m.rw >= 0 ? TEAMS[m.rw] : null; this.matchWinner = m.mw >= 0 ? TEAMS[m.mw] : null;
     // balls first so the holders below can resolve their ball
@@ -691,24 +769,57 @@ export class Game {
     if (seen.size !== this.balls.length) { this.balls = this.balls.filter(b => seen.has(b.id)); for (const id of [...this.ballById.keys()]) if (!seen.has(id)) this.ballById.delete(id); }
     (m.p || []).forEach((e, i) => {
       const p = this.players[i]; if (!p) return;
-      const [x, y, vx, vy, f, al, kt, ks, st, at, sta, sp, bid, hu] = e;
+      const [x, y, vx, vy, f, al, kt, ks, st, at, sta, sp, bid, hu, ack] = e;
       pushSnap(p.buf, { x, y, vx, vy, f }, now);
-      p.alive = !!al; p.state = PSTATES[st] || 'GRAB'; p.armT = at; p.stamina = sta; p.sprinting = !!sp; p.ball = bid >= 0 ? this.ballById.get(bid) || null : null;
+      p.alive = !!al; p.state = PSTATES[st] || 'GRAB'; p.armT = at; p.ball = bid >= 0 ? this.ballById.get(bid) || null : null;
+      if (p === this.me) this.reconcile({ x, y, vx, vy, stamina: sta, sprinting: !!sp }, ack | 0, now); else { p.stamina = sta; p.sprinting = !!sp; }
       if (kt >= 0) { if (!p.knocked) p.knocked = { t: kt, vx: 0, vy: 0, spin: ks, spinV: 0 }; else { p.knocked.t = kt; p.knocked.spin = ks; } } else p.knocked = null;
       if (p.isHuman && !hu) this.toAI(p);
       if (!p.alive && !p.knocked && !this.bench[p.team].includes(p)) { p.benchSlot = this.bench[p.team].length; this.bench[p.team].push(p); }
     });
     for (const ev of m.ev || []) this.applyEvent(ev);
   }
-  updateClient(dt) {
+  /* ---------- a client's own body, predicted. Every frame the stick moves `pred.body` through movePlayer, the code the host
+     runs, so a step shows at once instead of a round trip plus the interpolation delay later. Each snapshot puts the body where
+     the host has it and replays the last `lag` seconds of this player's own stick on top (what the host had not had yet when it
+     took the snapshot); `lag` is measured from how long a numbered input takes to come back acknowledged. The correction goes into
+     an offset that is blended out over about 100 ms, so the body never jumps. Throws, pickups and hits stay the host's. */
+  predictable() { const me = this.me; return !this.isHost && !!me && me.active && this.phase === 'play'; }
+  noteSent(now = nowSec()) { const q = ++this.pred.seq; this.pred.sentAt.set(q, now); return q; }
+  predict(want, dt, now = nowSec()) {
+    const pr = this.pred, h = pr.hist, l = h[h.length - 1];
+    if (!l || l.x !== want.x || l.y !== want.y || l.sprint !== want.sprint) h.push({ t: now, x: want.x, y: want.y, sprint: !!want.sprint });
+    while (h.length > 1 && h[1].t <= now - 0.6) h.shift();
+    if (pr.body && this.predictable()) this.stepBody(want, dt);
+  }
+  stepBody(inp, dt) { const h = 1 / CFG.physHz; while (dt > 1e-6) { const d = Math.min(dt, h); movePlayer(this.pred.body, inp, d, this.lineDown); dt -= d; } }
+  reconcile(s, ack, now) {
+    const pr = this.pred, me = this.me;
+    const t = pr.sentAt.get(ack); if (t !== undefined) { pr.lag += (clamp(now - t, 0.02, 0.4) - pr.lag) * 0.15; for (const k of pr.sentAt.keys()) if (k <= ack) pr.sentAt.delete(k); }
+    if (!pr.body) pr.body = { x: s.x, y: s.y, vx: 0, vy: 0, r: me.r, team: me.team, stamina: 1, sprinting: false, regenT: 0, moving: 0, stillT: 0, face: me.face, bob: 0 };
+    const b = pr.body, ox = b.x, oy = b.y;
+    Object.assign(b, s); b.regenT = s.sprinting ? CFG.player.regenDelay : 0;
+    if (this.predictable()) { const from = now - pr.lag, h = pr.hist; for (let k = 0; k < h.length; k++) { const a = Math.max(h[k].t, from), e = k + 1 < h.length ? h[k + 1].t : now; if (e > a) this.stepBody(h[k], e - a); } }
+    if (pr.on) { pr.ox += ox - b.x; pr.oy += oy - b.y; if (hyp(pr.ox, pr.oy) > 90) pr.ox = pr.oy = 0; } // too far to be a correction: the host moved the body
+  }
+  updateClient(dt, now = nowSec()) {
     this.phaseT += dt; if (this.phase === 'play') this.time += dt;
-    const rt = nowSec() - CFG.interp;
+    const rt = now - CFG.interp, pr = this.pred, predOn = !!pr.body && this.predictable();
     for (const p of this.players) {
+      if (p === this.me && predOn) {
+        const b = pr.body, k = Math.exp(-dt / 0.1); pr.ox *= k; pr.oy *= k; pr.on = true;
+        p.x = b.x + pr.ox; p.y = b.y + pr.oy; p.vx = b.vx; p.vy = b.vy; p.stamina = b.stamina; p.sprinting = b.sprinting; p.moving = b.moving;
+        if (hyp(b.vx, b.vy) > 20) { p.face = b.face; p.bob = b.bob; }
+        else if (p.ball && p.state === 'READY') { const n = this.nearestEnemy(p); if (n) p.face = Math.atan2(n.e.y - p.y, n.e.x - p.x); }
+        continue;
+      }
       const s = sampleSnaps(p.buf, rt); if (!s) continue; const { a, b, f } = s;
       if (b) { p.x = lerp(a.x, b.x, f); p.y = lerp(a.y, b.y, f); p.face = a.f + wrapAngle(b.f - a.f) * f; }
       else { const ex = clamp(rt - a.t, 0, 0.2); p.x = a.x + a.vx * ex; p.y = a.y + a.vy * ex; p.face = a.f; }
       p.vx = a.vx; p.vy = a.vy; const spd = hyp(p.vx, p.vy); p.moving = spd / CFG.player.speed; if (spd > 20) p.bob += dt * (p.sprinting ? 22 : 15);
       if (p.knocked) p.knocked.t += dt;
+      // not predicting (the countdown, out, between rounds): the next prediction starts from what this shows, not with a jump
+      if (p === this.me && pr.body) { pr.ox = p.x - pr.body.x; pr.oy = p.y - pr.body.y; pr.on = true; if (hyp(pr.ox, pr.oy) > 90) pr.ox = pr.oy = 0; }
     }
     for (const b of this.balls) {
       if (b.state === 'held') continue;
@@ -718,20 +829,22 @@ export class Game {
       this.trailPoint(b, spd);
     }
     this.followHolders(dt);
+    this.dust(dt);
     this.updateFx(dt);
   }
 
   /* ---------- status bar text */
-  status(canRestart, touch) {
+  status(canRestart, touch, votes = 0) {
     const me = this.me, sc = `${this.score.blue}–${this.score.red}`;
-    if (this.matchWinner) return { cls: 'info', text: `${TEAM[this.matchWinner].name} wins the match ${sc}`, hint: canRestart ? (touch ? 'play again or leave from the ☰ menu' : 'R to play again · Esc to leave') : 'waiting for the host to play again' };
-    if (this.phase === 'roundEnd') return { cls: 'info', text: this.roundWinner ? `${TEAM[this.roundWinner].name} takes the round` : 'Round over', hint: `${sc} · next round in a moment` };
-    if (this.phase === 'intro') return { cls: 'info', text: `Round ${this.round} — get ready…`, hint: me ? `you are on ${TEAM[me.team].name} · ${touch ? 'drag the left side to move · rush a ball at the whistle' : 'rush a ball on the line at the whistle'}` : 'spectating' };
-    if (!me) return { cls: 'info', text: 'SPECTATING', hint: '' };
-    if (!me.alive) return { cls: 'out', text: 'OUT!', hint: 'watching the round finish' };
-    if (!me.ball) return { cls: 'grab', text: 'GRAB A BALL', hint: 'run over a loose ball to pick it up' };
-    if (me.state === 'ARMING') return { cls: 'arming', text: 'ARMING…', charge: me.armT / CFG.armTime, hint: '' };
-    return { cls: 'ready', text: 'THROW READY', hint: touch ? 'THROW takes the nearest enemy · drag it to aim' : 'Space throws at the nearest enemy' };
+    if (this.matchWinner) return { cls: 'info', text: T('stMatch', { team: teamName(this.matchWinner), sc }),
+      hint: canRestart ? T(touch ? 'hAgainTouch' : 'hAgainKeys') + (votes ? ' · ' + T('votes', { n: votes }) : '') : this.online ? T(touch ? 'hGuestTouch' : 'hGuestKeys') : T('hWaitHost') };
+    if (this.phase === 'roundEnd') return { cls: 'info', text: this.roundWinner ? T('stRound', { team: teamName(this.roundWinner) }) : T('stRoundOver'), hint: T('hNext', { sc }) };
+    if (this.phase === 'intro') return { cls: 'info', text: T('stIntro', { n: this.round }), hint: me ? T('hIntro', { team: teamName(me.team), tip: T(touch ? 'tipTouch' : 'tipKeys') }) : T('spectating') };
+    if (!me) return { cls: 'info', text: T('stSpectating'), hint: '' };
+    if (!me.alive) return { cls: 'out', text: T('stOut'), hint: T('hOut') };
+    if (!me.ball) return { cls: 'grab', text: T('stGrab'), hint: T('hGrab') };
+    if (me.state === 'ARMING') return { cls: 'arming', text: T('stArming'), charge: me.armT / CFG.armTime, hint: '' };
+    return { cls: 'ready', text: T('stReady'), hint: T(touch ? 'hReadyTouch' : 'hReadyKeys') };
   }
 }
 
@@ -761,10 +874,13 @@ class Renderer {
     this.scale = s; this.cv.width = Math.round(CFG.W * s); this.cv.height = Math.round(CFG.H * s);
     this.floor = this.makeFloor(s);
   }
+  refloor() { if (this.scale) this.floor = this.makeFloor(this.scale); } // the words painted on the floor, in a new language
+  /* the floor's wood comes from its own fixed seed, so a resize or a rotation repaints the very same planks */
   makeFloor(dpr) {
     const W = CFG.W, H = CFG.H, C = CFG.court, cx = (C.left + C.right) / 2;
     const oc = document.createElement('canvas'); oc.width = W * dpr; oc.height = H * dpr;
     const x = oc.getContext('2d'); x.scale(dpr, dpr);
+    const { rr } = makeRng(0xD0D6E), rand = (a, b) => rr(a, b);
     x.fillStyle = '#171b23'; x.fillRect(0, 0, W, H);
     for (let i = 0; i < 4; i++) { x.fillStyle = i % 2 ? '#1a1f28' : '#151920'; x.fillRect(0, (i < 2 ? 12 : 578) + (i % 2) * 26, W, 26); }
     x.fillStyle = '#10131a'; x.fillRect(C.left - 6, C.top - 6, C.right - C.left + 12, C.bottom - C.top + 12);
@@ -791,13 +907,13 @@ class Renderer {
     for (const ax of [cx - 150, cx + 150]) { x.beginPath(); x.moveTo(ax, C.top); x.lineTo(ax, C.bottom); x.stroke(); }
     x.setLineDash([]);
     x.font = `900 46px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'middle';
-    x.fillStyle = 'rgba(61,139,255,0.18)'; x.save(); x.translate(C.left + 130, (C.top + C.bottom) / 2); x.rotate(-Math.PI / 2); x.fillText('BLUE', 0, 0); x.restore();
-    x.fillStyle = 'rgba(255,77,90,0.18)'; x.save(); x.translate(C.right - 130, (C.top + C.bottom) / 2); x.rotate(Math.PI / 2); x.fillText('RED', 0, 0); x.restore();
+    x.fillStyle = 'rgba(61,139,255,0.18)'; x.save(); x.translate(C.left + 130, (C.top + C.bottom) / 2); x.rotate(-Math.PI / 2); x.fillText(T('floor.blue'), 0, 0); x.restore();
+    x.fillStyle = 'rgba(255,77,90,0.18)'; x.save(); x.translate(C.right - 130, (C.top + C.bottom) / 2); x.rotate(Math.PI / 2); x.fillText(T('floor.red'), 0, 0); x.restore();
     x.restore();
     x.fillStyle = 'rgba(255,255,255,0.05)'; x.fillRect(C.left, 62, C.right - C.left, 2); x.fillRect(C.left, 576, C.right - C.left, 2);
-    x.font = '700 10px system-ui, sans-serif'; x.fillStyle = 'rgba(255,255,255,0.28)'; x.textAlign = 'center';
-    x.save(); x.translate(20, (C.top + C.bottom) / 2); x.rotate(-Math.PI / 2); x.fillText('BLUE BENCH', 0, 0); x.restore();
-    x.save(); x.translate(CFG.W - 20, (C.top + C.bottom) / 2); x.rotate(Math.PI / 2); x.fillText('RED BENCH', 0, 0); x.restore();
+    x.font = `700 10px ${UI_FONT}`; x.fillStyle = 'rgba(255,255,255,0.28)'; x.textAlign = 'center';
+    x.save(); x.translate(20, (C.top + C.bottom) / 2); x.rotate(-Math.PI / 2); x.fillText(T('bench.blue'), 0, 0); x.restore();
+    x.save(); x.translate(CFG.W - 20, (C.top + C.bottom) / 2); x.rotate(Math.PI / 2); x.fillText(T('bench.red'), 0, 0); x.restore();
     return oc;
   }
 
@@ -832,7 +948,7 @@ class Renderer {
         const by = C.top + 40 + i * 44;
         x.globalAlpha = 0.75; x.fillStyle = TEAM[team].deep; x.beginPath(); x.arc(bx, by, 12, 0, Math.PI * 2); x.fill();
         x.strokeStyle = 'rgba(255,255,255,0.5)'; x.lineWidth = 2; x.beginPath(); x.moveTo(bx - 5, by - 5); x.lineTo(bx + 5, by + 5); x.moveTo(bx + 5, by - 5); x.lineTo(bx - 5, by + 5); x.stroke();
-        x.globalAlpha = 0.6; x.fillStyle = '#fff'; x.font = `700 ${9 * ui}px system-ui, sans-serif`; x.textAlign = 'center'; x.textBaseline = 'top'; x.fillText(p.name, bx, by + 15);
+        x.globalAlpha = 0.6; x.fillStyle = '#fff'; x.font = `700 ${9 * ui}px ${UI_FONT}`; x.textAlign = 'center'; x.textBaseline = 'top'; x.fillText(p.name, bx, by + 15);
         x.globalAlpha = 1;
       });
     }
@@ -891,12 +1007,17 @@ class Renderer {
     // floating text
     x.textAlign = 'center'; x.textBaseline = 'middle';
     for (const f of g.floats) { const k = clamp(f.life / f.max, 0, 1); x.globalAlpha = Math.min(1, k * 2); x.font = `900 ${f.size * ui}px ${FONT}`;
-      x.lineWidth = 4; x.strokeStyle = 'rgba(0,0,0,0.6)'; x.strokeText(f.text, f.x, f.y); x.fillStyle = f.color; x.fillText(f.text, f.x, f.y); }
+      const t = words(f.text);
+      x.lineWidth = 4; x.strokeStyle = 'rgba(0,0,0,0.6)'; x.strokeText(t, f.x, f.y); x.fillStyle = f.color; x.fillText(t, f.x, f.y); }
     x.globalAlpha = 1;
 
     // vignette + flash
     const vg = x.createRadialGradient(cx, CFG.H / 2, 260, cx, CFG.H / 2, 720); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.42)');
     x.fillStyle = vg; x.fillRect(0, 0, CFG.W, CFG.H);
+    if (g.sudden && !g.roundWinner) { // sudden death: a slow red pulse closing in from the edges
+      const k = 0.28 + 0.14 * Math.sin(tm * 3.2), rv = x.createRadialGradient(cx, CFG.H / 2, 220, cx, CFG.H / 2, 640);
+      rv.addColorStop(0, 'rgba(255,40,60,0)'); rv.addColorStop(1, `rgba(255,40,60,${k})`); x.fillStyle = rv; x.fillRect(0, 0, CFG.W, CFG.H);
+    }
     if (g.flash > 0) { x.fillStyle = `rgba(255,255,255,${g.flash * 0.22})`; x.fillRect(0, 0, CFG.W, CFG.H); }
 
     // line countdown: big number centered
@@ -906,7 +1027,7 @@ class Renderer {
       x.fillStyle = '#ffd23f'; x.fillText(g.lineCount, 0, 0); x.restore();
     }
     if (g.subBanner) { const w = 360 * ui, hh = 36 * ui; x.font = `800 ${20 * ui}px ${FONT}`; x.fillStyle = 'rgba(0,0,0,0.55)'; x.beginPath(); x.roundRect(cx - w / 2, C.top + 12, w, hh, 8); x.fill();
-      x.fillStyle = '#ffd23f'; x.fillText(g.subBanner.text.toUpperCase(), cx, C.top + 12 + hh / 2); }
+      x.fillStyle = '#ffd23f'; x.fillText(words(g.subBanner.text).toUpperCase(), cx, C.top + 12 + hh / 2); }
 
     // banner
     const bn = g.banner;
@@ -917,8 +1038,8 @@ class Renderer {
       x.globalAlpha = a; x.fillStyle = bn.color; x.fillRect(C.left, y - 62 * bs, C.right - C.left, 3); x.fillRect(C.left, y + (bn.sub ? 66 : 46) * bs, C.right - C.left, 3);
       x.translate(cx, y); x.scale(sc, sc);
       x.font = `900 ${bn.size * bs}px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'middle';
-      x.shadowColor = bn.color; x.shadowBlur = 24; x.fillStyle = bn.color; x.fillText(bn.text, 0, 0); x.shadowBlur = 0;
-      if (bn.sub) { x.font = `600 ${18 * bs}px ${FONT}`; x.fillStyle = 'rgba(255,255,255,0.85)'; x.fillText(bn.sub, 0, 50 * bs); }
+      x.shadowColor = bn.color; x.shadowBlur = 24; x.fillStyle = bn.color; x.fillText(words(bn.text), 0, 0); x.shadowBlur = 0;
+      if (bn.sub) { x.font = `600 ${18 * bs}px ${FONT}`; x.fillStyle = 'rgba(255,255,255,0.85)'; x.fillText(words(bn.sub), 0, 50 * bs); }
       x.restore();
     }
   }
@@ -984,35 +1105,34 @@ class Renderer {
     x.font = `${isMe ? 800 : p.isHuman ? 700 : 600} ${Math.round(11 * ui)}px ${FONT}`; x.textAlign = 'center'; x.textBaseline = 'bottom';
     x.fillStyle = 'rgba(0,0,0,0.6)'; x.fillText(p.name, p.x + 1, ny + 1); x.fillStyle = isMe ? '#fff' : p.isHuman ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.75)'; x.fillText(p.name, p.x, ny);
     if (isMe) { const yy = ny - 15 * ui + Math.sin(tm * 5) * 2, m = 5 * ui; x.fillStyle = '#fff'; x.beginPath(); x.moveTo(p.x - m, yy - m * 1.2); x.lineTo(p.x + m, yy - m * 1.2); x.lineTo(p.x, yy); x.closePath(); x.fill(); }
-    // sprint dust
-    if (p.sprinting && p.moving > 0.5) { p.dustT -= 1 / 60; if (p.dustT <= 0) { p.dustT = 0.06; g.particles.push({ x: p.x - Math.cos(p.face) * 10 + rand(-4, 4), y: p.y + 8 + rand(-3, 3), vx: -Math.cos(p.face) * 30 + rand(-20, 20), vy: rand(-25, -5), life: 0.45, max: 0.45, size: 4, color: 'rgba(230,210,180,0.5)', type: 'dot' }); } }
   }
 }
 
 /* ============================================================ module: DOM, input, loop, session API */
+/* every word in the HUD sits in a [data-t] node (or the footer's key list) and is filled by applyWords(), again on a language switch */
 const HUD = `
 <div class="app">
   <header>
-    <div class="team blue"><span class="name">BLUE</span><span class="pips" data-pips="blue"></span><span class="score" data-score="blue">0</span></div>
-    <div class="mid"><div class="count" data-count><span class="b">3</span><span class="v">v</span><span class="r">3</span></div><div class="sub" data-sub>Round 1 · 0:00</div></div>
-    <div class="team red"><span class="score" data-score="red">0</span><span class="pips" data-pips="red"></span><span class="name">RED</span></div>
+    <div class="team blue"><span class="name" data-t="team.blue"></span><span class="pips" data-pips="blue"></span><span class="score" data-score="blue">0</span></div>
+    <div class="mid"><div class="count" data-count></div><div class="sub" data-sub></div></div>
+    <div class="team red"><span class="score" data-score="red">0</span><span class="pips" data-pips="red"></span><span class="name" data-t="team.red"></span></div>
     <div class="menu-btn ctl" data-menu>☰</div>
   </header>
   <div class="court">
     <canvas width="1040" height="640"></canvas>
-    <div class="result" hidden><h1 data-res-title></h1><h2 data-res-sub></h2><div class="foot" data-res-foot></div></div>
+    <div class="result" hidden><h1 data-res-title></h1><h2 data-res-sub></h2><div class="mvp" data-res-mvp></div><div class="tally" data-res-tally></div><div class="votes" data-res-votes></div><div class="foot" data-res-foot></div></div>
   </div>
-  <div class="status info"><span data-stext>ROUND 1 — get ready…</span><span class="charge"><i></i></span><span class="hint" data-shint></span></div>
+  <div class="status info"><span data-stext></span><span class="charge"><i></i></span><span class="hint" data-shint></span></div>
   <footer>
-    <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; <kbd>Shift</kbd> sprint &nbsp; <kbd>Space</kbd> throw at nearest enemy &nbsp; <kbd>M</kbd> sound <span data-keys></span></div>
-    <div class="right"><span class="snd" data-snd>🔊 sound on</span><span data-role></span><span class="fps" data-fps>— fps</span></div>
+    <div data-keys></div>
+    <div class="right"><span class="snd" data-snd></span><span data-role></span><span class="fps" data-fps>— fps</span></div>
   </footer>
 </div>
-<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl">DRAG HERE TO MOVE</div></div>
-<div class="tbtn ctl sprint" data-sprint>SPRINT</div>
-<div class="tbtn ctl throw" data-throw><b>THROW</b><small>➜</small></div>
-<div class="overlay pause" data-pause><div class="card"><h1>MENU</h1><div data-pause-btns></div></div></div>
-<div class="overlay rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>DODGEBALL PLAYS IN LANDSCAPE</small></div></div>`;
+<div class="pad ctl" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl" data-t="drag"></div></div>
+<div class="tbtn ctl sprint" data-sprint data-t="tSprint"></div>
+<div class="tbtn ctl throw" data-throw><b data-t="tThrow"></b><small>➜</small></div>
+<div class="overlay pause" data-pause><div class="card"><h1 data-t="menu"></h1><div data-pause-btns></div></div></div>
+<div class="overlay rotate"><div><div class="phone">📱</div><span data-t="rotate"></span><small data-t="rotateSub"></small></div></div>`;
 
 export async function create({ mount, audio, send, hooks }) {
   const unloadCss = await loadStylesheet('/games/dodgeball/dodgeball.css');
@@ -1021,7 +1141,7 @@ export async function create({ mount, audio, send, hooks }) {
   const $ = sel => root.querySelector(sel);
   const dom = { count: $('[data-count]'), sub: $('[data-sub]'), score: { blue: $('[data-score="blue"]'), red: $('[data-score="red"]') }, pips: { blue: $('[data-pips="blue"]'), red: $('[data-pips="red"]') },
     status: $('.status'), stext: $('[data-stext]'), shint: $('[data-shint]'), charge: $('.charge > i'), fps: $('[data-fps]'), snd: $('[data-snd]'), keys: $('[data-keys]'), role: $('[data-role]'),
-    result: $('.result'), resTitle: $('[data-res-title]'), resSub: $('[data-res-sub]'), resFoot: $('[data-res-foot]'),
+    result: $('.result'), resTitle: $('[data-res-title]'), resSub: $('[data-res-sub]'), resMvp: $('[data-res-mvp]'), resTally: $('[data-res-tally]'), resVotes: $('[data-res-votes]'), resFoot: $('[data-res-foot]'),
     throwBtn: $('[data-throw]'), menuBtn: $('[data-menu]'), pause: $('[data-pause]'), pauseBtns: $('[data-pause-btns]') };
   const sfx = createSfx(audio);
   const canvas = $('canvas'), R = new Renderer(canvas);
@@ -1031,22 +1151,26 @@ export async function create({ mount, audio, send, hooks }) {
   const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null; ro?.observe(canvas);
 
   let game = null, session = null, isHost = false, online = false, hostId = null, myId = null;
+  let votes = [], wantRematch = false; // the host: the guests asking for another match; a guest: whether I asked
   const canRestart = () => !online || isHost;
+  const isGuest = () => online && !isHost;
 
   /* ---- input: the keyboard, plus the touch controls on a coarse-pointer screen */
-  const setSnd = () => { dom.snd.textContent = audio.muted ? '🔇 sound off' : '🔊 sound on'; };
+  const setSnd = () => { dom.snd.textContent = T(audio.muted ? 'sndOff' : 'sndOn'); };
   /* `dir` is a unit vector to throw along (a touch player who dragged THROW to aim); without one the host takes the nearest enemy */
   const throwPressed = dir => {
     if (!game || game.phase !== 'play') return;
     if (isHost) game.requestThrow(game.me, dir);
     else if (game.me) send(dir ? { t: 'th', to: hostId, dx: r2(dir.x), dy: r2(dir.y) } : { t: 'th', to: hostId });
   };
+  /* a guest's vote for another match (the host sees the count); only once the match is over */
+  const setRematch = on => { if (!isGuest() || !game?.matchWinner) return; wantRematch = on; hooks.onRematch?.(on); renderResult(); if (dom.pause.classList.contains('show')) renderMenu(); };
   const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', ShiftLeft: 'sprint', ShiftRight: 'sprint' }, {
     onKey: e => {
       if (e.code === 'Space') { e.preventDefault(); throwPressed(null); }
       else if (e.code === 'KeyM') { audio.toggle(); setSnd(); }
-      else if (e.code === 'KeyR') hooks.onRestart?.();
-      else if (e.code === 'Escape') hooks.onExit?.();
+      else if (e.code === 'KeyR') { if (canRestart()) hooks.onRestart?.(); else setRematch(!wantRematch); }
+      else if (e.code === 'Escape') { if (canRestart()) hooks.onExit?.(); }
     },
   });
   const held = kb.held;
@@ -1084,13 +1208,19 @@ export async function create({ mount, audio, send, hooks }) {
     dom.throwBtn.classList.toggle('has', armed); dom.throwBtn.classList.toggle('ready', armed && me.state === 'READY');
   }
 
-  /* ☰: a card with what M, R and Esc do on a keyboard; the match keeps running underneath */
+  /* ☰: a card with what M, R and Esc do on a keyboard (and the language); the match keeps running underneath. A guest gets
+     LEAVE ROOM and, once the match is over, the rematch vote instead of the host's PLAY AGAIN / BACK TO LOBBY. */
   function renderMenu() {
     const f = dom.pauseBtns; f.innerHTML = '';
     const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
-    btn('RESUME', 'primary', () => showMenu(false));
-    btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); setSnd(); renderMenu(); });
-    if (canRestart()) { btn(!online ? 'RESTART' : 'PLAY AGAIN', '', () => { showMenu(false); hooks.onRestart?.(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
+    btn(T('resume'), 'primary', () => showMenu(false));
+    btn(T(audio.muted ? 'soundOff' : 'soundOn'), '', () => { audio.toggle(); setSnd(); renderMenu(); });
+    btn(T('lang'), '', () => nextLang());
+    if (canRestart()) { btn(T(!online ? 'restart' : 'playAgain'), '', () => { showMenu(false); hooks.onRestart?.(); }); btn(T(!online ? 'quit' : 'toLobby'), '', () => { showMenu(false); hooks.onExit?.(); }); }
+    else {
+      if (game?.matchWinner) btn(T(wantRematch ? 'rematchOn' : 'rematch'), wantRematch ? 'primary' : '', () => setRematch(!wantRematch));
+      btn(T('leaveRoom'), '', () => { showMenu(false); hooks.onLeave?.(); });
+    }
   }
   function showMenu(on) { dom.pause.classList.toggle('show', on); if (on) { tc.releaseAll(); renderMenu(); } }
   if (touch) { dom.menuBtn.addEventListener('click', () => { audio.init(); showMenu(!dom.pause.classList.contains('show')); }); dom.pause.addEventListener('click', e => { if (e.target === dom.pause) showMenu(false); }); }
@@ -1102,54 +1232,81 @@ export async function create({ mount, audio, send, hooks }) {
     netAcc += dt; if (netAcc < 1 / CFG.netHz - 0.002) return; netAcc = Math.max(0, netAcc - 1 / CFG.netHz); // carry the remainder: a 30 Hz ticker's 33 ms steps must not skip every other send
     send(game.packSnapshot());
   }
+  /* a guest's stick goes to the host numbered, so the host's snapshots can say which one they include (the prediction's clock) */
   function clientSendInput(want, dt) {
     sinceSent += dt;
     const changed = !lastSent || lastSent.x !== want.x || lastSent.y !== want.y || lastSent.sprint !== want.sprint;
-    if ((changed && sinceSent >= 1 / 60) || sinceSent >= 0.4) { lastSent = { ...want }; sinceSent = 0; send({ t: 'in', to: hostId, x: want.x, y: want.y, s: want.sprint ? 1 : 0 }); }
+    if ((changed && sinceSent >= 1 / 60) || sinceSent >= 0.4) { lastSent = { ...want }; sinceSent = 0; send({ t: 'in', to: hostId, q: game.noteSent(), x: want.x, y: want.y, s: want.sprint ? 1 : 0 }); }
   }
 
   /* ---- HUD sync */
   const cache = {};
   const setText = (key, node, text) => { if (cache[key] !== text) { cache[key] = text; node.textContent = text; } };
   function buildPips() { for (const team of TEAMS) dom.pips[team].innerHTML = '<i class="pip on"></i>'.repeat(game.count[team]); }
+  /* the result card: the score, the match's MVP (most hits, then fewest outs), every player's hits and outs as the host counted
+     them, and the buttons - PLAY AGAIN / lobby for the host (with how many guests want another), a rematch vote and LEAVE ROOM for a guest */
   function renderResult() {
-    const w = game.matchWinner; if (!w) return;
-    dom.resTitle.textContent = `${TEAM[w].name} WINS`; dom.resTitle.style.color = TEAM[w].color; dom.resSub.textContent = `${game.score.blue} – ${game.score.red}`;
+    const w = game?.matchWinner; if (!w) return;
+    dom.resTitle.textContent = T('resWin', { team: teamName(w) }); dom.resTitle.style.color = TEAM[w].color; dom.resSub.textContent = T('score', { a: game.score.blue, b: game.score.red });
+    const mvp = [...game.players].sort((a, b) => b.hits - a.hits || a.outs - b.outs || (b.team === w) - (a.team === w))[0];
+    dom.resMvp.textContent = mvp && mvp.hits > 0 ? T('mvp', { name: mvp.name, n: mvp.hits }) : '';
+    const esc = v => String(v).replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+    dom.resTally.innerHTML = TEAMS.map(team => `<table class="${team}"><tr><th>${esc(teamName(team))}</th><th>${esc(T('thHits'))}</th><th>${esc(T('thOuts'))}</th></tr>` +
+      game.players.filter(p => p.team === team).map(p => `<tr${p === game.me ? ' class="me"' : ''}><td>${esc(p.name)}</td><td>${p.hits}</td><td>${p.outs}</td></tr>`).join('') + '</table>').join('');
+    dom.resVotes.textContent = canRestart() && votes.length ? T('votes', { n: votes.length }) : '';
     const f = dom.resFoot; f.innerHTML = '';
     const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn small ' + cls; b.textContent = label; b.onclick = fn; f.appendChild(b); };
     const key = k => touch ? '' : `  (${k})`;
-    if (!online) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('MENU' + key('ESC'), '', () => hooks.onExit?.()); }
-    else if (isHost) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY' + key('ESC'), '', () => hooks.onExit?.()); }
-    else f.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
+    if (!online) { btn(T('playAgain') + key('R'), 'primary', () => hooks.onRestart?.()); btn(T('resMenu') + key('ESC'), '', () => hooks.onExit?.()); }
+    else if (isHost) { btn(T('playAgain') + key('R'), 'primary', () => hooks.onRestart?.()); btn(T('toLobby') + key('ESC'), '', () => hooks.onExit?.()); }
+    else { btn(T(wantRematch ? 'rematchOn' : 'rematch') + key('R'), wantRematch ? 'primary' : '', () => setRematch(!wantRematch)); btn(T('leaveRoom'), '', () => hooks.onLeave?.()); }
   }
+  let tallyAt = '';
   function syncDom() {
     const ab = game.aliveCount('blue'), ar = game.aliveCount('red');
-    const countHtml = `<span class="b">${ab}</span><span class="v">v</span><span class="r">${ar}</span>`;
+    const countHtml = `<span class="b">${ab}</span><span class="v">${T('vs')}</span><span class="r">${ar}</span>`;
     if (cache.countHtml !== countHtml) { cache.countHtml = countHtml; dom.count.innerHTML = countHtml; }
     dom.count.classList.toggle('bump', game.countBump > 0);
     for (const team of TEAMS) { const alive = team === 'blue' ? ab : ar; const pips = dom.pips[team].children; for (let i = 0; i < pips.length; i++) pips[i].className = 'pip ' + (i < alive ? 'on' : 'off'); }
     setText('sb', dom.score.blue, String(game.score.blue)); setText('sr', dom.score.red, String(game.score.red));
-    let sub = `Round ${game.round} · ${fmtClock(game.time)} · ${game.ballsInPlay()} balls`;
-    if (game.lineDown) sub += ' · <span class="down">LINE DOWN</span>'; else if (game.lineCount !== null) sub += ` · <span class="warn">LINE DROPS IN ${game.lineCount}</span>`;
+    let sub = T('sub', { n: game.round, clock: fmtClock(game.time), b: game.ballsInPlay() });
+    if (game.sudden && game.phase === 'play') sub += ` · <span class="down">${T('subSudden')}</span>`;
+    else if (game.lineDown) sub += ` · <span class="down">${T('subDown')}</span>`; else if (game.lineCount !== null) sub += ` · <span class="warn">${T('subDrop', { n: game.lineCount })}</span>`;
     if (cache.sub !== sub) { cache.sub = sub; dom.sub.innerHTML = sub; }
-    const st = game.status(canRestart(), touch);
+    const st = game.status(canRestart(), touch, votes.length);
     if (cache.cls !== st.cls) { cache.cls = st.cls; dom.status.className = 'status ' + st.cls; }
     setText('stext', dom.stext, st.text); setText('shint', dom.shint, st.hint || '');
     if (st.charge !== undefined) dom.charge.style.width = `${Math.round(st.charge * 100)}%`;
     const over = !!game.matchWinner; if (cache.over !== over) { cache.over = over; root.classList.toggle('over', over); } // hides the touch controls
     const showRes = over && game.phaseT > 1.2;
-    if (showRes !== !dom.result.hidden) { dom.result.hidden = !showRes; if (showRes) renderResult(); }
+    if (showRes !== !dom.result.hidden) { dom.result.hidden = !showRes; if (showRes) { tallyAt = ''; renderResult(); } }
+    if (showRes) { const t = game.players.map(p => p.hits + ':' + p.outs).join(); if (t !== tallyAt) { tallyAt = t; renderResult(); } } // a late tally from the host
   }
+  /* every word on screen again, in the language just picked */
+  function applyWords() {
+    for (const n of root.querySelectorAll('[data-t]')) n.textContent = T(n.dataset.t);
+    const k = c => `<kbd>${c}</kbd>`;
+    dom.keys.innerHTML = `${k('W')}${k('A')}${k('S')}${k('D')} ${T('kMove')} &nbsp; ${k('Shift')} ${T('kSprint')} &nbsp; ${k('Space')} ${T('kThrow')} &nbsp; ${k('M')} ${T('kSound')}` +
+      (!session ? '' : !online ? ` &nbsp; ${k('R')} ${T('kRestart')} &nbsp; ${k('Esc')} ${T('kMenu')}` : isHost ? ` &nbsp; ${k('R')} ${T('kAgain')} &nbsp; ${k('Esc')} ${T('kLobby')}` : ` &nbsp; ${k('R')} ${T('kRematch')}`);
+    dom.role.textContent = !session ? '' : !online ? T('roleSolo') : isHost ? T('roleHost') : T('rolePlayers', { n: session.players.length });
+    setSnd(); R.refloor();
+    for (const key of Object.keys(cache)) delete cache[key];
+    if (game) { buildPips(); if (!dom.result.hidden) renderResult(); }
+    if (dom.pause.classList.contains('show')) renderMenu();
+  }
+  applyWords();
+  const offLang = onLang(applyWords);
 
   /* ---- main loop. The simulation advances by the wall clock (`simAt`): from the frame loop while the tab is visible and,
      for an online host, from a worker timer while it is hidden (requestAnimationFrame stops there), so the match goes on
-     for everyone else while the host glances at another app. */
+     for everyone else while the host glances at another app. A guest moves its own body at once (game.predict) and the rest
+     from the host's snapshots. */
   let simAt = 0, fpsAcc = 0, fpsN = 0, fpsAt = 0;
   function step(now) {
     const dt = clamp((now - simAt) / 1000, 0, 0.05); simAt = now;
     const me = game.me, want = readWant();
     if (isHost) { if (me) me.want = want; game.update(dt); hostNetTick(dt); }
-    else { if (me) clientSendInput(want, dt); game.updateClient(dt); }
+    else { if (me) { clientSendInput(want, dt); game.predict(want, dt); } game.updateClient(dt); }
     return dt;
   }
   const ticker = createTicker(CFG.netHz, () => { if (game && online && isHost && document.hidden) step(performance.now()); });
@@ -1164,25 +1321,25 @@ export async function create({ mount, audio, send, hooks }) {
   /* ---- session API */
   function start(s) {
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId;
-    game = new Game(buildRoster(s), { opts: s.opts || {}, sfx, isHost, online, myId, matchId: s.seed >>> 0 });
-    for (const k of Object.keys(cache)) delete cache[k]; netAcc = 0; lastSent = null; sinceSent = 1; simAt = performance.now();
-    buildPips(); dom.result.hidden = true; root.classList.remove('over'); setSnd(); showMenu(false);
-    dom.keys.innerHTML = !online ? '&nbsp; <kbd>R</kbd> restart &nbsp; <kbd>Esc</kbd> menu' : isHost ? '&nbsp; <kbd>R</kbd> again &nbsp; <kbd>Esc</kbd> lobby' : '';
-    dom.role.textContent = !online ? 'solo' : isHost ? 'hosting' : `${session.players.length} players`;
+    game = new Game(buildRoster(s), { opts: s.opts || {}, sfx, isHost, online, myId, matchId: s.seed >>> 0, buzz: touch ? buzz : null });
+    for (const k of Object.keys(cache)) delete cache[k]; netAcc = 0; lastSent = null; sinceSent = 1; simAt = performance.now(); votes = []; wantRematch = false;
+    dom.result.hidden = true; root.classList.remove('over'); showMenu(false); applyWords();
     audio.init(); kb.attach(); if (touch) tc.attach(); loop.start(); if (online && isHost) ticker.start(); else ticker.stop(); fit();
   }
   function stop() { session = null; game = null; kb.detach(); tc.detach(); ticker.stop(); loop.stop(); showMenu(false); dom.result.hidden = true; }
-  function destroy() { stop(); ticker.dispose(); ro?.disconnect(); removeEventListener('resize', fit); root.remove(); mount.innerHTML = ''; unloadCss(); if (window.__dodgeball === debug) delete window.__dodgeball; }
-  function playerLeft(pid) { if (game && isHost) { const p = game.playerOf(pid); if (p) game.toAI(p); } } // clients learn it from the next snapshot
+  function destroy() { stop(); offLang(); ticker.dispose(); ro?.disconnect(); removeEventListener('resize', fit); root.remove(); mount.innerHTML = ''; unloadCss(); if (window.__dodgeball === debug) delete window.__dodgeball; }
+  function playerLeft(pid) { votes = votes.filter(id => id !== pid); if (game && isHost) { const p = game.playerOf(pid); if (p) game.toAI(p); } } // clients learn it from the next snapshot
+  /* the shell tells the host which guests want another match */
+  function rematchVotes(ids) { votes = Array.isArray(ids) ? ids.filter(id => id !== myId) : []; if (game && !dom.result.hidden) renderResult(); }
   function onNetMessage(msg) {
     if (!game) return;
     switch (msg.t) {
       case 's': if (!isHost && msg.from === hostId) game.applySnapshot(msg); break;
-      case 'in': if (isHost) { const p = game.playerOf(msg.from); if (p) p.want = { x: clamp(Number(msg.x) || 0, -1, 1), y: clamp(Number(msg.y) || 0, -1, 1), sprint: !!msg.s }; } break;
+      case 'in': if (isHost) { const p = game.playerOf(msg.from); if (p) { p.want = { x: clamp(Number(msg.x) || 0, -1, 1), y: clamp(Number(msg.y) || 0, -1, 1), sprint: !!msg.s }; if (Number.isFinite(msg.q)) p.ack = msg.q; } } break;
       case 'th': if (isHost) { const dx = Number(msg.dx), dy = Number(msg.dy), d = hyp(dx, dy); game.requestThrow(game.playerOf(msg.from), d > 0.5 && d < 2 ? { x: dx / d, y: dy / d } : null); } break;
     }
   }
   const debug = { get game() { return game; }, get session() { return session; }, CFG, renderer: R, loop, touch: { on: touch, stick: stickS, sprint: sprintS, throw: throwS, showMenu } };
   window.__dodgeball = debug;
-  return { start, stop, destroy, onNetMessage, playerLeft, debug };
+  return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };
 }

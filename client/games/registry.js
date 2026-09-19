@@ -37,6 +37,7 @@ export const GAMES = [
     teams: [{ id: 'blue', label: L('蓝队', 'BLUE'), color: 0x3d8bff }, { id: 'red', label: L('红队', 'RED'), color: 0xff4d5a }], teamSize: 3,
     options: [
       { key: 'fillAI', type: 'bool', label: FILL_AI, default: true },
+      { key: 'botSkill', type: 'select', label: L('电脑水平', 'CPU SKILL'), default: 'normal', choices: SKILL },
       { key: 'winScore', type: 'select', label: L('先赢', 'FIRST TO'), default: 2, choices: [{ value: 2, label: L('2 局', '2 rounds') }, { value: 3, label: L('3 局', '3 rounds') }] },
     ],
     load: () => import('./dodgeball/index.js'),
