@@ -1,32 +1,40 @@
 /* Crossy Farm Car - hop a car across roads, rivers and stampede tracks. Game module for the LAN party shell;
    the contract is documented at the top of games/kart/index.js.
 
-   Netcode: each machine simulates its own car - hops, log rides, collisions, death and the UFO - and
-   broadcasts a small 20 Hz snapshot (`s`); the other cars are interpolated from those a little in the past.
-   The farm itself never travels. It is generated from the round's seed (session.seed) with the shared rng,
-   and everything that moves on it (herds, logs, stampede schedules) is a pure function of the world clock,
-   which the host carries in its snapshots so every screen agrees on where the cows are. Coins go to whoever
-   lands first (`coin`). Everyone plays until they die; the round ends when every car is dead and the
-   standings are furthest row, then coins. Cars are ghosts to each other.
+   Netcode: each machine simulates its own car - hops, log rides, collisions, death, its one coin revive and the UFO -
+   and broadcasts a small 20 Hz snapshot (`s`); the other cars are interpolated from those a little in the past.
+   The farm itself never travels. It is generated from the round's seed (session.seed) and the lobby options with the
+   shared rng, and everything that moves on it (herds, logs, stampede schedules) is a pure function of the world clock,
+   which the host carries in its snapshots so every screen agrees on where the cows are. Coins go to whoever lands
+   first (`coin`) and are the owner's to spend: a revive is the owner's call, it shows up in the snapshot as a bumped
+   revive count (`rv`) and fewer coins. Everyone plays until they die (a car stays "dying" while its revive offer is
+   open, so nobody's round ends under them); the round ends when every car is dead, or when a car reaches the finish
+   row if the lobby set one (its world-clock time `ft` decides a photo finish). Standings are the finish, furthest row,
+   then coins (rules.js). Cars are ghosts to each other. Words are keys into strings.js, drawn in each screen's language.
 
    Rows are split in two: a *spec* (the deterministic data - what is where, which way the herd runs) exists
    for every row the room spans, and a *mesh* is only built for the rows near this machine's camera. */
 import * as THREE from 'three';
-import { clamp, lerp, makeRng, ordinal } from '../../core/math.js';
+import { clamp, lerp, makeRng } from '../../core/math.js';
 import { esc, hex, loadStylesheet } from '../../core/ui.js';
 import { createInput } from '../../core/input.js';
 import { createLoop } from '../../core/loop.js';
 import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
 import { AVATARS } from '../../core/avatars.js';
+import { makeT, onLang } from '../../core/i18n.js';
+import { STR } from './strings.js';
+import { readOpts, diffAt, rank, finished, canRevive, reviveSpot, swipeDir, REVIVE_COST, REVIVE_WINDOW } from './rules.js';
+
+const T = makeT(STR);
 
 /* ============================================================ config */
-const CH = 6;                    // playable columns -CH..CH
+const CH = 6;                    // playable columns -CH..CH (rules.js has the same)
 const GH = 16;                   // ground extends -GH..GH
 const GW = GH * 2 + 1;
 const LOOP = 36;                 // a lane's traffic repeats every LOOP units
 const AHEAD = 30, BEHIND = 14;   // rows kept built around the camera
 const MIN_ROW = -4;
-const HOP_DUR = 0.17, HOP_H = 0.5, DIE_T = 1.05, COUNT_T = 2.4, HOLD_REPEAT = 0.3;
+const HOP_DUR = 0.17, HOP_H = 0.5, DIE_T = 1.05, COUNT_T = 2.4, HOLD_REPEAT = 0.3, GHOST_T = 1.6, CARD_T = 3.2;
 const IDLE_WARN = 3, IDLE_LIMIT = 5.2, PROG_WARN = 8, PROG_LIMIT = 10.5, UFO_Y = 3.4;
 const NET_HZ = 20, NET_HZ_DEAD = 4, INTERP_DELAY = 0.12;
 const SKY = 0x8fd3ff, PI = Math.PI;
@@ -149,29 +157,19 @@ const VEHICLES = [
 ];
 const vehicleById = id => VEHICLES.find(v => v.id === id) || VEHICLES[0];
 
-/* ============================================================ copy */
-const DEATHS = {
-  cow: { title: 'Mooved down', jokes: ['Flattened by a cow. She did not even slow down.', 'A cow hit you. Insurance is calling it an act of cud.', 'Cow 1, car 0. The cow was not keeping score.'] },
-  pig: { title: 'Hogged', jokes: ['Run over by a pig. Somehow this is your fault.', 'A pig got you. It felt nothing.', 'Trampled by bacon. Circle of life.'] },
-  chicken: { title: 'Plucked', jokes: ['Hit by a chicken. It was crossing the road. Obviously.', 'Beaten by a chicken. Do not tell the pickup.', 'A chicken won. It will never let you forget it.'] },
-  sheep: { title: 'Fleeced', jokes: ['Trampled by sheep. Counting them did not help.', 'Sheep. Fluffy outside, forklift inside.', 'Ewe should have waited.'] },
-  goose: { title: 'Honked', jokes: ['A goose got you. A goose always gets you.', 'Ended by a goose. It is still angry about it.', 'The goose has no regrets. It has never had one.'] },
-  stampede: { title: 'Stampeded', jokes: ['Sheep stampede. The sign was blinking for a reason.', 'Flattened by the flock. The lights were on. You were not.', 'Fourteen sheep. One car. Math happened.'] },
-  sink: { title: 'Sunk', jokes: ['Sunk. Cars famously cannot swim.', 'Glug. That was not a log.', 'Straight into the river. Bold, but no.'] },
-  drift: { title: 'Drifted', jokes: ['Floated off the map. Logs do not have a steering wheel.', 'Drifted away. Lovely log, terrible parking.', 'Off to sea. Send a postcard.'] },
-  abduct: { title: 'Abducted', jokes: ['You idled. The UFO was not here for the cows after all.', 'Beamed up. Never park on a farm at night.', 'Abducted. The tagline said do not idle. It was not a suggestion.'] },
-};
-const deathCopy = car => DEATHS[car.cause === 'hit' ? car.kind : car.cause] || DEATHS.sink;
+/* ============================================================ copy - a death is a key (strings.js: `death.<key>` and three jokes) */
+const deathKey = car => { const k = car.cause === 'hit' ? car.kind : car.cause; return ['cow', 'pig', 'chicken', 'sheep', 'goose', 'stampede', 'sink', 'drift', 'abduct'].includes(k) ? k : 'sink'; };
 
 const HTML = `<canvas class="gl"></canvas>
 <div class="hud">
-  <div class="hud-top"><div class="score" data-score>0</div><div class="coins"><i class="coin-ico"></i><span data-coins>0</span></div></div>
-  <div class="hud-mid"><div class="tag" data-count hidden></div><div class="warn" data-warn hidden>the UFO is watching</div><div class="spect" data-spect hidden></div><div class="hint-play" data-hint></div></div>
+  <div class="hud-top"><div class="lhs"><div class="score" data-score>0</div><div class="goal" data-goal hidden></div></div>
+    <div class="rhs"><div class="coins" data-coinbox><i class="coin-ico"></i><span data-coins>0</span><b class="rv" data-rv hidden></b></div><ol class="ladder" data-ladder hidden></ol></div></div>
+  <div class="hud-mid"><div class="tag" data-count hidden></div><div class="warn" data-warn hidden></div><div class="spect" data-spect hidden></div><div class="hint-play" data-hint></div></div>
   <div class="hud-bot"><span data-role></span><span data-keys></span><button class="snd" data-snd type="button"></button></div>
 </div>
 <div class="overlay" data-overlay hidden><div class="card">
   <div class="pill" data-pill></div><h1 data-title></h1><p class="joke" data-joke></p>
-  <div class="stats" data-stats></div><table class="standings" data-table hidden></table><div class="foot" data-foot></div>
+  <div class="stats" data-stats></div><table class="standings" data-table hidden></table><div class="note" data-note hidden></div><div class="foot" data-foot></div>
 </div></div>`;
 
 /* ============================================================ sound - the original synth on the shell's shared AudioContext */
@@ -252,12 +250,12 @@ export async function create({ mount, audio, send, hooks }) {
   const unloadCss = await loadStylesheet('/games/crossy/crossy.css');
   const root = document.createElement('div'); root.className = 'cf'; root.innerHTML = HTML; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
-  const dom = { score: $('[data-score]'), coins: $('[data-coins]'), count: $('[data-count]'), warn: $('[data-warn]'), spect: $('[data-spect]'), hint: $('[data-hint]'), role: $('[data-role]'), keys: $('[data-keys]'), snd: $('[data-snd]'),
-    overlay: $('[data-overlay]'), pill: $('[data-pill]'), title: $('[data-title]'), joke: $('[data-joke]'), stats: $('[data-stats]'), table: $('[data-table]'), foot: $('[data-foot]') };
+  const dom = { score: $('[data-score]'), goal: $('[data-goal]'), coins: $('[data-coins]'), coinbox: $('[data-coinbox]'), rv: $('[data-rv]'), ladder: $('[data-ladder]'),
+    count: $('[data-count]'), warn: $('[data-warn]'), spect: $('[data-spect]'), hint: $('[data-hint]'), role: $('[data-role]'), keys: $('[data-keys]'), snd: $('[data-snd]'),
+    overlay: $('[data-overlay]'), pill: $('[data-pill]'), title: $('[data-title]'), joke: $('[data-joke]'), stats: $('[data-stats]'), table: $('[data-table]'), note: $('[data-note]'), foot: $('[data-foot]') };
   const sfx = createSfx(audio);
   const isTouch = matchMedia('(pointer:coarse)').matches;
   const crand = (a, b) => a + Math.random() * (b - a); // cosmetic randomness only - never for anything the farm depends on
-  const cpick = a => a[Math.floor(Math.random() * a.length)];
   const buzz = ms => { if (navigator.vibrate) { try { navigator.vibrate(ms); } catch {} } };
 
   /* ---- renderer / scene */
@@ -286,26 +284,37 @@ export async function create({ mount, audio, send, hooks }) {
   const LIGHT_OFF = new THREE.MeshLambertMaterial({ color: 0x6e1a1a }), LIGHT_ON = new THREE.MeshLambertMaterial({ color: 0xff2b2b, emissive: 0xff2b2b, emissiveIntensity: 0.9 });
 
   /* ============================================================ world: row specs (deterministic data) */
-  const world = { seed: 0, R: makeRng(1), time: 0, specs: new Map(), nextRow: -6, section: null, meshes: new Map(), claimed: new Set() };
+  /* `rules` are the lobby options (rules.js readOpts): the finish row (0 = endless), how fast the farm gets hard, coins on/off.
+     They shape the farm, so they are set before the first row is generated and are the same on every machine. */
+  const world = { seed: 0, R: makeRng(1), time: 0, specs: new Map(), nextRow: -6, section: null, meshes: new Map(), claimed: new Set(), rules: readOpts() };
+  const diff = (i, span) => diffAt(i, span, world.rules.ramp);
   const rand = (a, b) => world.R.rr(a, b), randi = (a, b) => Math.floor(rand(a, b + 1)), chance = p => world.R.rnd() < p, pick = a => a[Math.floor(world.R.rnd() * a.length)];
   function weightedPick(w) { let s = 0; for (const k in w) s += w[k]; let r = world.R.rnd() * s; for (const k in w) { r -= w[k]; if (r <= 0) return k; } return Object.keys(w)[0]; }
   const coinKey = (i, c) => i + ',' + c;
 
   function nextSection(i) {
-    const prev = world.section ? world.section.type : 'grass', diff = clamp(i / 160, 0, 1);
-    const w = { grass: 3, road: 5, river: 2.5 + diff, track: i > 14 ? 1.3 : 0 };
+    const prev = world.section ? world.section.type : 'grass', d = diff(i, 160);
+    const w = { grass: 3, road: 5, river: 2.5 + d, track: i > 14 ? 1.3 : 0 };
     if (prev === 'grass') w.grass = 0.5; if (prev === 'river') w.river *= 0.4; if (prev === 'track') w.track = 0;
     const type = weightedPick(w); let left = 1;
-    if (type === 'grass') left = randi(1, 2); else if (type === 'road') left = randi(1, 2 + Math.round(diff * 3)); else if (type === 'river') left = randi(1, 1 + Math.round(diff * 2));
+    if (type === 'grass') left = randi(1, 2); else if (type === 'road') left = randi(1, 2 + Math.round(d * 3)); else if (type === 'river') left = randi(1, 1 + Math.round(d * 2));
     return { type, left };
   }
   function specRow(i) {
-    let type = 'grass';
-    if (i > 2) { if (!world.section || world.section.left <= 0) world.section = nextSection(i); world.section.left--; type = world.section.type; }
-    const spec = { i, type, blocked: new Set(), reach: allCols(), coins: new Set(), taken: new Set(), movers: [], parts: null, dir: 1, speed: 0, kind: null, half: 0, dashes: false, cycles: null, cR: null, cycleEnd: 0, cur: 0 };
-    ({ grass: specGrass, road: specRoad, river: specRiver, track: specTrack })[type](spec, i);
+    let type = 'grass'; const fin = world.rules.target > 0 && i === world.rules.target;
+    if (i > 2 && !fin) { if (!world.section || world.section.left <= 0) world.section = nextSection(i); world.section.left--; type = world.section.type; }
+    const spec = { i, type, finish: fin, blocked: new Set(), reach: allCols(), coins: new Set(), taken: new Set(), movers: [], parts: null, dir: 1, speed: 0, kind: null, half: 0, dashes: false, cycles: null, cR: null, cycleEnd: 0, cur: 0 };
+    if (fin) specFinish(spec, i); else ({ grass: specGrass, road: specRoad, river: specRiver, track: specTrack })[type](spec, i);
     for (const c of spec.coins) if (world.claimed.has(coinKey(i, c))) spec.taken.add(c); // a claim that arrived before we built the row
     world.specs.set(i, spec); return spec;
+  }
+  /* the finish row: open grass under a chequered banner, every column reachable */
+  function specFinish(spec, i) {
+    const parts = groundParts('grass', i & 1), prev = world.specs.get(i - 1);
+    for (let c = -CH; c <= CH; c++) parts.push(B(c, 0.006, 0, 1, 0.02, 0.9, (c + i) & 1 ? C.white : C.black));
+    for (const sx of [-1, 1]) parts.push(B(sx * (CH + 0.7), 1.1, 0, 0.18, 2.2, 0.18, C.fence));
+    for (let c = -CH - 1; c <= CH + 1; c++) for (const y of [0, 1]) parts.push(B(c, 2.05 + y * 0.22, 0, 1, 0.22, 0.08, (c + y) & 1 ? C.white : C.black));
+    spec.blocked = new Set(); spec.reach = computeReach(prev ? prev.reach : allCols(), spec.blocked); if (!spec.reach.size) spec.reach = allCols(); spec.parts = parts;
   }
   function specGrass(spec, i) {
     const parity = i & 1, parts = groundParts('grass', parity), prev = world.specs.get(i - 1);
@@ -314,11 +323,11 @@ export async function create({ mount, audio, send, hooks }) {
       if (i === -6) { spec.blocked = allCols(); for (let c = -CH; c <= CH; c++) if (chance(0.85)) addParts(parts, pick(TREES), c, 0, 0); }
       if (i === -5) { spec.blocked = allCols(); addParts(parts, FENCE, 0, 0, 0); }
       if (i === -4 || i === -3) { spec.blocked = new Set([-6, -5, -4, -3]); if (i === -4) addParts(parts, BARN, -4.6, 0, -0.5); if (i === -3) { addParts(parts, HAY, 5, 0, 0); spec.blocked.add(5); } }
-      if (i >= 1 && chance(0.6)) spec.coins.add(randi(-CH, CH));
+      if (i >= 1 && world.rules.coins && chance(0.6)) spec.coins.add(randi(-CH, CH));
       for (let c = -CH; c <= CH; c++) if (!spec.blocked.has(c) && !spec.coins.has(c) && chance(0.14)) addParts(parts, flowerParts(pick(C.flower)), c + rand(-0.3, 0.3), 0, rand(-0.3, 0.3));
       spec.reach = computeReach(i <= -4 ? allCols() : (prev ? prev.reach : allCols()), spec.blocked);
     } else {
-      const density = 0.15 + clamp((i - 3) / 500, 0, 0.13), prevReach = prev ? prev.reach : allCols(); let best = null;
+      const density = 0.15 + 0.13 * diff(i - 3, 65), prevReach = prev ? prev.reach : allCols(); let best = null;
       for (let attempt = 0; attempt < 12; attempt++) {
         const blocked = new Set(); for (let c = -CH; c <= CH; c++) if (chance(density)) blocked.add(c);
         const reach = computeReach(prevReach, blocked);
@@ -328,17 +337,17 @@ export async function create({ mount, audio, send, hooks }) {
       if (best.reach.size === 0) best = { blocked: new Set(), reach: computeReach(prevReach, new Set()) };
       spec.blocked = best.blocked; spec.reach = best.reach;
       for (const c of spec.blocked) { const r = world.R.rnd(); addParts(parts, r < 0.7 ? pick(TREES) : r < 0.85 ? pick(ROCKS) : r < 0.95 ? HAY : STUMP, c, 0, 0); }
-      for (let c = -CH; c <= CH; c++) if (!spec.blocked.has(c)) { if (chance(0.11)) spec.coins.add(c); else if (chance(0.07)) addParts(parts, flowerParts(pick(C.flower)), c + rand(-0.3, 0.3), 0, rand(-0.3, 0.3)); }
+      for (let c = -CH; c <= CH; c++) if (!spec.blocked.has(c)) { if (world.rules.coins && chance(0.11)) spec.coins.add(c); else if (chance(0.07)) addParts(parts, flowerParts(pick(C.flower)), c + rand(-0.3, 0.3), 0, rand(-0.3, 0.3)); }
     }
     spec.parts = parts;
   }
   function specRoad(spec, i) {
-    const prev = world.specs.get(i - 1), diff = clamp(i / 200, 0, 1);
+    const prev = world.specs.get(i - 1), d = diff(i, 200);
     spec.dashes = !!(prev && prev.type === 'road');
     spec.kind = weightedPick({ cow: 3, pig: 3, sheep: 2, chicken: 2.5, goose: 1.5 }); const a = ANIMALS[spec.kind]; spec.half = a.half;
     spec.dir = spec.dashes ? -prev.dir : (chance(0.5) ? 1 : -1); if (chance(0.25)) spec.dir *= -1;
-    spec.speed = rand(a.speed[0], a.speed[1]) * (1 + diff * 0.7);
-    let x = rand(0, 4); const maxX = LOOP - 3.5, gapMin = 3.2 - diff;
+    spec.speed = rand(a.speed[0], a.speed[1]) * (1 + d * 0.7);
+    let x = rand(0, 4); const maxX = LOOP - 3.5, gapMin = 3.2 - d;
     while (x < maxX) {
       const g = randi(a.group[0], a.group[1]);
       for (let k = 0; k < g && x < maxX; k++) { spec.movers.push({ off: x, half: a.half, v: randi(0, a.variants - 1), phase: rand(0, 6) }); x += a.half * 2 + rand(0.35, 0.7); }
@@ -346,13 +355,13 @@ export async function create({ mount, audio, send, hooks }) {
     }
   }
   function specRiver(spec, i) {
-    const prev = world.specs.get(i - 1), diff = clamp(i / 200, 0, 1);
+    const prev = world.specs.get(i - 1), d = diff(i, 200);
     spec.dir = (prev && prev.type === 'river') ? -prev.dir : (chance(0.5) ? 1 : -1);
-    spec.speed = rand(1.0, 1.7) * (1 + diff * 0.6);
+    spec.speed = rand(1.0, 1.7) * (1 + d * 0.6);
     let x = rand(0, 3);
     for (;;) {
-      const len = pick(diff > 0.5 ? [2, 2, 3, 3, 4] : [2, 3, 3, 4, 4]); if (x + len > LOOP - 1.6) break;
-      spec.movers.push({ off: x + len / 2, len, half: len / 2, phase: rand(0, 6) }); x += len + rand(1.4, 3.0) + diff * 0.6;
+      const len = pick(d > 0.5 ? [2, 2, 3, 3, 4] : [2, 3, 3, 4, 4]); if (x + len > LOOP - 1.6) break;
+      spec.movers.push({ off: x + len / 2, len, half: len / 2, phase: rand(0, 6) }); x += len + rand(1.4, 3.0) + d * 0.6;
     }
   }
   /* a track's stampedes run on a schedule that is a pure function of the world clock (idle, 1.7 s of blinking
@@ -439,9 +448,9 @@ export async function create({ mount, audio, send, hooks }) {
       for (const [c, coin] of rm.coins) { coin.rotation.y += dt * 2.5; coin.position.y = 0.36 + Math.sin(world.time * 3 + c) * 0.05; }
     }
   }
-  function resetWorld(seed) {
+  function resetWorld(seed, opts) {
     for (const rm of [...world.meshes.values()]) removeRowMesh(rm);
-    world.specs.clear(); world.claimed.clear(); world.seed = seed; world.R = makeRng(seed); world.time = 0; world.nextRow = -6; world.section = null;
+    world.rules = readOpts(opts); world.specs.clear(); world.claimed.clear(); world.seed = seed; world.R = makeRng(seed); world.time = 0; world.nextRow = -6; world.section = null;
   }
 
   /* clouds drift over the field */
@@ -452,11 +461,11 @@ export async function create({ mount, audio, send, hooks }) {
   /* ============================================================ cars */
   let cars = [], me = null;
   let session = null, isHost = false, online = false, hostId = null, myId = null;
-  let phase = 'count', phaseT = 0, overT = 0, cardT = 0, countStage = -1;
+  let phase = 'count', phaseT = 0, overT = 0, countStage = -1;
   const carOf = pid => cars.find(c => c.id === pid) || null;
   function makeLabel(text, color) {
     const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const c = cv.getContext('2d');
-    c.font = 'bold 34px Trebuchet MS, Arial'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = 'bold 34px "Trebuchet MS", Arial, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
     const w = Math.min(244, c.measureText(text).width + 30);
     c.fillStyle = 'rgba(59,36,19,.78)'; c.beginPath(); c.roundRect(128 - w / 2, 8, w, 48, 12); c.fill();
     c.strokeStyle = hex(color); c.lineWidth = 4; c.stroke(); c.fillStyle = '#fff3dc'; c.fillText(text, 128, 33);
@@ -466,7 +475,7 @@ export async function create({ mount, audio, send, hooks }) {
   function newCar(p, local) {
     const av = AVATARS[p.avatar] || AVATARS[0];
     const car = { id: p.id, name: p.name || av.name, avatar: p.avatar, color: av.color, vehicle: AVATAR_VEHICLE[(p.avatar | 0) % AVATAR_VEHICLE.length], local, left: false,
-      x: 0, y: 0, row: 0, rowF: 0, maxRow: 0, facing: 0, state: 'playing', cause: null, kind: null, dieT: 0, coins: 0,
+      x: 0, y: 0, row: 0, rowF: 0, maxRow: 0, facing: 0, state: 'playing', cause: null, kind: null, dieT: 0, coins: 0, revived: false, rv: 0, ft: undefined, ghost: 0,
       hop: null, queued: null, riding: null, rideOff: 0, idle: 0, noProgress: 0, land: 1, bumpT: 1, bumpDir: [0, 0], hops: 0,
       buf: [], g: new THREE.Group(), label: null };
     car.g.add(meshOf(vehicleGeo(car.vehicle))); scene.add(car.g);
@@ -490,7 +499,7 @@ export async function create({ mount, audio, send, hooks }) {
   }
   function land() {
     const h = me.hop; me.hop = null; me.row = h.toRow; me.rowF = h.toRow; me.x = h.toX; me.y = 0; me.land = 0;
-    if (me.row > me.maxRow) { me.maxRow = me.row; me.noProgress = 0; }
+    if (me.row > me.maxRow) { me.maxRow = me.row; me.noProgress = 0; if (world.rules.target && me.maxRow >= world.rules.target && me.ft === undefined) me.ft = r3(world.time); }
     const spec = world.specs.get(me.row);
     if (spec.type === 'river') {
       const log = logAt(spec, me.x);
@@ -508,14 +517,28 @@ export async function create({ mount, audio, send, hooks }) {
     else if (cause === 'abduct') sfx.beam();
   }
   function die(cause, kind) {
-    if (!me || me.state !== 'playing') return;
+    if (!me || me.state !== 'playing' || phase !== 'play') return;
+    if (me.ghost > 0 && (cause === 'hit' || cause === 'stampede')) return; // just revived: the herd passes through
     me.state = 'dying'; me.cause = cause; me.kind = kind || null; me.dieT = 0; me.hop = null; me.queued = null;
     deathFx(me, cause);
     if (cause === 'hit' || cause === 'stampede') { shake = 0.6; buzz([60, 40, 80]); } else if (cause === 'abduct') buzz([30, 30, 30, 30, 30]); else buzz(40);
     if (cause !== 'abduct' && (ufoState === 'hover' || ufoState === 'enter')) ufoRetreat();
   }
+  /* the coin revive: after the crash plays out the offer stays open REVIVE_WINDOW seconds (the car is still "dying" to everyone,
+     so the round waits); taking it spends the coins and drops the car on the furthest safe grass it reached, blinking and
+     untouchable for a moment. Declining, or letting it run out, is death as before. */
+  let offerT = 0;
+  function revive() {
+    if (!canRevive(me, world.rules, phase) || offerT <= 0) return;
+    const at = reviveSpot(world.specs, me.maxRow, me.x, 6); // within the UFO's "fell behind" distance
+    Object.assign(me, { state: 'playing', cause: null, kind: null, dieT: 0, hop: null, queued: null, riding: null, x: at.col, row: at.row, rowF: at.row, y: 0, idle: 0, noProgress: 0, land: 0, ghost: GHOST_T, revived: true });
+    me.coins -= REVIVE_COST; me.rv++; offerT = 0; ufoReset(); sfx.fanfare(); buzz(30); hideCard();
+    showTag('revivedTag', 1.2);
+  }
+  function giveUp() { if (offerT <= 0) return; offerT = 0; me.state = 'dead'; onMyDeath(); }
   function updateMe(dt) {
     const p = me;
+    if (p.ghost > 0) p.ghost = Math.max(0, p.ghost - dt);
     if (p.state === 'playing') {
       if (phase === 'play') { p.idle += dt; p.noProgress += dt; }
       if (p.hop) { const h = p.hop; h.t += dt; const k = Math.min(1, h.t / HOP_DUR); p.x = lerp(h.fromX, h.toX, k); p.rowF = lerp(h.fromRow, h.toRow, k); p.y = Math.sin(k * PI) * HOP_H; if (k >= 1) land(); }
@@ -526,23 +549,31 @@ export async function create({ mount, audio, send, hooks }) {
         else if (spec && spec.type === 'track' && stampedeHit(spec, p.x)) die('stampede');
       }
       p.land = Math.min(1, p.land + dt / 0.16); p.bumpT = Math.min(1, p.bumpT + dt / 0.14);
-      if (!p.hop && p.state === 'playing' && phase === 'play') { const d = heldDir(); if (d && holdT > HOLD_REPEAT) tryHop(d[0], d[1]); } // hold a key to keep hopping
+      if (!p.hop && p.state === 'playing' && phase === 'play') { const d = repeatDir(); if (d) tryHop(d[0], d[1]); } // hold a key or a finger to keep hopping
     } else {
       p.dieT += dt;
       if (p.riding && p.cause === 'drift') p.x = moverX(p.riding.spec, p.riding.m) + p.rideOff;
-      if (p.state === 'dying' && p.dieT > DIE_T) { p.state = 'dead'; onMyDeath(); }
+      if (p.state === 'dying' && p.dieT > DIE_T) {
+        if (offerT > 0) { offerT -= dt; if (phase !== 'play') offerT = 0; if (offerT <= 0) { p.state = 'dead'; onMyDeath(); } else drawOffer(); }
+        else if (canRevive(p, world.rules, phase)) { offerT = REVIVE_WINDOW; showDeathCard(); }
+        else { p.state = 'dead'; onMyDeath(); }
+      }
     }
   }
 
   /* ---- the other cars: interpolated from their snapshots */
   function updateRemote(car, dt) {
     if (car.left) return;
+    if (car.ghost > 0) car.ghost = Math.max(0, car.ghost - dt);
     const latest = car.buf[car.buf.length - 1]; if (!latest) return;
     const s = sampleSnaps(car.buf, nowSec() - INTERP_DELAY);
     if (s) { const a = s.a, b = s.b; if (b) { car.x = lerp(a.x, b.x, s.f); car.rowF = lerp(a.z, b.z, s.f); car.y = lerp(a.y, b.y, s.f); } else { car.x = a.x; car.rowF = a.z; car.y = a.y; } car.facing = (b || a).f; }
-    car.maxRow = Math.max(car.maxRow, latest.mr); car.coins = latest.co; car.row = latest.r;
+    car.maxRow = Math.max(car.maxRow, latest.mr); car.coins = latest.co; car.row = latest.r; if (latest.ft !== undefined) car.ft = latest.ft;
+    if (latest.st === 0 && car.state !== 'playing' && latest.rv > car.rv) { // they spent coins on a revive: back from where they reappear
+      Object.assign(car, { state: 'playing', cause: null, kind: null, dieT: 0, rv: latest.rv, revived: true, ghost: GHOST_T, x: latest.x, rowF: latest.z, y: latest.y }); car.buf.splice(0, car.buf.length - 1); car.g.rotation.x = 0; return;
+    }
     if (latest.st > 0 && car.state === 'playing') { car.state = 'dying'; car.dieT = 0; car.cause = latest.c || 'hit'; car.kind = latest.k || null; car.x = latest.x; car.rowF = latest.z; if (Math.abs(car.rowF - camRow()) < 12) deathFx(car, car.cause); }
-    if (car.state !== 'playing') { car.dieT += dt; if (car.state === 'dying' && (latest.st === 2 || car.dieT > DIE_T + 1)) car.state = 'dead'; } // the owner declares the death; the timer is only a fallback
+    if (car.state !== 'playing') { car.dieT += dt; if (car.state === 'dying' && (latest.st === 2 || car.dieT > DIE_T + REVIVE_WINDOW + 1.5)) car.state = 'dead'; } // the owner declares the death (after any revive offer); the timer is only a fallback
   }
   function updateCarVisual(car, dt) {
     const g = car.g; let y = car.y, sy = 1, sxz = 1, rx = 0, bx = 0, bz = 0;
@@ -559,12 +590,12 @@ export async function create({ mount, audio, send, hooks }) {
       else if (c === 'abduct') { const k = Math.min(1, t / 1.0); y = car.y + k * 3.0; g.rotation.y += dt * 9; sy = sxz = lerp(1, 0.25, k); }
       else if (c === 'drift') g.rotation.y += dt * 2;
       g.visible = !((c === 'abduct' && t > 1.3) || (c === 'sink' && t > 1.2));
-    } else { g.visible = true; let d = car.facing - g.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); g.rotation.y += d * Math.min(1, dt * 18); }
+    } else { g.visible = !(car.ghost > 0 && Math.floor(car.ghost * 12) % 2); let d = car.facing - g.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); g.rotation.y += d * Math.min(1, dt * 18); }
     g.position.set(car.x + bx, y, -car.rowF + bz); g.scale.set(sxz, sy, sxz); g.rotation.x = rx;
     if (car.label) { car.label.visible = g.visible; car.label.position.set(car.x, 1.45 + Math.max(0, y), -car.rowF); }
   }
   const alive = () => cars.filter(c => !c.left && c.state !== 'dead');
-  const standings = () => cars.filter(c => !c.left).sort((a, b) => b.maxRow - a.maxRow || b.coins - a.coins || String(a.id).localeCompare(String(b.id)));
+  const standings = () => rank(cars);
   /* whose farm the camera shows: me while I am in it, then whoever is furthest along */
   let followId = null;
   function follow() { if (me && me.state !== 'dead') return me; const a = alive(); if (!a.length) return me; return a.reduce((p, c) => c.rowF > p.rowF ? c : p); }
@@ -627,7 +658,9 @@ export async function create({ mount, audio, send, hooks }) {
     if (aspect >= 1) { hh = 7.2; hw = hh * aspect; } else { hw = 5.6; hh = hw / aspect; }
     camera.left = -hw; camera.right = hw; camera.top = hh; camera.bottom = -hh; camera.updateProjectionMatrix();
   }
-  addEventListener('resize', resize);
+  /* follow the stage element itself (the shell can resize it without a window resize); the window event is the fallback */
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => resize()) : null;
+  if (ro) ro.observe(root); else addEventListener('resize', resize);
 
   /* ============================================================ input */
   let holdT = 0;
@@ -636,85 +669,173 @@ export async function create({ mount, audio, send, hooks }) {
     onDown: name => { holdT = 0; audio.init(); const d = DIRS[name]; if (d) tryHop(d[0], d[1]); },
     onKey: e => {
       if (e.code === 'KeyM') { audio.toggle(); setSnd(); }
-      else if (e.code === 'KeyR') hooks.onRestart?.();
-      else if (e.code === 'Escape') hooks.onExit?.();
+      else if (e.code === 'KeyE' || e.code === 'Enter') revive();
+      else if (e.code === 'KeyR') { if (online && !isHost) { if (cache.results) toggleRematch(); } else hooks.onRestart?.(); }
+      else if (e.code === 'Escape') { if (offerT > 0) giveUp(); else if (!online || isHost) hooks.onExit?.(); }
     },
   });
   const held = kb.held;
   const heldDir = () => held.up ? DIRS.up : held.left ? DIRS.left : held.right ? DIRS.right : held.down ? DIRS.down : null;
+  /* touch: a tap hops forward and a swipe hops its way, on release. A finger that stays down keeps hopping like a held key:
+     a swipe hops as soon as it passes the threshold and then repeats that way, a still finger repeats forward after HOLD_REPEAT. */
   let pStart = null;
-  const onPointerDown = e => { pStart = { x: e.clientX, y: e.clientY }; audio.init(); };
+  const onPointerDown = e => { pStart = { id: e.pointerId, x: e.clientX, y: e.clientY, t: 0, dir: null, fired: false }; audio.init(); try { canvas.setPointerCapture(e.pointerId); } catch {} };
+  const onPointerMove = e => {
+    if (!pStart || e.pointerId !== pStart.id || pStart.dir) return;
+    const d = swipeDir(e.clientX - pStart.x, e.clientY - pStart.y); if (!d) return;
+    pStart.dir = d; pStart.fired = true; pStart.t = 0; tryHop(d[0], d[1]);
+  };
   const onPointerUp = e => {
-    if (!pStart) return; const dx = e.clientX - pStart.x, dy = e.clientY - pStart.y; pStart = null;
-    const ax = Math.abs(dx), ay = Math.abs(dy);
-    if (Math.max(ax, ay) < 18) tryHop(0, 1); else if (ax > ay) tryHop(dx > 0 ? 1 : -1, 0); else tryHop(0, dy < 0 ? 1 : -1);
+    if (!pStart || e.pointerId !== pStart.id) return; const p = pStart; pStart = null;
+    if (p.fired) return;
+    const d = swipeDir(e.clientX - p.x, e.clientY - p.y) || [0, 1]; tryHop(d[0], d[1]);
   };
   const onPointerCancel = () => { pStart = null; };
-  canvas.addEventListener('pointerdown', onPointerDown); canvas.addEventListener('pointerup', onPointerUp); canvas.addEventListener('pointercancel', onPointerCancel);
-  const setSnd = () => { dom.snd.textContent = audio.muted ? '🔇 sound off' : '🔊 sound on'; };
+  canvas.addEventListener('pointerdown', onPointerDown); canvas.addEventListener('pointermove', onPointerMove); canvas.addEventListener('pointerup', onPointerUp); canvas.addEventListener('pointercancel', onPointerCancel);
+  /* the direction to hop again while a key or a finger is held (checked whenever the car is between hops) */
+  function repeatDir() {
+    const k = heldDir(); if (k && holdT > HOLD_REPEAT) return k;
+    if (pStart && pStart.t > HOLD_REPEAT) { pStart.fired = true; return pStart.dir || DIRS.up; }
+    return null;
+  }
+  const setSnd = () => { dom.snd.textContent = T(audio.muted ? 'sndOff' : 'sndOn'); };
   dom.snd.addEventListener('click', () => { audio.toggle(); setSnd(); });
 
   /* ============================================================ networking glue */
   let netAcc = 0;
   function netTick(dt) {
-    if (!online || !me) return; netAcc += dt; if (netAcc < 1 / (me.state === 'dead' ? NET_HZ_DEAD : NET_HZ)) return; netAcc = 0;
-    const m = { t: 's', x: r2(me.x), z: r2(me.rowF), y: r2(me.y), f: r2(me.facing), st: me.state === 'playing' ? 0 : me.state === 'dying' ? 1 : 2, c: me.cause, k: me.kind, mr: me.maxRow, co: me.coins, r: me.row };
+    if (!online || !me) return;
+    const step = 1 / (me.state === 'dead' ? NET_HZ_DEAD : NET_HZ); netAcc += dt; if (netAcc < step - 0.002) return;
+    netAcc = Math.min(step, Math.max(0, netAcc - step)); // carry the remainder so 20 Hz stays 20 Hz on a 60 Hz loop; never bank more than one send
+    const m = { t: 's', x: r2(me.x), z: r2(me.rowF), y: r2(me.y), f: r2(me.facing), st: me.state === 'playing' ? 0 : me.state === 'dying' ? 1 : 2, c: me.cause, k: me.kind, mr: me.maxRow, co: me.coins, r: me.row, rv: me.rv };
+    if (me.ft !== undefined) m.ft = me.ft;
     if (isHost) m.tm = r3(world.time);
     send(m);
   }
   function syncClock(tm) { const d = tm - world.time; world.time += Math.abs(d) > 0.5 ? d : d * 0.2; }
 
-  /* ============================================================ HUD + cards */
+  /* ============================================================ HUD + cards
+     Every word is drawn from state through T(), so a language switch just draws it all again (renderWords + renderCard). */
   const cache = {};
   const setText = (key, node, text) => { if (cache[key] !== text) { cache[key] = text; node.textContent = text; } };
   const bump = (el, cls, ms) => { el.classList.add(cls); setTimeout(() => el.classList.remove(cls), ms); };
+  let countKey = null, countHideT = 0;
+  const showTag = (key, secs) => { countKey = key; dom.count.textContent = T(key); dom.count.hidden = false; countHideT = secs; };
+  const kbd = pairs => pairs.map(([k, w]) => `<kbd>${k}</kbd> ${esc(T(w))}`).join(' ');
+  /* the words that do not change during a round */
+  function renderWords() {
+    const r = world.rules;
+    dom.warn.textContent = T('warn'); setSnd();
+    dom.hint.textContent = T(isTouch ? 'hintTouch' : 'hintKeys');
+    const rv = r.coins ? [['E', 'key.revive']] : [];
+    dom.keys.innerHTML = kbd(!online ? [['R', 'key.restart'], ['Esc', 'key.menu'], ...rv, ['M', 'key.sound']] : isHost ? [['R', 'key.again'], ['Esc', 'key.lobby'], ...rv, ['M', 'key.sound']] : [...rv, ['M', 'key.sound']]);
+    dom.role.textContent = !online ? T('role.solo') : isHost ? T('role.host') : T('role.players', { n: session ? session.players.length : 0 });
+    dom.goal.hidden = !r.target; dom.goal.textContent = r.target ? T('goal', { n: r.target }) : '';
+    dom.coinbox.hidden = !r.coins;
+    if (countKey && !dom.count.hidden) dom.count.textContent = T(countKey);
+    for (const k of ['spect', 'rv', 'ladder']) delete cache[k];
+  }
+  /* the live ladder: rank and best row of every car, so a spectator has a race to follow */
+  function syncLadder() {
+    const show = online && cars.filter(c => !c.left).length > 1; dom.ladder.hidden = !show; if (!show) return;
+    const ranked = standings(), sig = ranked.map(c => `${c.id}:${c.maxRow}:${c.state === 'dead' ? 0 : 1}:${c.ft ?? ''}`).join('|') + lang0();
+    if (cache.ladder === sig) return; cache.ladder = sig;
+    dom.ladder.innerHTML = ranked.map((c, i) => `<li class="${c === me ? 'me' : ''}${c.state === 'dead' ? ' dead' : ''}"><b>${i + 1}</b><i class="sw" style="background:${hex(c.color)}"></i><span>${esc(c === me ? T('you') : c.name)}</span><em>${c.ft !== undefined ? '🏁' : c.state === 'dead' ? '✖ ' : ''}${c.maxRow}</em></li>`).join('');
+  }
+  const lang0 = () => T('you'); // folds the language into a cache signature
   function syncHud() {
     if (!me) return;
     if (cache.score !== me.maxRow) { cache.score = me.maxRow; dom.score.textContent = me.maxRow; bump(dom.score, 'bump', 100); }
-    if (cache.coins !== me.coins) { cache.coins = me.coins; dom.coins.textContent = me.coins; bump(dom.coins.parentElement, 'bump', 140); }
+    if (cache.coins !== me.coins) { const up = me.coins > (cache.coins ?? 0); cache.coins = me.coins; dom.coins.textContent = me.coins; if (up) bump(dom.coinbox, 'bump', 140); }
+    if (world.rules.coins) {
+      const ready = !me.revived && me.coins >= REVIVE_COST, text = me.revived ? '' : ready ? T('reviveReady') : T('reviveProg', { n: me.coins, cost: REVIVE_COST });
+      if (cache.rv !== text) { cache.rv = text; dom.rv.textContent = text; dom.rv.hidden = !text; dom.rv.classList.toggle('ready', ready); }
+    }
     const spect = online && me.state === 'dead' && phase === 'play' && dom.overlay.hidden;
-    if (spect) { const f = follow(), n = alive().length; setText('spect', dom.spect, f && f !== me ? `SPECTATING ${f.name.toUpperCase()} · ${n} STILL DRIVING` : `${n} STILL DRIVING`); }
+    if (spect) { const f = follow(), n = alive().length; setText('spect', dom.spect, f && f !== me ? T('spectating', { name: f.name, n }) : T('stillDriving', { n })); }
     dom.spect.hidden = !spect;
+    syncLadder();
+    if (cache.results) { const sig = standings().map(c => `${c.id}:${c.maxRow}:${c.coins}:${c.ft ?? ''}`).join('|'); if (cache.resSig !== sig) { cache.resSig = sig; renderCard(); } } // a late snapshot can still move the table
   }
-  const statBox = (k, v) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(String(v))}</div></div>`;
-  function footButtons(again) {
-    const f = dom.foot; f.innerHTML = '';
-    const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label; b.onclick = () => { sfx.click(); fn(); }; f.appendChild(b); };
-    if (!online) { btn(`${again}  (R)`, 'primary', () => hooks.onRestart?.()); btn('MENU  (ESC)', '', () => hooks.onExit?.()); }
-    else if (isHost) { btn(`${again}  (R)`, 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY  (ESC)', '', () => hooks.onExit?.()); }
-    else f.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
-  }
-  /* my death, while the others are still driving: a short card, then spectate */
+
+  /* ---- cards: `card` is what is showing - my death (a small card at the bottom that leaves the farm visible, with the revive
+     offer while it is open) or the round's results - and renderCard draws it from that */
+  let card = null, cardT = 0, votes = [], myVote = false;
+  const statBox = (k, v) => `<div class="stat"><div class="k">${esc(T(k))}</div><div class="v">${esc(String(v))}</div></div>`;
+  const hideCard = () => { card = null; cardT = 0; dom.overlay.hidden = true; dom.overlay.classList.remove('mini'); };
+  const pop = () => { const el = dom.overlay.firstElementChild; el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; };
+  function button(label, cls, fn) { const b = document.createElement('button'); b.className = 'btn ' + cls; b.type = 'button'; b.textContent = label; b.onclick = () => { sfx.click(); fn(); }; dom.foot.appendChild(b); return b; }
+  function showDeathCard() { card = { kind: 'death', joke: Math.floor(Math.random() * 3) }; renderCard(); pop(); }
+  /* my death is final (offer declined, run out, or there never was one) */
   function onMyDeath() {
-    if (!online || !alive().length) return; // solo, or I was the last one: the round-over card covers it
-    const d = deathCopy(me), rank = standings().indexOf(me) + 1;
-    dom.pill.textContent = 'cause of death'; dom.pill.className = 'pill red'; dom.title.textContent = d.title; dom.title.className = ''; dom.joke.textContent = cpick(d.jokes);
-    dom.stats.innerHTML = statBox('score', me.maxRow) + statBox('coins', me.coins) + statBox('place so far', '#' + rank);
-    dom.table.hidden = true; dom.foot.textContent = `watching the others finish… (${alive().length} still driving)`;
-    dom.overlay.hidden = false; cardT = 3.2;
+    if (phase !== 'play') return;
+    if (!online || !alive().length) { if (card && card.kind === 'death') hideCard(); return; } // solo, or I was the last one: the results cover it
+    if (!card) showDeathCard(); else renderCard();
+    cardT = CARD_T;
   }
-  function showResults() {
-    const ranked = standings(), winner = ranked[0], mine = ranked.indexOf(me) + 1, d = me ? deathCopy(me) : null;
-    if (online) { dom.pill.textContent = 'round over'; dom.pill.className = 'pill dark'; dom.title.textContent = winner === me ? 'You win!' : `${winner ? winner.name : '?'} wins!`; dom.title.className = 'win'; if (winner === me) sfx.fanfare(); }
-    else { dom.pill.textContent = 'cause of death'; dom.pill.className = 'pill red'; dom.title.textContent = d ? d.title : 'Done'; dom.title.className = ''; }
-    dom.joke.textContent = d ? cpick(d.jokes) : '';
-    dom.stats.innerHTML = statBox('score', me ? me.maxRow : 0) + statBox('coins', me ? me.coins : 0) + (online ? statBox('place', `${ordinal(mine)} of ${ranked.length}`) : statBox('hops', me ? me.hops : 0));
-    if (online) {
-      dom.table.innerHTML = ranked.map((c, i) => `<tr class="${i === 0 ? 'top' : ''}${c === me ? ' me' : ''}"><td>#${i + 1}</td><td><span class="sw" style="background:${hex(c.color)}"></span>${esc(c.name)}${c === me ? ' (you)' : ''}</td><td>${esc(vehicleById(c.vehicle).name)}</td><td class="s">${c.maxRow}</td><td>${c.coins} <i class="coin-ico"></i></td></tr>`).join('');
-      dom.table.hidden = false;
-    } else dom.table.hidden = true;
-    footButtons('DRIVE AGAIN'); dom.overlay.hidden = false; cardT = 0;
-    const card = dom.overlay.firstElementChild; card.style.animation = 'none'; void card.offsetWidth; card.style.animation = ''; // replay the pop
+  function drawOffer() {
+    const s = Math.ceil(offerT), b = dom.foot.querySelector('[data-revive]');
+    if (b && cache.offer !== s + lang0()) { cache.offer = s + lang0(); b.textContent = T('revive', { cost: REVIVE_COST, s }) + (isTouch ? '' : '  (E)'); }
   }
+  function renderCard() {
+    if (!card) return;
+    const o = dom.overlay; dom.foot.innerHTML = ''; dom.note.hidden = true;
+    if (card.kind === 'death') {
+      const k = deathKey(me);
+      o.classList.add('mini');
+      dom.pill.textContent = T('pill.death'); dom.pill.className = 'pill red'; dom.title.textContent = T('death.' + k); dom.title.className = ''; dom.joke.textContent = T(`death.${k}.${card.joke}`);
+      dom.stats.innerHTML = statBox('stat.score', me.maxRow) + statBox('stat.coins', me.coins) + (online ? statBox('stat.placeSoFar', '#' + (standings().indexOf(me) + 1)) : statBox('stat.hops', me.hops));
+      dom.table.hidden = true;
+      if (offerT > 0) {
+        dom.note.textContent = T('reviveOffer', { cost: REVIVE_COST, row: reviveSpot(world.specs, me.maxRow, me.x, 6).row }); dom.note.hidden = false;
+        button('', 'primary', revive).dataset.revive = '1'; button(T('giveUp') + (isTouch ? '' : '  (ESC)'), '', giveUp); delete cache.offer; drawOffer();
+      } else dom.foot.textContent = T('watching', { n: alive().length });
+    } else {
+      o.classList.remove('mini');
+      const ranked = standings(), winner = ranked[0], mine = ranked.indexOf(me) + 1, fin = finished(cars, world.rules.target), madeIt = me && me.ft !== undefined, k = me ? deathKey(me) : null;
+      const deadJoke = me && me.state !== 'playing' ? T(`death.${k}.${card.joke}`) : '';
+      if (online) {
+        dom.pill.textContent = T(fin ? 'pill.finish' : 'pill.over'); dom.pill.className = 'pill dark';
+        dom.title.textContent = winner === me ? T('youWin') : T('wins', { name: winner ? winner.name : '?' }); dom.title.className = 'win';
+        dom.joke.textContent = madeIt ? T('finishJoke', { n: me.maxRow }) : fin && winner ? T('crossedFirst', { name: winner.name }) : deadJoke;
+      } else if (madeIt) { dom.pill.textContent = T('pill.finish'); dom.pill.className = 'pill dark'; dom.title.textContent = T('madeIt'); dom.title.className = 'win'; dom.joke.textContent = T('finishJoke', { n: me.maxRow }); }
+      else { dom.pill.textContent = T('pill.death'); dom.pill.className = 'pill red'; dom.title.textContent = me ? T('death.' + k) : T('done'); dom.title.className = ''; dom.joke.textContent = deadJoke; }
+      dom.stats.innerHTML = statBox('stat.score', me ? me.maxRow : 0) + (world.rules.coins ? statBox('stat.coins', me ? me.coins : 0) : '')
+        + (online ? statBox('stat.place', T('placeOf', { n: mine, total: ranked.length })) : madeIt ? statBox('stat.time', T('seconds', { n: Math.max(0, me.ft - goT).toFixed(1) })) : statBox('stat.hops', me ? me.hops : 0));
+      if (online) {
+        dom.table.innerHTML = ranked.map((c, i) => `<tr class="${i === 0 ? 'top' : ''}${c === me ? ' me' : ''}"><td>#${i + 1}</td><td><span class="sw" style="background:${hex(c.color)}"></span>${esc(c.name)}${c === me ? ' ' + esc(T('youTag')) : ''}</td><td>${esc(T('veh.' + c.vehicle))}</td><td class="s">${c.ft !== undefined ? '🏁 ' : ''}${c.maxRow}</td><td>${world.rules.coins ? `${c.coins} <i class="coin-ico"></i>` : ''}</td></tr>`).join('');
+        dom.table.hidden = false;
+      } else dom.table.hidden = true;
+      drawFoot();
+    }
+    dom.stats.style.gridTemplateColumns = `repeat(${dom.stats.children.length}, 1fr)`;
+    o.hidden = false;
+  }
+  /* the result card's buttons: the host (and solo) restart or leave; a guest leaves the room or votes for a rematch */
+  function drawFoot() {
+    dom.foot.innerHTML = ''; dom.note.hidden = true; const keys = !isTouch;
+    if (!online) { button(T('again') + (keys ? '  (R)' : ''), 'primary', () => hooks.onRestart?.()); button(T('menu') + (keys ? '  (ESC)' : ''), '', () => hooks.onExit?.()); }
+    else if (isHost) {
+      button(T('again') + (keys ? '  (R)' : ''), 'primary', () => hooks.onRestart?.()); button(T('lobby') + (keys ? '  (ESC)' : ''), '', () => hooks.onExit?.());
+      if (votes.length) { dom.note.textContent = votes.length === 1 ? T('votes1') : T('votesN', { n: votes.length }); dom.note.hidden = false; }
+    } else {
+      button(T(myVote ? 'rematchOn' : 'rematch') + (keys ? '  (R)' : ''), myVote ? 'primary on' : 'primary', toggleRematch); button(T('leave'), '', () => hooks.onLeave?.());
+      dom.note.textContent = T('waitHost'); dom.note.hidden = false;
+    }
+  }
+  function toggleRematch() { myVote = !myVote; hooks.onRematch?.(myVote); if (card && card.kind === 'results') drawFoot(); }
+  function rematchVotes(ids) { const inRoom = new Set((session ? session.players : []).map(p => p.id)); votes = (Array.isArray(ids) ? ids : []).filter(id => inRoom.has(id)); if (card && card.kind === 'results') drawFoot(); }
+  function showResults() { dom.hint.style.opacity = 0; card = { kind: 'results', joke: card && card.kind === 'death' ? card.joke : Math.floor(Math.random() * 3) }; cardT = 0; offerT = 0; renderCard(); pop(); if (online && standings()[0] === me && me.ft === undefined) sfx.fanfare(); }
+  let goT = 0;
   function updatePhase(dt) {
     phaseT += dt;
+    if (countHideT > 0) { countHideT -= dt; if (countHideT <= 0) { dom.count.hidden = true; countKey = null; } }
     if (phase === 'count') {
       const stage = Math.min(3, Math.floor(phaseT / (COUNT_T / 3)));
-      if (stage !== countStage) { countStage = stage; dom.count.hidden = false; if (stage < 3) { dom.count.textContent = String(3 - stage); sfx.count(); } else { dom.count.textContent = 'GO!'; sfx.honk(); phase = 'play'; phaseT = 0; if (me) { me.idle = 0; me.noProgress = 0; } } }
+      if (stage !== countStage) { countStage = stage; dom.count.hidden = false; if (stage < 3) { countKey = null; dom.count.textContent = String(3 - stage); sfx.count(); } else { showTag('go', 0.7); sfx.honk(); phase = 'play'; phaseT = 0; goT = world.time; if (me) { me.idle = 0; me.noProgress = 0; } } }
     } else if (phase === 'play') {
-      if (phaseT > 0.7 && !dom.count.hidden) dom.count.hidden = true;
-      if (cardT > 0) { cardT -= dt; if (cardT <= 0) dom.overlay.hidden = true; }
-      if (!alive().length) { phase = 'over'; phaseT = 0; overT = 0; }
+      if (cardT > 0 && offerT <= 0) { cardT -= dt; if (cardT <= 0) hideCard(); }
+      if (!alive().length || finished(cars, world.rules.target)) { phase = 'over'; phaseT = 0; overT = 0; if (me && me.ft !== undefined) sfx.fanfare(); }
     } else if (phase === 'over') {
       if (!cache.results && phaseT > 0.6) { cache.results = true; showResults(); }
     }
@@ -726,7 +847,7 @@ export async function create({ mount, audio, send, hooks }) {
   const loop = createLoop(real => {
     if (!session) return;
     const dt = Math.min(0.05, real); world.time += dt;
-    if (heldDir()) holdT += dt;
+    if (heldDir()) holdT += dt; if (pStart) pStart.t += dt;
     updatePhase(dt);
     /* specs cover every row the room spans; meshes only the rows this camera can see */
     let maxRow = me ? me.maxRow : 0, minRow = me ? me.row : 0;
@@ -745,26 +866,26 @@ export async function create({ mount, audio, send, hooks }) {
   /* ============================================================ session API */
   function start(s) {
     session = s; isHost = !!s.isHost; online = !!s.online; hostId = s.hostId; myId = s.myId;
-    resetWorld((s.seed >>> 0) || 1337); clearCars(); clearParticles(); ufoReset(); shake = 0;
+    resetWorld((s.seed >>> 0) || 1337, s.opts); clearCars(); clearParticles(); ufoReset(); shake = 0;
     const players = [...s.players].sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
     for (const p of players) cars.push(newCar(p, p.id === myId));
     me = cars.find(c => c.local) || null;
-    phase = 'count'; phaseT = 0; overT = 0; cardT = 0; countStage = -1; followId = null; netAcc = 0; holdT = 0; mooT = 4;
+    phase = 'count'; phaseT = 0; overT = 0; countStage = -1; followId = null; netAcc = 0; holdT = 0; mooT = 4; offerT = 0; goT = 0; countKey = null; countHideT = 0; votes = []; myVote = false; pStart = null;
     for (const k of Object.keys(cache)) delete cache[k];
     camTarget.set(0, 0, -1.5); ensureSpecs(AHEAD + 2); ensureMeshes(0);
-    dom.score.textContent = '0'; dom.coins.textContent = '0'; dom.overlay.hidden = true; dom.spect.hidden = true; dom.warn.hidden = true; dom.count.hidden = true;
-    dom.hint.textContent = isTouch ? 'tap or swipe to hop' : '↑ / W / space to hop · arrows to steer'; dom.hint.style.opacity = 1;
-    dom.keys.innerHTML = !online ? '<kbd>R</kbd> restart <kbd>Esc</kbd> menu <kbd>M</kbd> sound' : isHost ? '<kbd>R</kbd> again <kbd>Esc</kbd> lobby <kbd>M</kbd> sound' : '<kbd>M</kbd> sound';
-    dom.role.textContent = !online ? 'solo' : isHost ? 'hosting' : `${s.players.length} players`;
-    setSnd(); audio.init(); kb.attach(); resize(); loop.start();
+    hideCard(); dom.score.textContent = '0'; dom.coins.textContent = '0'; dom.spect.hidden = true; dom.warn.hidden = true; dom.count.hidden = true; dom.ladder.hidden = true; dom.rv.hidden = true;
+    dom.hint.style.opacity = 1; renderWords();
+    audio.init(); kb.attach(); resize(); loop.start();
   }
   function stop() {
-    session = null; kb.detach(); loop.stop(); pStart = null;
-    clearCars(); clearParticles(); ufoReset(); resetWorld(0); dom.overlay.hidden = true; dom.spect.hidden = true; dom.count.hidden = true;
+    session = null; kb.detach(); loop.stop(); pStart = null; offerT = 0;
+    clearCars(); clearParticles(); ufoReset(); resetWorld(0); hideCard(); dom.spect.hidden = true; dom.count.hidden = true; dom.ladder.hidden = true;
   }
+  /* a language switch redraws every word on screen */
+  const offLang = onLang(() => { renderWords(); if (card) renderCard(); });
   function destroy() {
-    stop(); removeEventListener('resize', resize);
-    canvas.removeEventListener('pointerdown', onPointerDown); canvas.removeEventListener('pointerup', onPointerUp); canvas.removeEventListener('pointercancel', onPointerCancel);
+    stop(); offLang(); if (ro) ro.disconnect(); else removeEventListener('resize', resize);
+    canvas.removeEventListener('pointerdown', onPointerDown); canvas.removeEventListener('pointermove', onPointerMove); canvas.removeEventListener('pointerup', onPointerUp); canvas.removeEventListener('pointercancel', onPointerCancel);
     for (const g of geoCache.values()) g.dispose(); geoCache.clear();
     MAT.dispose(); CLOUD_MAT.dispose(); LIGHT_GEO.dispose(); LIGHT_OFF.dispose(); LIGHT_ON.dispose(); PGEO.dispose(); for (const m of Object.values(pmats)) m.dispose(); beam.geometry.dispose(); beam.material.dispose();
     renderer.dispose(); renderer.forceContextLoss?.(); root.remove(); mount.innerHTML = ''; unloadCss();
@@ -776,14 +897,14 @@ export async function create({ mount, audio, send, hooks }) {
     switch (msg.t) {
       case 's': {
         const car = carOf(msg.from); if (!car || car.local) break;
-        pushSnap(car.buf, { x: +msg.x || 0, z: +msg.z || 0, y: +msg.y || 0, f: +msg.f || 0, st: msg.st | 0, c: typeof msg.c === 'string' ? msg.c : null, k: typeof msg.k === 'string' ? msg.k : null, mr: msg.mr | 0, co: msg.co | 0, r: msg.r | 0 });
+        pushSnap(car.buf, { x: +msg.x || 0, z: +msg.z || 0, y: +msg.y || 0, f: +msg.f || 0, st: msg.st | 0, c: typeof msg.c === 'string' ? msg.c : null, k: typeof msg.k === 'string' ? msg.k : null, mr: msg.mr | 0, co: msg.co | 0, r: msg.r | 0, rv: msg.rv | 0, ft: typeof msg.ft === 'number' ? msg.ft : undefined });
         if (!isHost && msg.from === hostId && typeof msg.tm === 'number') syncClock(msg.tm);
         break;
       }
       case 'coin': { const i = msg.i | 0, c = msg.c | 0; world.claimed.add(coinKey(i, c)); const spec = world.specs.get(i); if (spec) takeCoin(spec, c); break; }
     }
   }
-  const debug = { world, get cars() { return cars; }, get me() { return me; }, get phase() { return phase; }, get phaseT() { return phaseT; }, get ufo() { return ufoState; }, get session() { return session; }, trackPhase, moverX };
+  const debug = { world, get cars() { return cars; }, get me() { return me; }, get phase() { return phase; }, get phaseT() { return phaseT; }, get ufo() { return ufoState; }, get session() { return session; }, get offer() { return offerT; }, trackPhase, moverX, revive, giveUp };
   window.__crossy = debug;
-  return { start, stop, destroy, onNetMessage, playerLeft, debug };
+  return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };
 }

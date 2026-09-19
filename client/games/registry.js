@@ -63,7 +63,11 @@ export const GAMES = [
   {
     id: 'crossy', title: L('农场过马路', 'Crossy Farm Car'), tagline: L('跳过马路 · 躲开牛群 · 活到最后', 'HOP THE ROADS · DODGE THE HERDS · LAST CAR STANDING'),
     minPlayers: 1, maxPlayers: 8,
-    options: [],
+    options: [
+      { key: 'target', type: 'select', label: L('终点', 'FINISH LINE'), default: 0, choices: [{ value: 0, label: L('无尽 · 活到最后', 'Endless · last car standing') }, { value: 100, label: L('第 100 行', 'Row 100') }, { value: 200, label: L('第 200 行', 'Row 200') }, { value: 300, label: L('第 300 行', 'Row 300') }] },
+      { key: 'ramp', type: 'select', label: L('难度爬升', 'DIFFICULTY RAMP'), default: 'normal', choices: [{ value: 'easy', label: L('平缓', 'Easy') }, { value: 'normal', label: L('普通', 'Normal') }, { value: 'hard', label: L('陡峭', 'Hard') }] },
+      { key: 'coins', type: 'bool', label: L('金币(5 枚可复活一次)', 'COINS (5 BUY ONE REVIVE)'), default: true },
+    ],
     load: () => import('./crossy/index.js'),
   },
   {
