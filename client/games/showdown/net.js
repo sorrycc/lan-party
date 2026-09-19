@@ -1,10 +1,10 @@
 /* Sundown Showdown: the roster and the wire format, kept free of three.js so node can test them.
 
    The host simulates everything (sim.js) and sends 30 Hz `s` snapshots; clients send what they want to do.
-   A snapshot: { t: 's', mid, q, st, tm, pt, g: [radius, stage], p: [brawler...], pk: [[cls, locked]...], ev: [[name, ...args]...], res }
+   A snapshot: { t: 's', mid, q, st, tm, pt, g: [radius, stage, timer, shrinking], p: [brawler...], pk: [[cls, locked]...], ev: [[name, ...args]...], res }
      mid  the round's shared id (the shell's seed) so a straggler from the last match is ignored after PLAY AGAIN
      q    sequence number, st index into STATES, tm seconds into the match, pt seconds left to pick a brawler
-     g    the poison gas: its radius and which shrink it is on
+     g    the poison gas: its radius, which shrink it is on, the seconds left of this phase and 1 while it is closing in
      p    one packed brawler per roster slot (packBrawler / unpackBrawler)
      pk   while picking: every slot's brawler class and whether it is locked in
      ev   what happened since the last snapshot (shots, bombs, damage, deaths, crates, cubes); every machine turns the

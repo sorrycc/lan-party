@@ -15,15 +15,17 @@ import { E, CRATE, GRASS, BOX, N, ti, tx, wx, blocksMove, blocksShot } from './m
 
 export const STEP = 1 / 60, PICK_TIME = 20, COUNT_AT = [.2, 1.05, 1.9], GO_AT = 2.75, END_TIME = 1.3, CUBE_HP = 400, CUBE_FLY = .45;
 export const GAS_R = [52, 31, 23, 16, 10, 5, 1.5];
+/* the four brawlers. `bars` are the pick card's health, range and damage; speed and reload are measured across the four
+   (statBars). Their names and words are in strings.js under the class id. */
 export const CLASSES = [
-  { id: 'buck', name: 'BUCK', role: 'Shotgunner', color: 0xe8503a, hat: 0x7a3b12, hp: 3800, speed: 7.3, range: 8.5, dmg: 220, pellets: 5, spread: .46, reload: 1.45, cd: .42, bspeed: 26, need: 2200,
-    bars: [.58, .42, .78], atk: 'Buckshot: a cone of 5 pellets. Brutal up close.', sup: 'SUPER: Mega Blast, 9 pellets that shove foes back and smash crates.' },
-  { id: 'viper', name: 'VIPER', role: 'Sharpshooter', color: 0x3d7bff, hat: 0x1d2c5e, hp: 2600, speed: 7.3, range: 17, dmg: 760, pellets: 1, spread: 0, reload: 1.9, cd: .5, bspeed: 42, need: 2300,
-    bars: [.38, 1, .7], atk: 'Long Shot: one fast, long-range slug.', sup: 'SUPER: Railshot, a huge slug through every foe and crate in its way.' },
-  { id: 'boomer', name: 'BOOMER', role: 'Bomb Lobber', color: 0x9b4dff, hat: 0x2b2b2b, hp: 3000, speed: 6.9, range: 12, dmg: 700, radius: 2.5, reload: 1.85, cd: .55, need: 2400, lob: true,
-    bars: [.45, .7, .85], atk: 'Lob Bomb: arcs over walls, explodes in an area.', sup: 'SUPER: Carpet Bomb, a cluster of 6 bombs rains down.' },
-  { id: 'brick', name: 'BRICK', role: 'Melee Tank', color: 0x2fbf71, hat: 0xd9d9d9, hp: 6400, speed: 8.1, range: 3.8, dmg: 600, arc: 1.9, reload: .85, cd: .34, need: 2700, melee: true,
-    bars: [1, .2, .65], atk: 'Hammer Swing: a wide melee arc. Fast reload.', sup: 'SUPER: Bull Rush, charge through crates, slamming everyone in the way.' },
+  { id: 'buck', color: 0xe8503a, hat: 0x7a3b12, hp: 3800, speed: 7.3, range: 8.5, dmg: 220, pellets: 5, spread: .46, reload: 1.45, cd: .42, bspeed: 26, need: 2200,
+    bars: [.58, .42, .78] },
+  { id: 'viper', color: 0x3d7bff, hat: 0x1d2c5e, hp: 2600, speed: 7.3, range: 17, dmg: 760, pellets: 1, spread: 0, reload: 1.9, cd: .5, bspeed: 42, need: 2300,
+    bars: [.38, 1, .7] },
+  { id: 'boomer', color: 0x9b4dff, hat: 0x2b2b2b, hp: 3000, speed: 6.9, range: 12, dmg: 700, radius: 2.5, reload: 1.85, cd: .55, need: 2400, lob: true,
+    bars: [.45, .7, .85] },
+  { id: 'brick', color: 0x2fbf71, hat: 0xd9d9d9, hp: 6400, speed: 8.1, range: 3.8, dmg: 600, arc: 1.9, reload: .85, cd: .34, need: 2700, melee: true,
+    bars: [1, .2, .65] },
 ];
 /* how a bullet looks and what it goes through: buckshot, a slug, and the two supers */
 export const BULLETS = [
@@ -32,8 +34,16 @@ export const BULLETS = [
 ];
 /* how far in front of a brawler its weapon ends, per class: where a bullet starts and a muzzle flashes */
 export const MUZZLE = [1.6, 2.3, .9, 1.4];
-/* CPU skill: seconds before the first shot at a new target, aim error, the pause between shots, how well it leads */
-export const SKILL = { easy: { react: .95, err: 1.7, cad: 1.45, lead: .3 }, normal: { react: .55, err: 1, cad: 1, lead: 1 }, hard: { react: .3, err: .5, cad: .7, lead: 1.2 } };
+/* the pick card's five bars, 0..1: health, range, damage as set above, then speed and reload speed spread over the four brawlers
+   (the slowest a quarter full, the fastest full) */
+const spread = (v, vs) => { const lo = Math.min(...vs), hi = Math.max(...vs); return hi > lo ? .25 + .75 * (v - lo) / (hi - lo) : 1; };
+export const statBars = c => [...c.bars, spread(c.speed, CLASSES.map(k => k.speed)), spread(-c.reload, CLASSES.map(k => -k.reload))];
+/* CPU skill: seconds before the first shot at a new target, aim error, the pause between shots, how well it leads, and bombs:
+   how long before one lands it is noticed (`see`) and the odds it is dodged at all (`dodge`) */
+export const SKILL = { easy: { react: .95, err: 1.7, cad: 1.45, lead: .3, see: .4, dodge: .35 }, normal: { react: .55, err: 1, cad: 1, lead: 1, see: .7, dodge: .8 }, hard: { react: .3, err: .5, cad: .7, lead: 1.2, see: 1.1, dodge: 1 } };
+/* out of the fight (not hurt for HEAL_DELAY s, not attacking for HEAL_IDLE s) a brawler heals HEAL_RATE of its max health a
+   second, ramping up to it over HEAL_RAMP s. The same for CPU brawlers and people. */
+export const HEAL_DELAY = 3, HEAL_IDLE = 2.5, HEAL_RATE = .07, HEAL_RAMP = 1.5;
 
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v, lerp = (a, b, t) => a + (b - a) * t;
 const r2 = v => Math.round(v * 100) / 100;
@@ -58,7 +68,7 @@ export function createSim({ map, roster, opts = {}, online = false, rand = Math.
       const cls = S.picks[i].cls, c = CLASSES[cls], s = sp[i % sp.length], a = Math.atan2(-s.x, -s.z);
       return { i, pid: slot.pid, human: slot.human, name: slot.name, cls, c, x: s.x, z: s.z, kx: 0, kz: 0, dir: a, mvx: 0, mvz: 0, hp: c.hp, maxhp: c.hp, cubes: 0, ammo: 3, cd: 0, sup: 0, alive: true,
         inGrass: false, reveal: 0, lastHurt: -9, lastAct: -9, kills: 0, r: .78, dash: null, gasTick: 0, dealt: 0, rank: 0, ack: 0, in: { mx: 0, mz: 0, a, d: 6, fire: false, q: 0 }, fireQ: null, supQ: null,
-        ai: { think: R() * .3, target: null, strafe: R() < .5 ? 1 : -1, strafeT: 0, aimErr: 0, mode: 'roam', wander: null, wp: null, box: null, react: 0, fireT: 0, stuck: 0, lx: s.x, lz: s.z } };
+        ai: { think: R() * .3, target: null, strafe: R() < .5 ? 1 : -1, strafeT: 0, aimErr: 0, mode: 'roam', wander: null, wp: null, box: null, react: 0, fireT: 0, stuck: 0, lx: s.x, lz: s.z, bombs: new Map() } };
     });
     S.state = 'countdown'; S.countT = 0; S.countN = 0; S.time = 0;
   }
@@ -137,7 +147,7 @@ export function createSim({ map, roster, opts = {}, online = false, rand = Math.
   }
   function spawnBomb(o, x1, z1, dmg, radius, delay = 0) {
     const d = Math.hypot(x1 - o.x, z1 - o.z), dur = .55 + d * .035;
-    S.bombs.push({ o, x1, z1, t: -delay, dur, dmg, radius }); emit('o', o.i, r2(o.x), r2(o.z), r2(x1), r2(z1), r2(dur), r2(3.5 + d * .3), radius, r2(delay));
+    S.bombs.push({ id: nextId++, o, x1, z1, t: -delay, dur, dmg, radius }); emit('o', o.i, r2(o.x), r2(o.z), r2(x1), r2(z1), r2(dur), r2(3.5 + d * .3), radius, r2(delay));
   }
   function updateBombs(dt) {
     for (let i = S.bombs.length - 1; i >= 0; i--) {
@@ -247,11 +257,30 @@ export function createSim({ map, roster, opts = {}, online = false, rand = Math.
     ai.wp = goal ? (direct ? goal : pathStep(b, goal.x, goal.z)) : null;
     if (ai.wp && Math.hypot(b.x - ai.lx, b.z - ai.lz) < .25) { ai.stuck++; if (ai.stuck > 3) { ai.strafe *= -1; ai.wander = null; } } else ai.stuck = 0; ai.lx = b.x; ai.lz = b.z;
   }
+  /* a telegraphed bomb: the red ring on the ground. A bomb about to land within reach of this bot (`see` seconds or less, which is
+     how early the skill notices) is dodged or not once, by the skill's odds; a dodge runs straight out of the blast, or the
+     nearest free way round a wall. Returns the way to run, or null. */
+  function dodgeBomb(b) {
+    const ai = b.ai; let best = null, bt = 1e9;
+    for (const q of S.bombs) {
+      if (q.o === b) continue; const left = q.dur - q.t, d = Math.hypot(b.x - q.x1, b.z - q.z1); if (left > sk.see || d > q.radius + b.r + 1) continue;
+      if (!ai.bombs.has(q.id)) ai.bombs.set(q.id, R() < sk.dodge); if (ai.bombs.get(q.id) && left < bt) { bt = left; best = { q, d }; }
+    }
+    if (ai.bombs.size > 24) for (const k of ai.bombs.keys()) { if (!S.bombs.some(q => q.id === k)) ai.bombs.delete(k); }
+    if (!best) return null;
+    const { q, d } = best, base = d > .05 ? Math.atan2(b.x - q.x1, b.z - q.z1) : Math.atan2(-b.x, -b.z) + ai.strafe, gasR = S.gas.r;
+    for (const off of [0, .6, -.6, 1.2, -1.2, 1.8, -1.8]) {
+      const a = base + off * ai.strafe, x = b.x + Math.sin(a) * 1.6, z = b.z + Math.cos(a) * 1.6;
+      if (!blocksMove(map.tileAt(x, z)) && (Math.hypot(x, z) < gasR || off === 1.8)) return { x: Math.sin(a), z: Math.cos(a) };
+    }
+    return { x: Math.sin(base), z: Math.cos(base) };
+  }
   function updateBot(b, dt) {
     const ai = b.ai, c = b.c; ai.think -= dt; if (ai.think <= 0) { ai.think = .2; think(b); }
     if (b.dash) return;
     let mx = 0, mz = 0; if (ai.wp) { const dx = ai.wp.x - b.x, dz = ai.wp.z - b.z, d = Math.hypot(dx, dz); if (d > .3) { mx = dx / d; mz = dz / d; } }
-    const sp = c.speed * (ai.mode === 'roam' || ai.mode === 'box' ? .85 : 1), ox = b.x, oz = b.z; map.moveBy(b, mx * sp * dt, mz * sp * dt); b.mvx = (b.x - ox) / dt; b.mvz = (b.z - oz) / dt;
+    const run = S.bombs.length ? dodgeBomb(b) : null; if (run) { mx = run.x; mz = run.z; }
+    const sp = c.speed * (run || !(ai.mode === 'roam' || ai.mode === 'box') ? 1 : .85), ox = b.x, oz = b.z; map.moveBy(b, mx * sp * dt, mz * sp * dt); b.mvx = (b.x - ox) / dt; b.mvz = (b.z - oz) / dt;
     const e = ai.target; ai.fireT -= dt;
     if (e && e.alive) {
       ai.react += dt; const dx = e.x - b.x, dz = e.z - b.z, d = Math.hypot(dx, dz), lead = (c.melee ? 0 : c.lob ? (.55 + d * .035) * .8 : d / c.bspeed * .75) * sk.lead;
@@ -294,7 +323,8 @@ export function createSim({ map, roster, opts = {}, online = false, rand = Math.
     if (b.kx || b.kz) { map.moveBy(b, b.kx * dt, b.kz * dt); const f = Math.exp(-7 * dt); b.kx *= f; b.kz *= f; if (Math.abs(b.kx) + Math.abs(b.kz) < .05) b.kx = b.kz = 0; }
     for (const o of S.brawlers) { if (o === b || !o.alive) continue; const dx = b.x - o.x, dz = b.z - o.z, d = Math.hypot(dx, dz); if (d < 1.5 && d > .001) { const k = (1.5 - d) * .5; b.x += dx / d * k; b.z += dz / d * k; map.collide(b); } } // bodies shoulder each other apart
     b.cd -= dt; if (b.ammo < 3) b.ammo = Math.min(3, b.ammo + dt / b.c.reload); b.reveal -= dt; b.inGrass = map.tileAt(b.x, b.z) === GRASS;
-    if (S.time - b.lastHurt > 3 && S.time - b.lastAct > 2.5 && b.hp < b.maxhp) b.hp = Math.min(b.maxhp, b.hp + b.maxhp * .14 * dt); // out of the fight for a moment: heal
+    const calm = Math.min(S.time - b.lastHurt - HEAL_DELAY, S.time - b.lastAct - HEAL_IDLE); // out of the fight for a moment: heal, slowly at first
+    if (calm > 0 && b.hp < b.maxhp) b.hp = Math.min(b.maxhp, b.hp + b.maxhp * HEAL_RATE * Math.min(1, calm / HEAL_RAMP) * dt);
     if (Math.hypot(b.x, b.z) > S.gas.r) { b.gasTick -= dt; if (b.gasTick <= 0) { b.gasTick = .6; damage(b, (260 + S.gas.stage * 110) * (1 + b.cubes * .05), null, b.x, b.z, true); } }
   }
   function updateGas(dt) {

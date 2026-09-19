@@ -5,7 +5,13 @@
    colour), CPU brawlers fill the rest when the host leaves "fill with CPU" on. Every round starts with everybody
    picking a brawler (20 seconds online, or until all are locked in), then a countdown, then the fight: break power
    boxes for cubes (+400 health and +10% damage each), hide in tall grass, charge the super by dealing damage and keep
-   out of the gas as it closes in while day turns to night. A dead player watches whoever beat them.
+   out of the gas as it closes in while day turns to night (the clock at the top says when it moves next, and an arrow on the
+   screen's edge points the way back from out in it). A drone under the fight climbs with every closing of the gas, and a
+   heartbeat joins it when three are left. A dead player watches whoever beat them, and A / D (or ◀ ▶) switch to anyone standing.
+   CPU brawlers step out of a bomb's marked landing spot, the better ones sooner and more often.
+
+   Words: strings.js (Chinese by default), redrawn on a language change (words()). A guest's result card and ☰ menu (Esc on a
+   keyboard) ask for a rematch (hooks.onRematch) or leave the room (hooks.onLeave); the host's card shows rematchVotes().
 
    Netcode: host-authoritative. The host runs sim.js (every body, bullet, bomb, cube, the gas and the CPU brains) and
    sends 30 Hz `s` snapshots (net.js: the packed brawlers, the gas and the events since the last one). Clients send their
@@ -30,45 +36,58 @@ import { createLoop } from '../../core/loop.js';
 import { createTicker } from '../../core/ticker.js';
 import { nowSec, pushSnap, sampleSnaps } from '../../core/interp.js';
 import { T, N, HALF, E, STONE, CRATE, WATER, GRASS, BOX, WALL, ti, wx, blocksShot, makeMap } from './map.js';
-import { CLASSES, BULLETS, MUZZLE, GAS_R, STEP, CUBE_FLY, createSim, angDiff, hiddenFrom } from './sim.js';
+import { CLASSES, BULLETS, MUZZLE, GAS_R, STEP, CUBE_FLY, createSim, angDiff, hiddenFrom, statBars } from './sim.js';
+import { makeT, onLang, nextLang } from '../../core/i18n.js';
+import { STR } from './strings.js';
 import { buildRoster, packBrawler, unpackBrawler, createSnapGuard, cleanInput, cleanShot, cleanPick, STATES } from './net.js';
 
+const TX = makeT(STR); // the words (`T` is the tile size)
+const CJK = '"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei"'; // canvas text falls back to these for Chinese
 const NET_HZ = 30, INTERP = 0.08, MINE = 0x38c8ff, FOE = 0xff4444, PICK_KEY = 'lan_showdown_brawler';
 const R = Math.random, RR = (a, b) => a + R() * (b - a);
 const smooth = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
 const r2 = v => Math.round(v * 100) / 100;
 
+/* `data-t` elements hold one word each from strings.js, filled in (and again on a language change) by words() */
 const HTML = `
 <canvas class="gl"></canvas><canvas class="ov"></canvas>
 <div class="hud" data-hud hidden>
   <div class="vign" data-vign></div>
-  <div class="alive stroke"><span>☠ <em data-alive>10</em> LEFT</span><span class="cube">◆ <span data-cubes>0</span></span><span>⚔ <span data-kills>0</span></span></div>
-  <div class="clock stroke" data-clock>☀ DAY</div>
+  <div class="alive stroke"><span>☠ <em data-alive>10</em> <span data-t="left"></span></span><span class="cube">◆ <span data-cubes>0</span></span><span>⚔ <span data-kills>0</span></span></div>
+  <div class="clock stroke"><span data-clock></span><span class="gast" data-gast></span></div>
   <div class="feed" data-feed></div>
-  <div class="banner stroke" data-banner>☣ POISON GAS IS CLOSING IN! ☣</div>
+  <div class="banner stroke" data-banner data-t="gasBanner"></div>
   <div class="count stroke" data-count></div>
   <div class="spec stroke" data-spec hidden></div>
   <div class="bottom"><div class="ammo" data-ammo><i><u></u></i><i><u></u></i><i><u></u></i></div><div class="hpbar" data-hp><u></u><span class="stroke"></span></div><div class="keys" data-keys></div></div>
   <div class="super" data-super><span class="stroke"></span></div>
 </div>
-<div class="ctl pad" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl">DRAG TO MOVE</div></div>
-<div class="ctl stick fire" data-fire><div class="knob"></div><b>FIRE</b></div>
-<div class="ctl stick sup" data-sup><div class="knob"></div><b>SUPER</b></div>
+<div class="specnav" data-specnav hidden><button class="btn" type="button" data-sprev>◀</button><button class="btn" type="button" data-snext>▶</button></div>
+<div class="ctl pad" data-pad><div class="ring"><div class="knob"></div></div><div class="lbl" data-t="dragMove"></div></div>
+<div class="ctl stick fire" data-fire><div class="knob"></div><b data-t="fire"></b></div>
+<div class="ctl stick sup" data-sup><div class="knob"></div><b data-t="superBtn"></b></div>
 <div class="ctl menu-btn" data-menu>☰</div>
 <div class="pick" data-pick>
-  <div class="title stroke">SUNDOWN SHOWDOWN<span>PICK YOUR BRAWLER</span></div>
+  <div class="title stroke"><span data-t="title"></span><span data-t="pickYours"></span></div>
   <div class="cards" data-cards></div>
-  <button class="btn primary" type="button" data-lock>LOCK IN</button>
+  <button class="btn primary" type="button" data-lock></button>
   <div class="pstat" data-pstat></div>
 </div>
-<div class="end" data-end hidden><div class="in"><div class="endT stroke" data-endt></div><div class="endR stroke" data-endr></div><table data-table></table><div class="foot" data-foot></div></div></div>
-<div class="overlay pause" data-pause><div class="mcard"><h1>MENU</h1><div data-pause-btns></div></div></div>
-<div class="overlay rotate"><div><div class="phone">📱</div>ROTATE YOUR DEVICE<small>SUNDOWN SHOWDOWN PLAYS IN LANDSCAPE</small></div></div>`;
+<div class="end" data-end hidden><div class="in"><div class="endT stroke" data-endt></div><div class="endR stroke" data-endr></div><table data-table></table><div class="votes" data-votes hidden></div><div class="foot" data-foot></div></div></div>
+<div class="overlay pause" data-pause><div class="mcard"><h1 data-t="menu"></h1><div data-pause-btns></div></div></div>
+<div class="overlay rotate"><div><div class="phone">📱</div><span data-t="rotate"></span><small data-t="rotateSub"></small></div></div>`;
 
-/* ============================================================ sound: the original's little synth on the shell's shared AudioContext */
+/* ============================================================ sound: the original's little synth on the shell's shared AudioContext,
+   and a tension bed under the fight (music()): a low drone that climbs two semitones, opens up and grows louder each time the
+   gas closes in, and a heartbeat once three or fewer are left, quicker the fewer. The drone is two detuned saws through a
+   breathing lowpass on its own bus; the heartbeat is scheduled a little ahead from a timer, like hog's sequencer, and while
+   muted or not wanted its clock just keeps up with the audio clock, so no beats pile up to burst out on unmute. */
 function createSfx(audio) {
-  let noiseBuf = null;
-  const off = audio.whenReady(ctx => { noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate); const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; });
+  let noiseBuf = null, bus = null, drone = null, hbNext = 0, hbTimer = 0; const mus = { on: false, stage: -1, left: 99 };
+  const off = audio.whenReady(ctx => {
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate); const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    if (!bus) { bus = ctx.createGain(); bus.gain.value = 0; bus.connect(audio.master); } if (!hbTimer) hbTimer = setInterval(heartbeat, 100);
+  });
   function tone(f, dur, type = 'square', vol = .2, f2 = null, delay = 0) {
     const ctx = audio.ctx; if (!ctx || audio.muted || vol < .004) return; const t = ctx.currentTime + delay, o = ctx.createOscillator(), g = ctx.createGain();
     o.type = type; o.frequency.setValueAtTime(f, t); if (f2) o.frequency.exponentialRampToValueAtTime(Math.max(20, f2), t + dur);
@@ -79,8 +98,36 @@ function createSfx(audio) {
     s.buffer = noiseBuf; s.loop = true; fl.type = 'lowpass'; fl.frequency.setValueAtTime(freq, t); if (f2) fl.frequency.exponentialRampToValueAtTime(f2, t + dur);
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + dur); s.connect(fl); fl.connect(g); g.connect(audio.master); s.start(t, Math.random()); s.stop(t + dur + .02);
   }
+  function tuneDrone(ctx) {
+    const t = ctx.currentTime, st = Math.max(0, mus.stage), f = 73.4 * 2 ** (st * 2 / 12); // D2, then up a tone a stage
+    drone.o1.frequency.setTargetAtTime(f, t, .9); drone.o2.frequency.setTargetAtTime(f * 1.5 * 1.006, t, .9); drone.f.frequency.setTargetAtTime(260 + st * 110, t, .9);
+    drone.lfoG.gain.setTargetAtTime(90 + st * 30, t, .9); bus.gain.setTargetAtTime(.05 + st * .016, t, 1.2);
+  }
+  function startDrone(ctx) {
+    if (drone) return; const o1 = ctx.createOscillator(), o2 = ctx.createOscillator(), f = ctx.createBiquadFilter(), lfo = ctx.createOscillator(), lfoG = ctx.createGain(), g = ctx.createGain();
+    o1.type = o2.type = 'sawtooth'; f.type = 'lowpass'; f.Q.value = 4; lfo.frequency.value = .18; g.gain.value = .5;
+    lfo.connect(lfoG); lfoG.connect(f.frequency); o1.connect(f); o2.connect(f); f.connect(g); g.connect(bus); for (const o of [o1, o2, lfo]) o.start();
+    drone = { o1, o2, f, lfo, lfoG, g }; mus.stage = -1;
+  }
+  function stopDrone() {
+    const ctx = audio.ctx; if (!drone || !ctx) return; const d = drone, t = ctx.currentTime; drone = null;
+    bus.gain.cancelScheduledValues(t); bus.gain.setTargetAtTime(0, t, .35); for (const o of [d.o1, d.o2, d.lfo]) o.stop(t + 1.6); setTimeout(() => d.g.disconnect(), 1800);
+  }
+  function heartbeat() {
+    const ctx = audio.ctx; if (!ctx) return; const now = ctx.currentTime;
+    if (!mus.on || mus.left > 3 || mus.left < 2 || audio.muted) { hbNext = now + .1; return; }
+    const period = 60 / (mus.left === 2 ? 104 : 84); if (hbNext < now) hbNext = now + .05;
+    while (hbNext < now + .3) { const d = hbNext - now; tone(64, .18, 'sine', .55, 36, d); tone(56, .15, 'sine', .38, 32, d + .19); hbNext += period; }
+  }
+  /* the tension bed, told every frame: is a fight on, which gas stage, how many are left */
+  function music(on, stage, left) {
+    const ctx = audio.ctx; if (!ctx || !bus) return; mus.left = left;
+    if (on !== mus.on) { mus.on = on; if (on) startDrone(ctx); else stopDrone(); }
+    if (on && drone && stage !== mus.stage) { mus.stage = stage; tuneDrone(ctx); }
+  }
   return {
-    dispose: off,
+    music,
+    dispose: () => { off(); mus.on = false; stopDrone(); clearInterval(hbTimer); hbTimer = 0; if (bus) setTimeout(() => bus.disconnect(), 1800); },
     shotgun: v => { noise(.16, .5 * v, 2600, 300); tone(140, .12, 'sawtooth', .2 * v, 50); },
     rifle: v => { noise(.09, .35 * v, 5000, 900); tone(900, .14, 'square', .16 * v, 160); },
     lob: v => { tone(260, .22, 'sine', .25 * v, 520); noise(.08, .15 * v, 900); },
@@ -107,10 +154,10 @@ export async function create({ mount, audio, send, hooks }) {
   const touch = isCoarse(); // phones and tablets: twin sticks and ☰ appear, the keyboard line goes, and rendering gets lighter
   const root = document.createElement('div'); root.className = 'showdown' + (touch ? ' touch' : ''); root.innerHTML = HTML; mount.appendChild(root);
   const $ = sel => root.querySelector(sel);
-  const dom = { hud: $('[data-hud]'), vign: $('[data-vign]'), alive: $('[data-alive]'), cubes: $('[data-cubes]'), kills: $('[data-kills]'), clock: $('[data-clock]'), feed: $('[data-feed]'), banner: $('[data-banner]'),
+  const dom = { hud: $('[data-hud]'), vign: $('[data-vign]'), alive: $('[data-alive]'), cubes: $('[data-cubes]'), kills: $('[data-kills]'), clock: $('[data-clock]'), gast: $('[data-gast]'), feed: $('[data-feed]'), banner: $('[data-banner]'),
     count: $('[data-count]'), spec: $('[data-spec]'), ammo: [...$('[data-ammo]').children], hp: $('[data-hp]'), keys: $('[data-keys]'), sup: $('[data-super]'), pick: $('[data-pick]'), cards: $('[data-cards]'), lock: $('[data-lock]'),
     pstat: $('[data-pstat]'), end: $('[data-end]'), endT: $('[data-endt]'), endR: $('[data-endr]'), table: $('[data-table]'), foot: $('[data-foot]'), pad: $('[data-pad]'), fire: $('[data-fire]'), supStick: $('[data-sup]'),
-    menuBtn: $('[data-menu]'), pause: $('[data-pause]'), pauseBtns: $('[data-pause-btns]') };
+    menuBtn: $('[data-menu]'), pause: $('[data-pause]'), pauseBtns: $('[data-pause-btns]'), votes: $('[data-votes]'), specnav: $('[data-specnav]') };
   const sfx = createSfx(audio);
 
   /* ============================================================ renderer / scene */
@@ -343,7 +390,7 @@ export async function create({ mount, audio, send, hooks }) {
      `B` holds one view brawler per roster slot: on the host a copy of the simulation's brawler each frame, on a client
      the snapshots (interpolated, or predicted for its own). Bullets, bombs and cubes here are only pictures: they fly
      from their launch events on every machine, and what they hit is the host's call. */
-  const G = { state: null, time: 0, night: 0, gasR: GAS_R[0], gasTo: GAS_R[0], gasStage: 0, slow: 1, picks: [], pickT: Infinity, result: null, spectate: -1 };
+  const G = { state: null, time: 0, night: 0, gasR: GAS_R[0], gasTo: GAS_R[0], gasStage: 0, gasT: 0, gasShrink: false, slow: 1, picks: [], pickT: Infinity, result: null, spectate: -1 };
   let session = null, isHost = false, online = false, hostId = null, myId = null, sim = null, roster = [], B = [], me = null, guard = null, seq = 0, outEvents = [];
   const bullets = new Map(), bombs = [], cubes = new Map();
   const bulletGeo = new THREE.SphereGeometry(1, 8, 6), bombGeo = new THREE.IcosahedronGeometry(.42, 1), bombMat = new THREE.MeshStandardMaterial({ color: 0x222228, flatShading: true, emissive: 0xff5a1a, emissiveIntensity: .6 });
@@ -374,12 +421,12 @@ export async function create({ mount, audio, send, hooks }) {
     const b = B[ev[1]];
     switch (ev[0]) {
       case 'c': showCount(String(ev[1]), '#ffd23f'); sfx.beep(); break;
-      case 'go': showCount('BRAWL!', '#ff6b35'); sfx.go(); shake = .5; break;
+      case 'go': showCount(TX('brawl'), '#ff6b35'); sfx.go(); shake = .5; break;
       case 'a': { // an attack: the flash, the swing, the noise; the bullets and bombs have their own events
         if (!b || b.cls < 0) break; const c = CLASSES[b.cls], a = ev[2], v = att(b.x, b.z) * (b.mine ? 1 : .7), mz = MUZZLE[b.cls] * .8, mx = b.x + Math.sin(a) * mz, mzz = b.z + Math.cos(a) * mz;
         if (!b.mine) b.dir = a; b.revealed = true;
         if (ev[3]) {
-          b.recoil = 1.5; sfx.super(v); fx(ringPool, b.x, .2, b.z, .5, 4, .5, 0xffd23f, 3); burst(b.x, 1, b.z, 16, 0xffd23f, 8, .2, 3.5, 8, .6); dmgNum(b.x, 3.8, b.z, 'SUPER!', '#ffd23f', true);
+          b.recoil = 1.5; sfx.super(v); fx(ringPool, b.x, .2, b.z, .5, 4, .5, 0xffd23f, 3); burst(b.x, 1, b.z, 16, 0xffd23f, 8, .2, 3.5, 8, .6); dmgNum(b.x, 3.8, b.z, TX('super'), '#ffd23f', true);
           if (c.id === 'buck') { sfx.shotgun(v); shake += b.mine ? .6 : .2 * v; } else if (c.id === 'viper') { sfx.rifle(v); shake += b.mine ? .5 : .15 * v; }
           break;
         }
@@ -413,7 +460,9 @@ export async function create({ mount, audio, send, hooks }) {
         if (!b) break; const src = B[ev[2]]; b.alive = false; b.hp = 0; b.rank = ev[3]; if (b.model) b.model.root.visible = false;
         burst(b.x, 1.2, b.z, 30, b.color, 10, .34, 1.8, 10, 1); burst(b.x, 1.2, b.z, 16, 0xffffff, 8, .2, 3.5, 9, .6); burst(b.x, .5, b.z, 10, 0x3a3350, 6, .3, 1, 6, .9);
         fx(ringPool, b.x, .2, b.z, .5, 5, .55, 0xffffff, 3); fx(ballPool, b.x, 1.2, b.z, .4, 2.4, .3, b.color, 3); shake = Math.min(1.4, shake + .6 * att(b.x, b.z)); sfx.die(att(b.x, b.z));
-        feed(src || null, b); if (b.mine) { G.spectate = src ? src.i : -1; superAim = false; tc.releaseAll(); sfx.lose(); } break;
+        feed(src || null, b); if (b.mine) { G.spectate = src ? src.i : -1; superAim = false; tc.releaseAll(); sfx.lose(); }
+        else if (me && !me.alive && G.spectate === b.i && src && src.alive) G.spectate = src.i; // the one I watched fell: watch whoever did it
+        break;
       }
       case 'bd': {
         const q = boxV[ev[1]]; if (!q || q.dead) break; const [, , amount, hp, by] = ev, { x, z } = q.q; q.hp = hp; q.flash = 1; q.shake = .25;
@@ -465,14 +514,14 @@ export async function create({ mount, audio, send, hooks }) {
 
   /* ============================================================ netcode */
   function packSnapshot() {
-    const m = { t: 's', mid: session.seed >>> 0, q: ++seq, st: STATES.indexOf(sim.state), tm: r2(sim.time), g: [r2(sim.gas.r), sim.gas.stage], ev: outEvents }; outEvents = [];
+    const m = { t: 's', mid: session.seed >>> 0, q: ++seq, st: STATES.indexOf(sim.state), tm: r2(sim.time), g: [r2(sim.gas.r), sim.gas.stage, r2(Math.max(0, sim.gas.timer)), sim.gas.phase === 'shrink' ? 1 : 0], ev: outEvents }; outEvents = [];
     if (sim.state === 'pick') { m.pt = Number.isFinite(sim.pickT) ? r2(sim.pickT) : -1; m.pk = sim.picks.map(p => [p.cls, p.ok ? 1 : 0]); } else m.p = sim.brawlers.map(packBrawler);
     if (sim.state === 'result') m.res = sim.result;
     return m;
   }
   function applySnapshot(m) {
     if (!guard.accept(m)) return; const st = STATES[m.st]; if (!st) return; const now = nowSec();
-    G.time = +m.tm || 0; if (Array.isArray(m.g)) { G.gasTo = +m.g[0] || 0; G.gasStage = m.g[1] | 0; }
+    G.time = +m.tm || 0; if (Array.isArray(m.g)) { G.gasTo = +m.g[0] || 0; G.gasStage = m.g[1] | 0; G.gasT = +m.g[2] || 0; G.gasShrink = !!m.g[3]; }
     if (Array.isArray(m.pk)) { G.picks = m.pk.map(p => ({ cls: p[0] | 0, ok: !!p[1] })); G.pickT = m.pt >= 0 ? +m.pt : Infinity; }
     (m.p || []).forEach((e, i) => {
       const b = B[i], s = unpackBrawler(e); if (!b || !s) return;
@@ -521,7 +570,7 @@ export async function create({ mount, audio, send, hooks }) {
   function syncBrawlers(dt) {
     if (isHost) {
       for (const s of sim.brawlers) { const b = B[s.i]; ensureModel(b, s.cls); b.placed = true; Object.assign(b, { x: s.x, z: s.z, dir: s.dir, mvx: s.mvx, mvz: s.mvz, hp: s.hp, maxhp: s.maxhp, cubes: s.cubes, ammo: s.ammo, sup: s.sup, kills: s.kills, alive: s.alive, inGrass: s.inGrass, revealed: s.reveal > 0, dash: !!s.dash, human: s.human }); }
-      G.time = sim.time; G.gasTo = G.gasR = sim.gas.r; G.gasStage = sim.gas.stage; return;
+      G.time = sim.time; G.gasTo = G.gasR = sim.gas.r; G.gasStage = sim.gas.stage; G.gasT = sim.gas.timer; G.gasShrink = sim.gas.phase === 'shrink'; return;
     }
     const rt = nowSec() - INTERP;
     for (const b of B) {
@@ -584,10 +633,15 @@ export async function create({ mount, audio, send, hooks }) {
     for (const q of lanterns) q.lamp.material.color.setRGB(1, .62, .22).multiplyScalar(glow(lerp(.7, 2.6, L) + Math.sin(G.time * 9 + q.ph) * .2 * L));
     myLamp.intensity = me && me.alive ? L * 10 : 0; if (me) myLamp.position.set(me.x, 3.4, me.z);
     waterMat.emissiveIntensity = lerp(.5, .9, n) + Math.sin(G.time * 2) * .12; grassU.value = G.time;
-    const ct = n < .25 ? '☀ DAY' : n < .55 ? '🌇 SUNSET' : n < .82 ? '🌆 DUSK' : '🌙 NIGHT'; if (ct !== clockText) { clockText = ct; dom.clock.textContent = ct; }
+    const ct = TX(n < .25 ? 'day' : n < .55 ? 'sunset' : n < .82 ? 'dusk' : 'night'); if (ct !== clockText) { clockText = ct; dom.clock.textContent = ct; }
   }
   const cf = new THREE.Vector3(), camOff = new THREE.Vector3(0, 37, 25);
   const watched = () => { if (me && me.alive) return me; const k = B[G.spectate]; return k && k.alive ? k : B.find(b => b.alive && b.human) || B.find(b => b.alive) || null; };
+  /* a dead player picks whom to watch: A / D or the arrow keys, or the ◀ ▶ buttons */
+  function cycleWatch(dir) {
+    if (!me || me.alive || (G.state !== 'play' && G.state !== 'end')) return; const alive = B.filter(b => b.alive && b.model); if (!alive.length) return;
+    const k = alive.indexOf(watched()); G.spectate = alive[((k < 0 ? 0 : k + dir) % alive.length + alive.length) % alive.length].i; sfx.click();
+  }
   function updateCamera(dt) {
     if (G.state === 'pick' || !B.some(b => b.placed)) { const t = performance.now() / 1000 * .07; camera.position.set(Math.sin(t) * 46 * view.tall, 34 * view.tall, Math.cos(t) * 46 * view.tall); camera.lookAt(0, 0, 0); listener.x = listener.z = 0; cf.set(0, 0, 0); return; }
     const w = watched(); let fx_ = cf.x, fz = cf.z;
@@ -608,12 +662,12 @@ export async function create({ mount, audio, send, hooks }) {
   function fireSuper(a, d) { if (!canAct() || me.sup < 1) return; if (isHost) sim.queueSuper(me.i, { a, d }); else send({ t: 'su', to: hostId, a: r2(a), d: r2(d) }); }
   function fireOnce(a, d) { if (!canAct()) return; if (me.ammo < 1) { sfx.empty(); return; } if (isHost) sim.queueFire(me.i, { a, d }); else send({ t: 'fi', to: hostId, a: r2(a), d: r2(d) }); }
   const kb = createInput({ KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', Space: 'super' }, {
-    onDown: name => { audio.init(); if (name === 'super' && canAct() && me.sup >= 1) superAim = true; },
+    onDown: name => { audio.init(); if (name === 'super' && canAct() && me.sup >= 1) superAim = true; if (me && !me.alive && (name === 'left' || name === 'right')) cycleWatch(name === 'left' ? -1 : 1); },
     onUp: name => { if (name === 'super' && superAim) { superAim = false; fireSuper(input.a, input.d); } }, // hold SPACE to aim the super, let go to fire it
     onKey: e => {
       if (e.code === 'KeyM') audio.toggle();
-      else if (e.code === 'Escape') hooks.onExit?.();
-      else if (e.code === 'KeyR') { if (G.state === 'result') hooks.onRestart?.(); } // R sits next to WASD: only the result screen listens to it
+      else if (e.code === 'Escape') { if (!online || isHost) hooks.onExit?.(); else showMenu(!dom.pause.classList.contains('show')); } // a guest's Esc opens the menu: leaving is a button there
+      else if (e.code === 'KeyR') { if (G.state === 'result') { if (!online || isHost) hooks.onRestart?.(); else toggleRematch(); } } // R sits next to WASD: only the result screen listens to it
       else if (G.state === 'pick') { const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code); if (n >= 0) choose(n); else if (e.code === 'Enter') lockIn(); }
     },
   });
@@ -691,7 +745,7 @@ export async function create({ mount, audio, send, hooks }) {
 
   /* ============================================================ HUD, overlay, the pick and result screens */
   function feed(killer, victim) {
-    const d = document.createElement('div'); d.className = 'kf' + ((killer && killer.mine) || victim.mine ? ' me' : ''); d.innerHTML = `<b>${killer ? esc(killer.name) : '☣ Poison gas'}</b> &nbsp;☠&nbsp; <s>${esc(victim.name)}</s>`;
+    const d = document.createElement('div'); d.className = 'kf' + ((killer && killer.mine) || victim.mine ? ' me' : ''); d.innerHTML = `<b>${killer ? esc(killer.name) : esc(TX('gasKill'))}</b> &nbsp;☠&nbsp; <s>${esc(victim.name)}</s>`;
     dom.feed.prepend(d); while (dom.feed.children.length > 5) dom.feed.lastChild.remove(); later(5200, () => { d.style.opacity = 0; later(700, () => d.remove()); });
   }
   function showCount(text, color) { const c = dom.count; c.textContent = text; c.style.color = color; c.classList.remove('pop'); void c.offsetWidth; c.classList.add('pop'); }
@@ -699,6 +753,9 @@ export async function create({ mount, audio, send, hooks }) {
   const setText = (key, el, text) => { if (hudCache[key] !== text) { hudCache[key] = text; el.textContent = text; } };
   function updateHud(dt) {
     setText('alive', dom.alive, String(B.filter(b => b.alive).length)); const p = me; hurtFlash -= dt;
+    const fight = G.state === 'play' || G.state === 'end', last = G.gasStage >= GAS_R.length - 1 && !G.gasShrink; // the gas clock under the day's
+    setText('gast', dom.gast, !fight ? '' : G.gasShrink ? TX('gasClosing') : last ? TX('gasFinal') : TX('gasIn', { s: Math.max(0, Math.ceil(G.gasT)) }));
+    const hot = fight && (G.gasShrink || (!last && G.gasT <= 5)); if (hudCache.hot !== hot) { hudCache.hot = hot; dom.gast.classList.toggle('hot', hot); }
     if (!p) { dom.vign.className = 'vign'; return; }
     setText('cubes', dom.cubes, String(p.cubes)); setText('kills', dom.kills, String(p.kills));
     const hpw = clamp(p.hp / p.maxhp * 100, 0, 100).toFixed(1) + '%'; if (hudCache.hpw !== hpw) { hudCache.hpw = hpw; dom.hp.firstElementChild.style.width = hpw; } setText('hp', dom.hp.lastElementChild, Math.max(0, Math.ceil(p.hp)) + ' / ' + p.maxhp);
@@ -707,10 +764,11 @@ export async function create({ mount, audio, send, hooks }) {
     if (hudCache.sup !== st) {
       if (ready && hudCache.ready === false) sfx.ready(); hudCache.ready = ready; hudCache.sup = st;
       for (const el of [dom.sup, dom.supStick]) { el.style.setProperty('--p', pct + '%'); el.classList.toggle('ready', ready); }
-      dom.sup.firstElementChild.innerHTML = ready ? (superAim ? 'RELEASE<br>TO FIRE' : 'SUPER!<br><small>hold SPACE</small>') : `SUPER<br><small>${pct}%</small>`;
+      dom.sup.firstElementChild.innerHTML = ready ? TX(superAim ? 'supRelease' : 'supReady') : TX('supPct', { n: pct });
     }
     dom.vign.className = 'vign' + (p.alive && Math.hypot(p.x, p.z) > G.gasR ? ' gas' : '') + (hurtFlash > 0 ? ' hurt' : '');
-    const w = !p.alive && G.state !== 'result' ? watched() : null, spec = w ? `☠ RANK #${p.rank || '?'} · WATCHING ${w.name.toUpperCase()}` : ''; if (hudCache.spec !== spec) { hudCache.spec = spec; dom.spec.textContent = spec; dom.spec.hidden = !spec; }
+    const w = !p.alive && G.state !== 'result' ? watched() : null, spec = w ? TX('watching', { r: p.rank || '?', name: w.name.toUpperCase() }) + (touch ? '' : '   ' + TX('watchKeys')) : '';
+    if (hudCache.spec !== spec) { hudCache.spec = spec; dom.spec.textContent = spec; dom.spec.hidden = !spec; dom.specnav.hidden = !spec; }
     if (touch) { const dim = !canAct(); if (hudCache.dim !== dim) { hudCache.dim = dim; dom.fire.classList.toggle('dim', dim); dom.supStick.classList.toggle('dim', dim); } }
   }
   function project(x, y, z) { V.set(x, y, z).project(camera); return V.z > 1 ? null : { x: (V.x + 1) / 2 * ov.width, y: (1 - V.y) / 2 * ov.height }; }
@@ -721,19 +779,36 @@ export async function create({ mount, audio, send, hooks }) {
     for (const q of boxV) { if (q.dead || q.hp >= q.q.maxhp) continue; const s = project(q.q.x, 2.4, q.q.z); if (!s) continue; const w = 46 * k; g.fillStyle = '#000c'; rrect(g, s.x - w / 2 - 2 * k, s.y - 2 * k, w + 4 * k, 9 * k, 4 * k); g.fill(); g.fillStyle = '#4dffb0'; rrect(g, s.x - w / 2, s.y, w * clamp(q.hp / q.q.maxhp, 0, 1), 5 * k, 2.5 * k); g.fill(); }
     for (const b of B) {
       if (!b.alive || !b.model || (!b.mine && !b.seen)) continue; const s = project(b.x, 3.5, b.z); if (!s) continue; const w = 66 * k, h = 9 * k, x = s.x - w / 2, y = s.y;
-      g.font = `900 ${13 * k}px "Arial Black",Arial,sans-serif`; g.lineWidth = 4 * k; g.strokeStyle = '#000'; g.strokeText(b.name, s.x, y - 6 * k); g.fillStyle = b.mine ? '#5fe0ff' : b.human ? hex(b.shirt) : '#fff'; g.fillText(b.name, s.x, y - 6 * k);
+      g.font = `900 ${13 * k}px "Arial Black",Arial,${CJK},sans-serif`; g.lineWidth = 4 * k; g.strokeStyle = '#000'; g.strokeText(b.name, s.x, y - 6 * k); g.fillStyle = b.mine ? '#5fe0ff' : b.human ? hex(b.shirt) : '#fff'; g.fillText(b.name, s.x, y - 6 * k);
       g.fillStyle = '#000d'; rrect(g, x - 2 * k, y - 2 * k, w + 4 * k, h + 4 * k, 5 * k); g.fill();
       const f = clamp(b.hp / b.maxhp, 0, 1); g.fillStyle = b.mine ? '#4be04b' : '#ff4b3e'; if (f > 0) { rrect(g, x, y, Math.max(h, w * f), h, 3.5 * k); g.fill(); }
       g.fillStyle = 'rgba(255,255,255,.35)'; g.fillRect(x + 2 * k, y + k, Math.max(0, w * f - 4 * k), 2 * k);
-      g.font = `900 ${9 * k}px Arial,sans-serif`; g.lineWidth = 3 * k; g.strokeText(Math.ceil(b.hp), s.x, y + h - k); g.fillStyle = '#fff'; g.fillText(Math.ceil(b.hp), s.x, y + h - k);
-      if (b.cubes) { g.font = `900 ${12 * k}px Arial,sans-serif`; g.lineWidth = 4 * k; const t = '◆' + b.cubes; g.strokeText(t, x + w + 16 * k, y + h); g.fillStyle = '#4dffa0'; g.fillText(t, x + w + 16 * k, y + h); }
+      g.font = `900 ${9 * k}px Arial,${CJK},sans-serif`; g.lineWidth = 3 * k; g.strokeText(Math.ceil(b.hp), s.x, y + h - k); g.fillStyle = '#fff'; g.fillText(Math.ceil(b.hp), s.x, y + h - k);
+      if (b.cubes) { g.font = `900 ${12 * k}px Arial,${CJK},sans-serif`; g.lineWidth = 4 * k; const t = '◆' + b.cubes; g.strokeText(t, x + w + 16 * k, y + h); g.fillStyle = '#4dffa0'; g.fillText(t, x + w + 16 * k, y + h); }
       if (b.sup >= 1 && !b.mine) { g.fillStyle = '#ffd23f'; g.beginPath(); g.arc(x - 9 * k, y + h / 2, 5 * k, 0, 7); g.fill(); g.lineWidth = 2 * k; g.stroke(); }
       if (b.mine) for (let i = 0; i < 3; i++) { const aw = (w - 4 * k) / 3, fa = clamp(b.ammo - i, 0, 1); g.fillStyle = '#000c'; g.fillRect(x + i * (aw + 2 * k), y + h + 4 * k, aw, 5 * k); g.fillStyle = fa >= 1 ? '#ffb627' : '#a86a10'; g.fillRect(x + i * (aw + 2 * k) + k, y + h + 5 * k, (aw - 2 * k) * fa, 3 * k); }
     }
+    safeArrow(g, k);
     for (let i = dmgNums.length - 1; i >= 0; i--) {
       const d = dmgNums[i]; d.life -= dt; if (d.life <= 0) { dmgNums.splice(i, 1); continue; } d.y += dt * 2.4; d.x += d.vx * dt; const s = project(d.x, d.y, d.z); if (!s) continue;
-      const t = d.life / .9, sz = (d.big ? 24 : 17) * k * (1 + Math.max(0, t - .8) * 4); g.globalAlpha = Math.min(1, t * 3); g.font = `900 ${sz}px "Arial Black",Arial,sans-serif`; g.lineWidth = 5 * k; g.strokeStyle = '#000'; g.strokeText(d.text, s.x, s.y); g.fillStyle = d.color; g.fillText(d.text, s.x, s.y); g.globalAlpha = 1;
+      const t = d.life / .9, sz = (d.big ? 24 : 17) * k * (1 + Math.max(0, t - .8) * 4); g.globalAlpha = Math.min(1, t * 3); g.font = `900 ${sz}px "Arial Black",Arial,${CJK},sans-serif`; g.lineWidth = 5 * k; g.strokeStyle = '#000'; g.strokeText(d.text, s.x, s.y); g.fillStyle = d.color; g.fillText(d.text, s.x, s.y); g.globalAlpha = 1;
     }
+  }
+
+  /* out in the gas, an arrow shows the way back: on the edge of the screen (or over the safe ground, once that is in view), pointing
+     at the middle of the arena where every safe zone is, with how far it is to the edge of the gas */
+  function safeArrow(g, k) {
+    if (!me || !me.alive || (G.state !== 'play' && G.state !== 'end')) return; const dc = Math.hypot(me.x, me.z), out = dc - G.gasR; if (out <= 0 || dc < .5) return;
+    const s0 = project(me.x, 1, me.z), s1 = project(me.x - me.x / dc * 4, 1, me.z - me.z / dc * 4); if (!s0 || !s1) return;
+    let ux = s1.x - s0.x, uy = s1.y - s0.y; const l = Math.hypot(ux, uy) || 1; ux /= l; uy /= l;
+    const m = 64 * k, W = ov.width, H = ov.height, sx = clamp(s0.x, m, W - m), sy = clamp(s0.y, m, H - m);
+    let t = Math.min(ux > 0 ? (W - m - sx) / ux : ux < 0 ? (m - sx) / ux : 1e9, uy > 0 ? (H - m - sy) / uy : uy < 0 ? (m - sy) / uy : 1e9);
+    const tgt = project(me.x - me.x / dc * (out + 2), 1, me.z - me.z / dc * (out + 2)); if (tgt) t = Math.min(t, Math.max(70 * k, Math.hypot(tgt.x - s0.x, tgt.y - s0.y)));
+    const ax = sx + ux * t, ay = sy + uy * t, a = Math.atan2(uy, ux), p = 1 + .12 * Math.sin(G.time * 10), r = 22 * k * p;
+    g.save(); g.translate(ax, ay); g.rotate(a); g.beginPath(); g.moveTo(r, 0); g.lineTo(-r * .7, r * .75); g.lineTo(-r * .35, 0); g.lineTo(-r * .7, -r * .75); g.closePath();
+    g.lineWidth = 4 * k; g.strokeStyle = '#000'; g.stroke(); g.fillStyle = '#9dff3a'; g.fill(); g.restore();
+    const text = TX('safeDist', { d: Math.ceil(out) }), lx = ax - ux * 40 * k, ly = ay - uy * 40 * k + 5 * k;
+    g.font = `900 ${14 * k}px "Arial Black",Arial,${CJK},sans-serif`; g.lineWidth = 4 * k; g.strokeStyle = '#000'; g.strokeText(text, lx, ly); g.fillStyle = '#d6ff9d'; g.fillText(text, lx, ly);
   }
 
   /* ---- the pick screen: one card per brawler with its portrait, drawn once by a throwaway renderer */
@@ -742,40 +817,53 @@ export async function create({ mount, audio, send, hooks }) {
     const tmp = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true }); tmp.setSize(460, 240, false); tmp.toneMapping = THREE.ACESFilmicToneMapping;
     const sc2 = new THREE.Scene(); sc2.add(new THREE.HemisphereLight(0xffffff, 0x886644, 1.6)); const dl = new THREE.DirectionalLight(0xffffff, 2.8); dl.position.set(3, 6, 5); sc2.add(dl);
     const cam = new THREE.PerspectiveCamera(30, 460 / 240, .1, 50); cam.position.set(2.6, 3.2, 6.2); cam.lookAt(0, 1.35, 0);
-    const cols = ['#ff5a4d', '#4da3ff', '#ffc93f'], labels = ['Health', 'Range', 'Damage'];
     CLASSES.forEach((c, i) => {
       const m = makeModel(i, c.color); m.ring.visible = false; m.root.rotation.y = .5; sc2.add(m.root); tmp.render(sc2, cam); sc2.remove(m.root);
-      const el = document.createElement('div'); el.className = 'pcard';
-      el.innerHTML = `<canvas width="460" height="240"></canvas><h3 class="stroke">${c.name}</h3><div class="role">${c.role}</div><div class="atk">${esc(c.atk)}<br><span>${esc(c.sup)}</span></div>` + c.bars.map((v, k) => `<div class="stat"><b>${labels[k]}</b><i><u style="width:${v * 100}%;background:${cols[k]}"></u></i></div>`).join('');
+      const el = document.createElement('div'); el.className = 'pcard'; el.innerHTML = '<canvas width="460" height="240"></canvas><div class="words"></div>';
       el.querySelector('canvas').getContext('2d').drawImage(tmp.domElement, 0, 0); el.onclick = () => choose(i); dom.cards.appendChild(el);
       m.root.traverse(o => { if (o.material) o.material.dispose(); });
     });
     tmp.dispose(); tmp.forceContextLoss?.();
+  }
+  /* a card's words and its five bars (sim.js statBars: speed and reload are spread over the four brawlers) */
+  const STAT_COL = ['#ff5a4d', '#4da3ff', '#ffc93f', '#6bff8a', '#ff9df0'], STAT_KEY = ['st.hp', 'st.range', 'st.dmg', 'st.speed', 'st.reload'];
+  function cardWords() {
+    [...dom.cards.children].forEach((el, i) => { const c = CLASSES[i], id = c.id;
+      el.querySelector('.words').innerHTML = `<h3 class="stroke">${esc(TX('n.' + id))}</h3><div class="role">${esc(TX('role.' + id))}</div><div class="atk">${esc(TX('atk.' + id))}<br><span>${esc(TX('sup.' + id))}</span></div>`
+        + statBars(c).map((v, k) => `<div class="stat"><b>${esc(TX(STAT_KEY[k]))}</b><i><u style="width:${Math.round(v * 100)}%;background:${STAT_COL[k]}"></u></i></div>`).join(''); });
   }
   function sendPick() { if (!session) return; const slot = roster.find(s => s.pid === myId); if (!slot) return; if (isHost) { sim.pick(slot.i, sel, locked); netNow = true; } else send({ t: 'pk', to: hostId, c: sel, ok: locked ? 1 : 0 }); }
   function choose(i) { if (locked || G.state !== 'pick') return; sel = i; audio.init(); sfx.click(); try { localStorage.setItem(PICK_KEY, String(i)); } catch {} renderPick(); sendPick(); }
   function lockIn() { if (locked || G.state !== 'pick') return; locked = true; audio.init(); sfx.click(); renderPick(); sendPick(); }
   function renderPick() {
     [...dom.cards.children].forEach((el, k) => { el.classList.toggle('sel', k === sel); el.classList.toggle('off', locked && k !== sel); });
-    dom.lock.disabled = locked; dom.lock.textContent = locked ? 'LOCKED IN' : online ? 'LOCK IN' : 'PLAY';
+    dom.lock.disabled = locked; dom.lock.textContent = TX(locked ? 'lockedIn' : online ? 'lockIn' : 'play');
   }
   function updatePickStatus() {
     if (G.state !== 'pick' || !online) { setText('pstat', dom.pstat, ''); return; }
     const picks = isHost ? sim.picks : G.picks, humans = roster.filter(s => s.human), ok = humans.filter(s => picks[s.i] && picks[s.i].ok).length, t = isHost ? sim.pickT : G.pickT;
-    setText('pstat', dom.pstat, `${ok}/${humans.length} LOCKED IN` + (Number.isFinite(t) ? ` · STARTS IN ${Math.max(0, Math.ceil(t))}` : ''));
+    setText('pstat', dom.pstat, Number.isFinite(t) ? TX('pstatT', { ok, n: humans.length, s: Math.max(0, Math.ceil(t)) }) : TX('pstat', { ok, n: humans.length }));
   }
   dom.lock.addEventListener('click', lockIn);
 
-  function showResults() {
+  /* the result card. Solo and the host: play again or leave. A guest: ask for a rematch (the host sees how many did) or leave the room. */
+  let rematchOn = false, votes = [];
+  function renderResults() {
     const res = G.result || [], mine = me ? res.find(r => r[0] === me.i) : null, first = res[0] ? B[res[0][0]] : null, win = !!(mine && mine[1] === 1);
-    dom.endT.textContent = win ? 'VICTORY!' : mine ? 'DEFEATED' : 'SHOWDOWN OVER'; dom.endT.className = 'endT stroke ' + (win ? 'win' : 'lose');
-    dom.endR.textContent = (mine ? `RANK #${mine[1]} of ${res.length}` : '') + (first && !win ? `${mine ? ' · ' : ''}${first.name.toUpperCase()} WINS` : '');
-    dom.table.innerHTML = '<tr><th>#</th><th></th><th>BRAWLER</th><th>⚔</th><th>◆</th><th>DAMAGE</th></tr>' + res.map(([i, rank, kills, cb, dealt]) => { const b = B[i]; if (!b) return ''; return `<tr class="${b.mine ? 'me' : ''}"><td>${rank}</td><td><span class="sw" style="background:${hex(b.shirt)}"></span></td><td>${esc(b.name)}${b.human ? '' : ' 🤖'} <small>${b.cls >= 0 ? CLASSES[b.cls].name : ''}</small></td><td>${kills}</td><td>${cb}</td><td>${dealt}</td></tr>`; }).join('');
+    dom.endT.textContent = TX(win ? 'victory' : mine ? 'defeated' : 'over'); dom.endT.className = 'endT stroke ' + (win ? 'win' : 'lose');
+    dom.endR.textContent = (mine ? TX('rankOf', { r: mine[1], n: res.length }) : '') + (first && !win ? `${mine ? ' · ' : ''}${TX('wins', { name: first.name.toUpperCase() })}` : '');
+    dom.table.innerHTML = `<tr><th>#</th><th></th><th>${esc(TX('thBrawler'))}</th><th>⚔</th><th>◆</th><th>${esc(TX('thDamage'))}</th></tr>` + res.map(([i, rank, kills, cb, dealt]) => { const b = B[i]; if (!b) return ''; return `<tr class="${b.mine ? 'me' : ''}"><td>${rank}</td><td><span class="sw" style="background:${hex(b.shirt)}"></span></td><td>${esc(b.name)}${b.human ? '' : ' 🤖'} <small>${b.cls >= 0 ? esc(TX('n.' + CLASSES[b.cls].id)) : ''}</small></td><td>${kills}</td><td>${cb}</td><td>${dealt}</td></tr>`; }).join('');
     const f = dom.foot; f.innerHTML = ''; const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.type = 'button'; b.textContent = label; b.onclick = fn; f.appendChild(b); }, key = k => touch ? '' : `  (${k})`;
-    if (!online) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('MENU' + key('ESC'), '', () => hooks.onExit?.()); }
-    else if (isHost) { btn('PLAY AGAIN' + key('R'), 'primary', () => hooks.onRestart?.()); btn('BACK TO LOBBY' + key('ESC'), '', () => hooks.onExit?.()); }
-    else f.textContent = 'WAITING FOR THE HOST TO PLAY AGAIN OR RETURN TO THE LOBBY…';
-    dom.end.hidden = false; (win ? sfx.win : sfx.lose)();
+    if (!online) { btn(TX('playAgain') + key('R'), 'primary', () => hooks.onRestart?.()); btn(TX('menuBtn') + key('ESC'), '', () => hooks.onExit?.()); }
+    else if (isHost) { btn(TX('playAgain') + key('R'), 'primary', () => hooks.onRestart?.()); btn(TX('toLobby') + key('ESC'), '', () => hooks.onExit?.()); }
+    else { btn(TX(rematchOn ? 'rematchOn' : 'rematch') + key('R'), rematchOn ? 'on' : 'primary', toggleRematch); btn(TX('leave'), '', () => hooks.onLeave?.()); const w = document.createElement('div'); w.className = 'wait'; w.textContent = TX('waitHost'); f.appendChild(w); }
+    renderVotes();
+  }
+  function renderVotes() { const n = online && isHost && G.state === 'result' ? votes.length : 0; dom.votes.hidden = !n; if (n) dom.votes.textContent = n === 1 ? TX('votes1') : TX('votes', { n }); }
+  function toggleRematch() { if (!online || isHost || G.state !== 'result') return; rematchOn = !rematchOn; sfx.click(); hooks.onRematch?.(rematchOn); renderResults(); if (dom.pause.classList.contains('show')) renderMenu(); }
+  function showResults() {
+    const res = G.result || [], mine = me ? res.find(r => r[0] === me.i) : null, win = !!(mine && mine[1] === 1);
+    renderResults(); dom.end.hidden = false; (win ? sfx.win : sfx.lose)();
     if (win) for (let k = 0; k < 5; k++) later(k * 350, () => { const a = R() * 6.28; explosionFX(me.x + Math.cos(a) * 5, me.z + Math.sin(a) * 5, 2.5, [0xffd23f, 0xff4fd8, 0x55c8ff][k % 3]); });
   }
   /* the match's stages, as the screen follows them: the host reads them off its simulation, a client off the snapshots */
@@ -788,11 +876,12 @@ export async function create({ mount, audio, send, hooks }) {
     if (st === 'result') showResults();
   }
 
-  /* ☰: a card with what M, R and Esc do on a keyboard; the round keeps running underneath */
+  /* ☰ (and a guest's Esc): a card with what M, R and Esc do on a keyboard, the language, and a guest's way out; the round keeps running underneath */
   function renderMenu() {
     const f = dom.pauseBtns; f.innerHTML = ''; const btn = (label, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls; b.type = 'button'; b.textContent = label; b.onclick = fn; f.appendChild(b); };
-    btn('RESUME', 'primary', () => showMenu(false)); btn(audio.muted ? 'SOUND: OFF' : 'SOUND: ON', '', () => { audio.toggle(); renderMenu(); });
-    if (!online || isHost) { btn(!online ? 'RESTART' : 'PLAY AGAIN', '', () => { showMenu(false); hooks.onRestart?.(); }); btn(!online ? 'QUIT TO MENU' : 'BACK TO LOBBY', '', () => { showMenu(false); hooks.onExit?.(); }); }
+    btn(TX('resume'), 'primary', () => showMenu(false)); btn(TX(audio.muted ? 'soundOff' : 'soundOn'), '', () => { audio.toggle(); renderMenu(); }); btn(TX('lang'), '', () => nextLang());
+    if (!online || isHost) { btn(TX(!online ? 'restart' : 'playAgain'), '', () => { showMenu(false); hooks.onRestart?.(); }); btn(TX(!online ? 'quit' : 'toLobby'), '', () => { showMenu(false); hooks.onExit?.(); }); }
+    else { if (G.state === 'result') btn(TX(rematchOn ? 'rematchOn' : 'rematch'), '', toggleRematch); btn(TX('leave'), '', () => { showMenu(false); hooks.onLeave?.(); }); }
   }
   function showMenu(on) { dom.pause.classList.toggle('show', on); if (on) { tc.releaseAll(); renderMenu(); } }
   dom.menuBtn.addEventListener('click', () => { audio.init(); showMenu(!dom.pause.classList.contains('show')); }); dom.pause.addEventListener('click', e => { if (e.target === dom.pause) showMenu(false); });
@@ -822,6 +911,7 @@ export async function create({ mount, audio, send, hooks }) {
     updateAimIndicator(); updateParticles(dt); updateFX(dt); updateCamera(raw); updateSky(dt, cf);
     if (composer) composer.render(); else renderer.render(scene, camera);
     drawOverlay(dt); if (G.state !== 'pick') updateHud(raw);
+    sfx.music(G.state === 'play' || G.state === 'end', G.gasStage, B.reduce((n, b) => n + (b.alive ? 1 : 0), 0));
   });
 
   /* ============================================================ session API */
@@ -830,16 +920,16 @@ export async function create({ mount, audio, send, hooks }) {
     clearMatch(); map = makeMap(s.seed >>> 0); buildWorld(); roster = buildRoster(s); B = roster.map(makeViewBrawler); me = B.find(b => b.mine) || null;
     sim = isHost ? createSim({ map, roster, opts: s.opts || {}, online }) : null;
     guard = createSnapGuard(s.seed >>> 0); seq = 0; outEvents = []; netAcc = 0; netNow = true; acc = 0; simAt = performance.now(); predReset(0, 0); pred.seq = 0; pred.last = null; pred.since = 1; pred.lag = .08;
-    Object.assign(G, { state: null, time: 0, gasR: GAS_R[0], gasTo: GAS_R[0], gasStage: 0, slow: 1, picks: [], pickT: Infinity, result: null, spectate: -1 }); for (const k of Object.keys(hudCache)) delete hudCache[k];
+    Object.assign(G, { state: null, time: 0, gasR: GAS_R[0], gasTo: GAS_R[0], gasStage: 0, gasT: 0, gasShrink: false, slow: 1, picks: [], pickT: Infinity, result: null, spectate: -1 }); for (const k of Object.keys(hudCache)) delete hudCache[k];
     locked = false; input.mx = input.mz = 0; input.fire = false; mouse.down = false; dom.count.textContent = ''; dom.banner.classList.remove('on'); dom.spec.hidden = true;
-    dom.keys.innerHTML = touch ? '' : '<kbd>WASD</kbd> move <kbd>MOUSE</kbd> aim <kbd>CLICK</kbd> shoot <kbd>SPACE</kbd> hold to aim the super, let go to fire <kbd>M</kbd> sound' + (!online || isHost ? ' <kbd>ESC</kbd> ' + (online ? 'lobby' : 'menu') : '');
+    rematchOn = false; votes = []; dom.votes.hidden = true; dom.specnav.hidden = true; keysLine();
     setState('pick'); sendPick(); showMenu(false); audio.init(); kb.attach(); if (touch) tc.attach(); addEventListener('blur', onBlur); fit(); loop.start(); if (online && isHost) ticker.start(); else ticker.stop();
   }
   function stop() {
-    session = null; kb.detach(); tc.detach(); removeEventListener('blur', onBlur); ticker.stop(); loop.stop(); showMenu(false); clearMatch(); sim = null; dom.end.hidden = true;
+    session = null; sfx.music(false, 0, 99); kb.detach(); tc.detach(); removeEventListener('blur', onBlur); ticker.stop(); loop.stop(); showMenu(false); clearMatch(); sim = null; dom.end.hidden = true;
   }
   function destroy() {
-    stop(); ticker.dispose(); sfx.dispose(); ro?.disconnect(); removeEventListener('resize', fit);
+    stop(); offLang(); ticker.dispose(); sfx.dispose(); ro?.disconnect(); removeEventListener('resize', fit);
     const seen = new Set(); scene.traverse(o => { for (const r of [o.geometry, ...[].concat(o.material || [])]) if (r && !seen.has(r)) { seen.add(r); r.dispose(); } });
     for (const r of [...Object.values(geoCache), postMat, bulletGeo, bombGeo, bombMat, cubeGeo, cubeMat, markGeo, sandTex, crateTex, boxTex, boxEmis]) r.dispose();
     composer?.dispose?.(); renderer.dispose(); renderer.forceContextLoss?.(); root.remove(); mount.innerHTML = ''; unloadCss();
@@ -857,8 +947,19 @@ export async function create({ mount, audio, send, hooks }) {
       case 'su': sim.queueSuper(slot.i, cleanShot(msg)); break;
     }
   }
+  function rematchVotes(ids) { votes = Array.isArray(ids) ? ids : []; renderVotes(); }
+  /* words: every `data-t`, the cards, the keyboard line and whatever card is up, again whenever the language changes */
+  function keysLine() { dom.keys.innerHTML = touch ? '' : TX('keys', { esc: TX(online && isHost ? 'kLobby' : 'kMenu') }); }
+  function words() {
+    for (const el of root.querySelectorAll('[data-t]')) el.textContent = TX(el.dataset.t);
+    cardWords(); keysLine(); clockText = ''; for (const k of Object.keys(hudCache)) if (k !== 'ready') delete hudCache[k];
+    if (session) { renderPick(); updatePickStatus(); if (G.state === 'result') renderResults(); }
+    if (dom.pause.classList.contains('show')) renderMenu();
+  }
+  words(); const offLang = onLang(words);
+  dom.specnav.addEventListener('click', e => { const b = e.target.closest('button'); if (b) cycleWatch(b.hasAttribute('data-sprev') ? -1 : 1); });
   const debug = { G, get B() { return B; }, get me() { return me; }, get sim() { return sim; }, get session() { return session; }, get map() { return map; }, input, pred, view, packSnapshot, applySnapshot, loop,
-    touch: { on: touch, move: moveS, fire: fireS, sup: supS, showMenu }, choose, lockIn };
+    touch: { on: touch, move: moveS, fire: fireS, sup: supS, showMenu }, choose, lockIn, cycleWatch, words };
   window.__showdown = debug;
-  return { start, stop, destroy, onNetMessage, playerLeft, debug };
+  return { start, stop, destroy, onNetMessage, playerLeft, rematchVotes, debug };
 }
